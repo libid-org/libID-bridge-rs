@@ -142,15 +142,19 @@ request, and there is no request-logging middleware. **Any proxy in front of
 this server must redact the callback path's query string from its access
 logs** — that half of the contract is the operator's.
 
-The artifact comes from `CALLBACK_ARTIFACT_PATH`, or from the binary when that
-is unset. Both go through the same validation and the same composition; where
-the bytes came from changes what is logged and nothing else.
+The artifact is **retrieved from the Distribution**: `{CCDP_ORIGIN}/ccdp/callback.html`,
+once before the listener binds and then every five minutes, conditionally on the
+`ETag` it came with. A refresh that returns `304`, fails to reach the
+Distribution, or returns something this bridge will not serve leaves the document
+already being served as it is; only a valid replacement replaces it, and the
+document and the policy naming its hashes are published as one value. Redirects
+are refused, and the request carries no cookie, credential, query, or anything
+derived from a callback request.
 
-The compiled-in one is not a working Callback: it clears the OAuth return,
-renders fixed text and completes no ceremony, and the process warns on every
-start while it is serving. **Set `CALLBACK_ARTIFACT_PATH` to run real
-ceremonies.** The bridge does not fetch the artifact; obtaining it from the
-Distribution is the deployment's job.
+**A deployment that cannot retrieve its artifact does not start.** There is no
+fallback document and no file override. A development stack serves its own
+Distribution over HTTP on `localhost` or `127.0.0.1`, the one plaintext
+exception the origin rules make.
 
 ## What the operator has to supply
 
@@ -199,7 +203,6 @@ control (`bridge.toml` is ignored by git).
 | `public_origin` | `PUBLIC_ORIGIN` | *(required)* | The origin this bridge is reached at: the one every OAuth App registers `/auth/callback` under. The token exchange sends that URL as its redirect URI. HTTPS, or HTTP on `localhost` or `127.0.0.1`; folded to canonical form. Listed in `allowed_app_origins`, it also admits a same-origin read of the configuration. |
 | `allowed_app_origins` | `ALLOWED_APP_ORIGINS`, comma-separated | *(required)* | Application origins. Exact origins, no patterns; HTTPS, or HTTP on `localhost` or `127.0.0.1`. Each must already be canonical — a trailing slash, an uppercase host or a default port is refused with the canonical spelling named, not folded — and a duplicate is refused. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once. It is the one admission rule: the configuration route, the token route and its preflight all admit exactly one `Origin` from it, and the callback document is told the same set. |
 | `ccdp_origin` | `CCDP_ORIGIN` | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/callback.html` and everything the browser runs after it, HTTPS, or HTTP on `localhost` or `127.0.0.1`. Published in the configuration and inserted into the callback document. Omitting it selects the canonical libID Distribution. |
-| `callback_artifact_path` | `CALLBACK_ARTIFACT_PATH` | *(empty)* | A `callback.html` obtained from the CCDP Distribution, served instead of the compiled-in floor. Read once at startup and held to the same shape either way. **Unset means the floor, which completes no ceremony** — set this to run real ceremonies. |
 | `notary_wire_port` | `NOTARY_WIRE_PORT` | `7047` | The port of the notary's MPC-TLS wire listener. The notary itself is named by each token request's `notaryAddress`; this bridge dials that host on this port. A private or internal address is refused; loopback is not. |
 | `platforms` | — | *(required)* | The enabled platforms, as `[[platforms]]` tables: `id`, `client_id`, `versions`, and for `github` its `client_secret`. File only. |
 | — | `GH_OAUTH_CLIENT_SECRET` | *(none)* | GitHub OAuth App client secret, overriding the `github` table's `client_secret`. Refused when no platform is `github`. |

@@ -10,130 +10,31 @@ use axum::{
         StatusCode,
     },
 };
-use clap::Parser;
 use http_body_util::BodyExt;
 use libid_server_rs::{
-    build_state,
-    config::Config,
+    fixtures,
     routes,
     state::AppState,
 };
 use tower::ServiceExt;
 
-const APP_ORIGIN: &str = "http://localhost:3000";
+const APP_ORIGIN: &str = "https://app.example";
 
-/// The origin of a Distribution on loopback serving the fixture artifact,
-/// started once for this binary. It is the deployment's CCDP origin, which
-/// every gated route admits and the callback document names.
-/// Served on a runtime of its own: `#[tokio::test]` drops each test's runtime
-/// when the test returns.
-///
-/// A copy of the fixture the crate's own tests use (`src/artifact/upstream.rs`):
-/// an integration test cannot see a `#[cfg(test)]` item.
+/// The shared Distribution's origin: the deployment's CCDP origin, which every
+/// gated route admits and the callback document names.
 fn ccdp_origin() -> &'static str {
-    static SHARED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    static RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> =
-        std::sync::LazyLock::new(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("a runtime for the shared fixture")
-        });
-    SHARED.get_or_init(|| {
-        const ARTIFACT: &str = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/callback.html"
-        ));
-        let router = axum::Router::new().route(
-            "/ccdp/callback.html",
-            axum::routing::get(|| async {
-                (
-                    [
-                        (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
-                        (axum::http::header::CACHE_CONTROL, "no-cache"),
-                        (axum::http::header::ETAG, "W/\"the-artifact\""),
-                    ],
-                    ARTIFACT,
-                )
-            }),
-        );
-        let (bound, address) = std::sync::mpsc::channel();
-        RUNTIME.spawn(async move {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("a loopback port for the fixture Distribution");
-            let _ =
-                bound.send(listener.local_addr().expect("the Distribution's address"));
-            let _ = axum::serve(listener, router).await;
-        });
-        format!(
-            "http://{}",
-            address.recv().expect("the fixture Distribution bound")
-        )
-    })
+    fixtures::distribution().origin()
 }
 
-/// The fixture's public origin: where this bridge is reached.
-const BRIDGE_ORIGIN: &str = "https://bridge.example";
-
-/// A loopback port nothing listens on, bound once and released: a session a
-/// test does start fails at the dial instead of reaching a notary on this
-/// machine.
-fn dead_port() -> &'static str {
-    static PORT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    PORT.get_or_init(|| {
-        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        free.local_addr().unwrap().port().to_string()
-    })
-}
-
-/// A deployment, built the way the binary builds one, through `build_state`.
+/// A deployment admitting two applications, with `overrides` replacing any
+/// flag they name.
 async fn deployment(overrides: &[&str]) -> Arc<AppState> {
-    // Every flag that reads an environment variable is listed, so the process
-    // environment reaches nothing. `--platforms` is this fixture's own: the
-    // JSON records go to `Config::platforms`, which the binary fills from the
-    // configuration file.
-    let mut flags: Vec<(&str, &str)> = vec![
-        ("--host", "127.0.0.1"),
-        ("--port", "8722"),
-        ("--public-origin", BRIDGE_ORIGIN),
-        (
-            "--allowed-app-origins",
-            "http://localhost:3000,https://wallet.example",
-        ),
-        ("--ccdp-origin", ccdp_origin()),
-        ("--notary-wire-port", dead_port()),
-        (
-            "--platforms",
-            r#"[{"id":"github","client_id":"test-client-id","versions":[1]}]"#,
-        ),
-        ("--gh-oauth-client-secret", "test-client-secret"),
+    let mut args = vec![
+        "--allowed-app-origins",
+        "https://app.example,https://wallet.example",
     ];
-    for pair in overrides.chunks(2) {
-        let [flag, value] = pair else {
-            panic!("test flags come in pairs, got {pair:?}")
-        };
-        match flags.iter_mut().find(|(f, _)| f == flag) {
-            Some(slot) => slot.1 = value,
-            None => flags.push((flag, value)),
-        }
-    }
-    let platforms = flags
-        .iter()
-        .position(|(f, _)| *f == "--platforms")
-        .map(|i| flags.remove(i).1)
-        .expect("the fixture lists --platforms");
-    let mut argv = vec!["libid-server-rs"];
-    for (flag, value) in &flags {
-        argv.push(flag);
-        argv.push(value);
-    }
-    let mut cfg = Config::parse_from(argv);
-    cfg.platforms =
-        serde_json::from_str(platforms).expect("the fixture's platform records");
-    build_state(&cfg)
-        .await
-        .expect("a deployment this suite can serve")
+    args.extend_from_slice(overrides);
+    fixtures::deployment(&args).await
 }
 
 /// The default deployment: GitHub enabled, the full exchange ceiling free.
@@ -353,7 +254,7 @@ async fn the_token_preflight_admits_exactly_what_the_handler_does() {
     }
 
     // Everything else gets no allow-origin header.
-    for other in [BRIDGE_ORIGIN, "https://evil.example"] {
+    for other in [fixtures::PUBLIC_ORIGIN, "https://evil.example"] {
         let resp = preflight(other).await;
         assert!(
             resp.headers().get("access-control-allow-origin").is_none(),
@@ -366,19 +267,19 @@ async fn the_token_preflight_admits_exactly_what_the_handler_does() {
 /// an application origin, like any other.
 #[tokio::test]
 async fn the_bridges_own_origin_is_admitted_only_when_listed() {
-    let resp = post_token(Some(BRIDGE_ORIGIN), valid_body()).await;
+    let resp = post_token(Some(fixtures::PUBLIC_ORIGIN), valid_body()).await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN, "unlisted");
 
     let listed = deployment(&[
         "--allowed-app-origins",
-        "http://localhost:3000,https://bridge.example",
+        "https://app.example,https://bridge.example",
     ])
     .await;
     let resp = app(listed)
         .oneshot(
             Request::post("/api/v1/ceremony/github-token")
                 .header("content-type", "application/json")
-                .header("origin", BRIDGE_ORIGIN)
+                .header("origin", fixtures::PUBLIC_ORIGIN)
                 .body(Body::from(token_body(CODE, "tooshort")))
                 .unwrap(),
         )
@@ -445,9 +346,9 @@ async fn config_refuses_an_absent_or_unlisted_origin() {
         // A browser sends this for an opaque origin.
         Some("null"),
         // Near misses. A browser sends none of these for an admitted page.
-        Some("http://LOCALHOST:3000"),
-        Some("http://localhost:3000/"),
-        Some("http://localhost:3001"),
+        Some("https://APP.example"),
+        Some("https://app.example/"),
+        Some("https://app.example:8443"),
     ] {
         let resp = get_config(origin, "").await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{origin:?}");
@@ -599,11 +500,11 @@ async fn config_carries_no_secret_and_no_admitted_origin() {
     keys.sort_unstable();
     assert_eq!(keys, ["ccdpOrigin", "platforms"]);
     assert_eq!(body["ccdpOrigin"], ccdp_origin());
-    assert_eq!(body["platforms"]["github"]["clientId"], "test-client-id");
+    assert_eq!(body["platforms"]["github"]["clientId"], fixtures::CLIENT_ID);
     assert_eq!(body["platforms"]["github"]["ceremonyVersions"][0], 1);
 
     let raw = body.to_string();
-    assert!(!raw.contains("test-client-secret"));
+    assert!(!raw.contains(fixtures::CLIENT_SECRET));
     assert!(!raw.contains(APP_ORIGIN));
     assert!(
         !raw.contains("circuitUrl"),
@@ -631,7 +532,7 @@ async fn config_refuses_a_query_but_reads_the_origin_first() {
 async fn the_token_route_is_absent_when_github_is_not_enabled() {
     let state = deployment(&[
         "--platforms",
-        r#"[{"id":"x","client_id":"test-client-id","versions":[1]}]"#,
+        r#"[{"id":"x","client_id":"abc","versions":[1]}]"#,
         "--gh-oauth-client-secret",
         "",
     ])
@@ -750,7 +651,7 @@ async fn the_callback_document_carries_the_exact_response_policy() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let html = std::str::from_utf8(&body).unwrap();
     assert!(html.contains("<main id=\"libid-root\"></main>"));
-    assert!(!html.contains("test-client-secret"));
+    assert!(!html.contains(fixtures::CLIENT_SECRET));
 
     // One module script, and one hash naming it.
     assert_eq!(html.matches("<script type=\"module\">").count(), 1);
@@ -928,7 +829,7 @@ async fn github_token_admits_every_allowed_origin_and_nothing_else() {
     }
 
     for origins in [
-        vec![BRIDGE_ORIGIN],
+        vec![fixtures::PUBLIC_ORIGIN],
         vec!["https://evil.example"],
         vec!["null"],
         vec!["not a url"],

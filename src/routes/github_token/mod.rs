@@ -32,6 +32,7 @@ use serde::{
     Serialize,
 };
 
+use super::ON_EVERY_RESPONSE;
 use crate::{
     error::Error,
     state::GithubExchange,
@@ -177,10 +178,7 @@ impl IntoResponse for TokenError {
     fn into_response(self) -> Response {
         (
             self.status,
-            [
-                (header::CACHE_CONTROL, "no-store"),
-                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-            ],
+            ON_EVERY_RESPONSE,
             Json(serde_json::json!({ "message": self.message })),
         )
             .into_response()
@@ -275,10 +273,7 @@ pub(crate) async fn github_token(
 
     Ok((
         StatusCode::OK,
-        [
-            (header::CACHE_CONTROL, "no-store"),
-            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-        ],
+        ON_EVERY_RESPONSE,
         Json(TokenResponseBody {
             access_token: response.access_token,
             token_attestation: AttestationBody {

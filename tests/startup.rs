@@ -14,7 +14,10 @@ use std::{
     },
 };
 
-use libid_server_rs::fixtures;
+use libid_server_rs::fixtures::{
+    self,
+    Distribution,
+};
 
 /// A configuration file for the binary, pointed at the shared Distribution
 /// and a wire port nothing listens on.
@@ -33,7 +36,7 @@ fn config_file(platforms: &str) -> std::path::PathBuf {
              ccdp_origin = \"{}\"\n{platforms}",
             fixtures::dead_port(),
             fixtures::PUBLIC_ORIGIN,
-            fixtures::distribution().origin(),
+            Distribution::shared().origin(),
         ),
     )
     .expect("a scratch configuration file");

@@ -30,9 +30,6 @@ allowed_app_origins = ["https://app.example", "https://wallet.example"]
 # Distribution.
 ccdp_origin = "https://lib.id"
 
-# A callback.html obtained from the CCDP Distribution, served instead of the
-# compiled-in one.
-# callback_artifact_path = "/etc/libid/callback.html"
 
 # The enabled platforms: one table per platform, with its public client id and
 # the ceremony versions it advertises. The GitHub token exchange implements

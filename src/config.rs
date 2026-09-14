@@ -58,12 +58,6 @@ pub struct Config {
     #[arg(long, env = "CCDP_ORIGIN", default_value = "https://lib.id")]
     pub ccdp_origin: String,
 
-    /// A Callback artifact to serve instead of the compiled-in floor: the path
-    /// to a `callback.html` obtained from the CCDP Distribution, read once at
-    /// startup. Empty serves the floor, which completes no ceremony.
-    #[arg(long, env = "CALLBACK_ARTIFACT_PATH", default_value = "")]
-    pub callback_artifact_path: String,
-
     /// The enabled platforms, from the configuration file's `[[platforms]]`
     /// tables: each names a platform, its public client id, the ceremony
     /// versions it advertises and, for `github`, its client secret.
@@ -101,8 +95,6 @@ pub struct FileConfig {
     pub allowed_app_origins: Option<Vec<String>>,
     /// [`Config::ccdp_origin`].
     pub ccdp_origin: Option<String>,
-    /// [`Config::callback_artifact_path`].
-    pub callback_artifact_path: Option<String>,
     /// [`Config::platforms`]:
     ///
     /// ```toml
@@ -170,11 +162,6 @@ impl Config {
         if defaulted(&matches, "ccdp_origin") {
             cfg.ccdp_origin = file.ccdp_origin.unwrap_or(cfg.ccdp_origin);
         }
-        if defaulted(&matches, "callback_artifact_path") {
-            cfg.callback_artifact_path = file
-                .callback_artifact_path
-                .unwrap_or(cfg.callback_artifact_path);
-        }
         if defaulted(&matches, "allowed_app_origins") {
             cfg.allowed_app_origins =
                 file.allowed_app_origins.unwrap_or(cfg.allowed_app_origins);
@@ -194,7 +181,6 @@ impl std::fmt::Debug for Config {
             .field("notary_wire_port", &self.notary_wire_port)
             .field("allowed_app_origins", &self.allowed_app_origins)
             .field("ccdp_origin", &self.ccdp_origin)
-            .field("callback_artifact_path", &self.callback_artifact_path)
             .field("platforms", &self.platforms)
             .field("gh_oauth_client_secret", &"<redacted>")
             .finish()

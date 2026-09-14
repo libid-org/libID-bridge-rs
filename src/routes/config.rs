@@ -25,6 +25,7 @@ use axum::{
 };
 use serde_json::json;
 
+use super::ON_EVERY_RESPONSE;
 use crate::state::AppState;
 
 /// What `Vary` names, on every response this route writes: `Origin` and
@@ -104,11 +105,9 @@ pub(crate) async fn config(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
     );
-    out.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    out.insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
+    for (name, value) in ON_EVERY_RESPONSE {
+        out.insert(name, value);
+    }
     // The exact origin that asked, never `*`; no credentials. A same-origin
     // read gets no allow-origin.
     if let Admission::Listed(origin) = admission {
@@ -123,11 +122,8 @@ pub(crate) async fn config(
 fn refuse(status: StatusCode, message: &str) -> Response {
     (
         status,
-        [
-            (header::VARY, VARY_ON),
-            (header::CACHE_CONTROL, "no-store"),
-            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-        ],
+        [(header::VARY, VARY_ON)],
+        ON_EVERY_RESPONSE,
         Json(json!({ "message": message })),
     )
         .into_response()

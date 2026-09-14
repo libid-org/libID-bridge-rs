@@ -5,6 +5,7 @@ use clap::{
     FromArgMatches,
     Parser,
 };
+use secrecy::SecretString;
 use serde::Deserialize;
 
 use crate::{
@@ -20,7 +21,7 @@ use crate::{
 /// Every flag has an environment variable of the same name. Precedence is
 /// command line, then environment, then the configuration file, then the
 /// default.
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 #[command(name = "libid-server-rs", version, about)]
 pub struct Config {
     /// Path to a TOML configuration file. Every setting below can be written
@@ -70,9 +71,14 @@ pub struct Config {
         long,
         env = "GH_OAUTH_CLIENT_SECRET",
         hide_env_values = true,
-        default_value = ""
+        value_parser = secret
     )]
-    pub gh_oauth_client_secret: String,
+    pub gh_oauth_client_secret: Option<SecretString>,
+}
+
+/// A flag or variable value as a secret.
+fn secret(spelling: &str) -> std::result::Result<SecretString, std::convert::Infallible> {
+    Ok(SecretString::from(spelling.to_owned()))
 }
 
 /// The configuration file.
@@ -171,24 +177,10 @@ impl Config {
     }
 }
 
-/// `Debug` redacts the client secret.
-impl std::fmt::Debug for Config {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Config")
-            .field("host", &self.host)
-            .field("port", &self.port)
-            .field("public_origin", &self.public_origin)
-            .field("notary_wire_port", &self.notary_wire_port)
-            .field("allowed_app_origins", &self.allowed_app_origins)
-            .field("ccdp_origin", &self.ccdp_origin)
-            .field("platforms", &self.platforms)
-            .field("gh_oauth_client_secret", &"<redacted>")
-            .finish()
-    }
-}
-
 #[cfg(test)]
 mod file_tests {
+    use secrecy::ExposeSecret;
+
     use super::*;
 
     /// Write a configuration file and resolve against it.
@@ -237,7 +229,12 @@ mod file_tests {
             .expect("the records the table describes");
         assert_eq!(platforms.len(), 1);
         assert_eq!(platforms[0].client_id(), "Iv1.0123456789abcdef");
-        assert_eq!(platforms[0].client_secret(), Some("ghs_from_the_file"));
+        assert_eq!(
+            platforms[0]
+                .client_secret()
+                .map(ExposeSecret::expose_secret),
+            Some("ghs_from_the_file")
+        );
     }
 
     /// A flag beats the file.
@@ -302,6 +299,6 @@ mod file_tests {
         .expect("readable");
         let printed = format!("{cfg:?}");
         assert!(!printed.contains("ghs_"), "{printed}");
-        assert!(printed.contains("<redacted>"), "{printed}");
+        assert!(printed.contains("REDACTED"), "{printed}");
     }
 }

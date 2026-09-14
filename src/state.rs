@@ -52,8 +52,7 @@ pub struct AppState {
     pub(crate) upstream: crate::artifact::upstream::Upstream,
     /// The effective admission set `allowedAppOrigins ∪ {ccdpOrigin}`: the one
     /// rule every gated route applies, and what the callback document is told.
-    /// Exact canonical strings, compared against what a browser sends.
-    pub(crate) allowed_origins: Arc<[String]>,
+    pub(crate) allowed_origins: Arc<[crate::origin::Origin]>,
     /// The public ceremony configuration, serialized once: the exact bytes
     /// every admitted caller receives.
     pub(crate) ceremony_config: bytes::Bytes,

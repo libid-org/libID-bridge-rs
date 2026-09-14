@@ -7,6 +7,7 @@
 use axum::http::header;
 use libid_ceremony::token_exchange::TokenRequest;
 use libid_transcript::ceremony;
+use secrecy::ExposeSecret;
 
 use crate::oauth::OAuthCredentials;
 
@@ -60,7 +61,7 @@ pub(super) fn token_request_body(
         .append_pair("code", &request.code)
         .append_pair("redirect_uri", redirect_uri)
         .append_pair("code_verifier", &request.code_verifier)
-        .append_pair(SECRET_FIELD, &creds.client_secret)
+        .append_pair(SECRET_FIELD, creds.client_secret.expose_secret())
         .finish()
 }
 
@@ -140,8 +141,8 @@ mod tests {
         }
         assert!(
             !revealed
-                .windows(credentials.client_secret.len())
-                .any(|w| w == credentials.client_secret.as_bytes()),
+                .windows(credentials.client_secret.expose_secret().len())
+                .any(|w| w == credentials.client_secret.expose_secret().as_bytes()),
             "the secret is nowhere in what the notary is shown"
         );
     }

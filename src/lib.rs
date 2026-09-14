@@ -22,6 +22,7 @@ pub mod error;
 #[doc(hidden)]
 pub mod fixtures;
 pub(crate) mod oauth;
+pub(crate) mod origin;
 pub mod routes;
 pub mod state;
 
@@ -31,9 +32,13 @@ use error::{
     Error,
     Result,
 };
+use origin::Origin;
+use secrecy::{
+    ExposeSecret,
+    SecretString,
+};
 use state::AppState;
 use tokio::sync::Semaphore;
-use url::Url;
 
 /// Build the shared [`AppState`] from the configuration. Everything that must
 /// be well-formed for a request to succeed is checked here, at startup, and
@@ -41,13 +46,13 @@ use url::Url;
 /// returns; it returns `Err` when it cannot.
 pub async fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
     let allowed_app_origins = allowed_app_origins(&cfg.allowed_app_origins)?;
-    let ccdp_origin = canonical_origin("CCDP_ORIGIN", &cfg.ccdp_origin)?;
+    let ccdp_origin = Origin::parse("CCDP_ORIGIN", &cfg.ccdp_origin)?;
     let public_origin = public_origin(&cfg.public_origin)?;
     // The effective set `allowedAppOrigins ∪ {ccdpOrigin}`: the one admission
     // rule of every gated route, and what the callback document is told. The
     // resolved CCDP origin joins once; an overridden `CCDP_ORIGIN` does not
     // keep `https://lib.id` admitted unless it is listed.
-    let allowed_origins: Arc<[String]> = {
+    let allowed_origins: Arc<[Origin]> = {
         let mut set = allowed_app_origins.clone();
         if !set.contains(&ccdp_origin) {
             set.push(ccdp_origin.clone());
@@ -58,20 +63,22 @@ pub async fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
     routes::github_token::force_token_endpoint();
 
     // The exchange is present exactly when a github platform is enabled. Its
-    // secret is `GH_OAUTH_CLIENT_SECRET` where set, else the table's.
+    // secret is `GH_OAUTH_CLIENT_SECRET` where set, else the table's; an empty
+    // value is unset.
+    let set = |secret: &SecretString| !secret.expose_secret().is_empty();
+    let overriding = cfg.gh_oauth_client_secret.as_ref().filter(|s| set(s));
     let github = match platforms.iter().find(|p| p.is_github()) {
         Some(profile) => {
-            let secret = match cfg.gh_oauth_client_secret.as_str() {
-                "" => profile.client_secret().unwrap_or_default().to_owned(),
-                overriding => overriding.to_owned(),
-            };
-            if secret.is_empty() {
+            let Some(secret) = overriding
+                .or_else(|| profile.client_secret().filter(|s| set(s)))
+                .cloned()
+            else {
                 return Err(Error::Config {
                     detail: "the platforms enable github; set client_secret in its \
                              [[platforms]] table or GH_OAUTH_CLIENT_SECRET"
                         .into(),
                 });
-            }
+            };
             Some(Arc::new(state::GithubExchange {
                 credentials: oauth::OAuthCredentials {
                     client_id: profile.client_id().to_owned(),
@@ -79,20 +86,11 @@ pub async fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
                 },
                 redirect_uri: format!("{public_origin}{}", routes::CALLBACK_PATH),
                 egress: routes::github_token::NotaryEgress::new(cfg.notary_wire_port),
-                admitted: allowed_origins
-                    .iter()
-                    .map(|origin| {
-                        axum::http::HeaderValue::from_str(origin).map_err(|e| {
-                            Error::Config {
-                                detail: format!("admitted origin {origin}: {e}"),
-                            }
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?,
+                admitted: allowed_origins.iter().map(Origin::header_value).collect(),
                 permits: Semaphore::new(state::MAX_CONCURRENT_EXCHANGES),
             }))
         }
-        None if cfg.gh_oauth_client_secret.is_empty() => None,
+        None if overriding.is_none() => None,
         None => {
             return Err(Error::Config {
                 detail: "GH_OAUTH_CLIENT_SECRET is set but no platform enables github"
@@ -101,7 +99,7 @@ pub async fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
         }
     };
 
-    let upstream = artifact::upstream::Upstream::new(&ccdp_origin)?;
+    let upstream = artifact::upstream::Upstream::new(&ccdp_origin);
     let published = artifact::Published::retrieved(&upstream, &allowed_origins).await?;
     let (callback_tx, callback) = tokio::sync::watch::channel(Arc::new(published));
 
@@ -143,8 +141,9 @@ pub async fn refresh_callback(state: Arc<AppState>) {
     artifact::upstream::refresh(state, artifact::upstream::Schedule::DEPLOYED).await
 }
 
-/// The application origins admitted to read the configuration.
-fn allowed_app_origins(list: &[String]) -> Result<Vec<String>> {
+/// The application origins admitted to read the configuration, each as
+/// written: one that is not already canonical is refused, not folded.
+fn allowed_app_origins(list: &[String]) -> Result<Vec<Origin>> {
     let mut out = Vec::new();
     for (i, spelling) in list
         .iter()
@@ -153,16 +152,7 @@ fn allowed_app_origins(list: &[String]) -> Result<Vec<String>> {
         .enumerate()
     {
         let field = format!("ALLOWED_APP_ORIGINS[{i}]");
-        let origin = canonical_origin(&field, spelling)?;
-        // A member that is not already canonical is refused with the canonical
-        // spelling named, not folded.
-        if origin != spelling {
-            return Err(Error::Config {
-                detail: format!(
-                    "{field} {spelling} is not canonical; write it as {origin}"
-                ),
-            });
-        }
+        let origin = Origin::listed(&field, spelling)?;
         // A duplicate is refused, not folded.
         if out.contains(&origin) {
             return Err(Error::Config {
@@ -183,7 +173,7 @@ fn allowed_app_origins(list: &[String]) -> Result<Vec<String>> {
 
 /// The origin this bridge is reached at, in canonical form. Empty is refused:
 /// the redirect URI derived from it must equal the OAuth Apps' registration.
-fn public_origin(spelling: &str) -> Result<String> {
+fn public_origin(spelling: &str) -> Result<Origin> {
     if spelling.trim().is_empty() {
         return Err(Error::Config {
             detail: "PUBLIC_ORIGIN is empty; set it to the origin this bridge is \
@@ -191,63 +181,7 @@ fn public_origin(spelling: &str) -> Result<String> {
                 .into(),
         });
     }
-    canonical_origin("PUBLIC_ORIGIN", spelling)
-}
-
-/// The canonical form of a configured origin: `http` or `https`, a host, no
-/// path, query, fragment or credentials; plaintext only on `localhost` or
-/// `127.0.0.1`; a host made only of the bytes an origin is made of.
-/// `Url::origin` lowercases the host and drops a default port.
-fn canonical_origin(field: &str, spelling: &str) -> Result<String> {
-    let url = Url::parse(spelling).map_err(|e| Error::Config {
-        detail: format!("{field} {spelling}: {e}"),
-    })?;
-    let refuse = |why: &str| Error::Config {
-        detail: format!(
-            "{field} {spelling} {why}; it must be a bare origin, \
-             as in https://id.example.com"
-        ),
-    };
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(refuse("is not http or https"));
-    }
-    if url.host().is_none() {
-        return Err(refuse("names no host"));
-    }
-    if !matches!(url.path(), "" | "/") {
-        return Err(refuse("carries a path"));
-    }
-    if url.query().is_some() || url.fragment().is_some() {
-        return Err(refuse("carries a query or fragment"));
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err(refuse("carries credentials"));
-    }
-    if url.scheme() == "http" && !is_plaintext_loopback(&url) {
-        return Err(refuse(
-            "is plaintext http on a host that is not localhost or 127.0.0.1",
-        ));
-    }
-    // `;`, quotes and other bytes a Content-Security-Policy reads as syntax
-    // are refused: the CCDP origin is spliced into `script-src` and
-    // `frame-src`.
-    let origin = url.origin().ascii_serialization();
-    if !origin
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b"-_.:[]/".contains(&b))
-    {
-        return Err(refuse(
-            "carries a byte an origin is not made of, which a \
-             Content-Security-Policy would read as syntax",
-        ));
-    }
-    Ok(origin)
-}
-
-/// Whether `url` is plaintext `http` on exactly `localhost` or `127.0.0.1`:
-/// the one case a canonical origin is not HTTPS.
-pub(crate) fn is_plaintext_loopback(url: &Url) -> bool {
-    url.scheme() == "http" && matches!(url.host_str(), Some("localhost" | "127.0.0.1"))
+    Origin::parse("PUBLIC_ORIGIN", spelling)
 }
 
 #[cfg(test)]
@@ -274,24 +208,6 @@ mod tests {
         let record: serde_json::Value =
             serde_json::from_slice(&state.ceremony_config).unwrap();
         assert_eq!(record["ccdpOrigin"], Distribution::shared().origin());
-    }
-
-    /// Plaintext `http` is admitted on exactly `localhost` and `127.0.0.1`,
-    /// and refused everywhere else.
-    #[test]
-    fn plaintext_is_admitted_for_loopback_and_refused_everywhere_else() {
-        for spelling in ["http://127.0.0.1:8722", "http://localhost:3000"] {
-            assert!(canonical_origin("T", spelling).is_ok(), "{spelling}");
-        }
-        for spelling in [
-            "http://[::1]:8722",
-            "http://127.0.0.2:8722",
-            "http://10.0.0.1",
-            "http://192.168.1.1:8722",
-            "http://app.example",
-        ] {
-            assert!(canonical_origin("T", spelling).is_err(), "{spelling}");
-        }
     }
 
     /// The redirect URI the exchange sends is the public origin, folded to its
@@ -337,10 +253,18 @@ mod tests {
             let github = state.github.as_ref().expect("github is enabled");
             assert_eq!(
                 github.admitted,
-                state.allowed_origins.to_vec(),
+                state
+                    .allowed_origins
+                    .iter()
+                    .map(Origin::header_value)
+                    .collect::<Vec<_>>(),
                 "the token route's set is the effective set"
             );
-            state.allowed_origins.to_vec()
+            state
+                .allowed_origins
+                .iter()
+                .map(|origin| origin.as_str().to_owned())
+                .collect()
         }
         let ccdp = Distribution::shared().origin().to_owned();
 
@@ -353,21 +277,6 @@ mod tests {
             origins(&["--allowed-app-origins", &listed]).await,
             ["https://app.example".to_owned(), ccdp]
         );
-    }
-
-    /// An underscore in a host is admitted; the bytes a Content-Security-Policy
-    /// reads as syntax are refused.
-    #[test]
-    fn an_underscore_in_a_host_is_an_origin_like_any_other() {
-        for spelling in [
-            "https://dev_box.example",
-            "https://app_staging.example:8443",
-        ] {
-            assert!(canonical_origin("T", spelling).is_ok(), "{spelling}");
-        }
-        for hostile in ["https://a;b.example", "https://a'b.example"] {
-            assert!(canonical_origin("T", hostile).is_err(), "{hostile}");
-        }
     }
 
     /// Each of these is refused at startup.
@@ -462,7 +371,13 @@ mod tests {
         ];
         let state = build_state(&Config::fixture(&in_the_table)).await.unwrap();
         assert_eq!(
-            state.github.as_ref().unwrap().credentials.client_secret,
+            state
+                .github
+                .as_ref()
+                .unwrap()
+                .credentials
+                .client_secret
+                .expose_secret(),
             "ghs_in_the_table"
         );
         let overridden = vec![
@@ -471,7 +386,13 @@ mod tests {
         ];
         let state = build_state(&Config::fixture(&overridden)).await.unwrap();
         assert_eq!(
-            state.github.as_ref().unwrap().credentials.client_secret,
+            state
+                .github
+                .as_ref()
+                .unwrap()
+                .credentials
+                .client_secret
+                .expose_secret(),
             "ghs_secret"
         );
 

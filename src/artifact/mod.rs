@@ -22,7 +22,10 @@ use scan::{
 };
 use upstream::Upstream;
 
-use crate::error::Error;
+use crate::{
+    error::Error,
+    origin::Origin,
+};
 
 #[cfg(test)]
 pub(crate) use crate::fixtures::ARTIFACT as FIXTURE;
@@ -31,10 +34,10 @@ pub(crate) use crate::fixtures::ARTIFACT as FIXTURE;
 pub(crate) struct DeploymentInputs<'a> {
     /// The CCDP Distribution this bridge selects: in the inserted list, and
     /// the one origin the policy admits a frame from.
-    pub(crate) ccdp_origin: &'a str,
+    pub(crate) ccdp_origin: &'a Origin,
     /// The effective admission set, which the Callback authenticates an
     /// application against. It contains the CCDP origin.
-    pub(crate) allowed_origins: &'a [String],
+    pub(crate) allowed_origins: &'a [Origin],
 }
 
 /// The finished document: the exact bytes, and the policy they are served
@@ -87,7 +90,7 @@ impl CallbackDocument {
             return Err(ArtifactError::SubstitutionMovedExecutableBytes);
         }
 
-        let csp = policy(&hashes, inputs.ccdp_origin);
+        let csp = policy(&hashes, inputs.ccdp_origin.as_str());
         let csp = HeaderValue::from_str(&csp)
             .map_err(|e| ArtifactError::Policy(format!("{csp:?}: {e}")))?;
         Ok(CallbackDocument {
@@ -117,7 +120,7 @@ impl Published {
     /// error, and the process does not start.
     pub(crate) async fn retrieved(
         upstream: &Upstream,
-        allowed_origins: &[String],
+        allowed_origins: &[Origin],
     ) -> Result<Published, Error> {
         let url = upstream.url();
         let published = upstream
@@ -205,17 +208,24 @@ fn json(value: &serde_json::Value) -> String {
 mod tests {
     use super::*;
 
-    /// The effective admission set: the application origins with the CCDP
-    /// origin joined.
-    fn origins() -> Vec<String> {
-        vec!["https://app.example".into(), "https://ccdp.example".into()]
+    fn origin(spelling: &str) -> Origin {
+        Origin::parse("T", spelling).unwrap()
     }
 
-    fn composed(html: &str, origins: &[String]) -> CallbackDocument {
+    /// The effective admission set: the application origins with the CCDP
+    /// origin joined.
+    fn origins() -> Vec<Origin> {
+        vec![
+            origin("https://app.example"),
+            origin("https://ccdp.example"),
+        ]
+    }
+
+    fn composed(html: &str, origins: &[Origin]) -> CallbackDocument {
         CallbackDocument::compose(
             html,
             &DeploymentInputs {
-                ccdp_origin: "https://ccdp.example",
+                ccdp_origin: &origin("https://ccdp.example"),
                 allowed_origins: origins,
             },
         )
@@ -272,7 +282,7 @@ mod tests {
         let one = composed(FIXTURE, &origins());
         let many = composed(
             FIXTURE,
-            &["https://a.example".into(), "https://b.example".into()],
+            &[origin("https://a.example"), origin("https://b.example")],
         );
         assert_ne!(text(&one), text(&many));
         let script_src = |d: &CallbackDocument| {
@@ -307,11 +317,9 @@ mod tests {
     /// An inserted value cannot end the script element that carries it.
     #[test]
     fn an_inserted_value_cannot_end_the_script_element() {
-        let hostile = vec!["https://a.example/</script><script>x".to_owned()];
-        let doc = composed(FIXTURE, &hostile);
-        let html = text(&doc);
-        assert_eq!(html.matches("<script").count(), 2, "slot and module only");
-        assert!(!html.contains("</script><script>x"));
+        let hostile = json(&serde_json::json!(["https://a.example/</script><script>x"]));
+        assert!(!hostile.contains("</script>"), "{hostile}");
+        assert!(!hostile.contains("<script"), "{hostile}");
     }
 
     /// A slot holding anything but the marker, or a marker occurring twice, is
@@ -323,7 +331,7 @@ mod tests {
             CallbackDocument::compose(
                 &filled,
                 &DeploymentInputs {
-                    ccdp_origin: "https://ccdp.example",
+                    ccdp_origin: &origin("https://ccdp.example"),
                     allowed_origins: &origins(),
                 },
             ),
@@ -338,7 +346,7 @@ mod tests {
             CallbackDocument::compose(
                 &twice,
                 &DeploymentInputs {
-                    ccdp_origin: "https://ccdp.example",
+                    ccdp_origin: &origin("https://ccdp.example"),
                     allowed_origins: &origins(),
                 },
             ),

@@ -2,6 +2,7 @@
 //! configuration projected from them.
 
 use bytes::Bytes;
+use secrecy::SecretString;
 use serde::Deserialize;
 use serde_json::{
     json,
@@ -42,7 +43,7 @@ const GITHUB_ONLY_VERSION: u16 = 1;
 
 /// One enabled platform, with the fields its ceremony takes. In the
 /// configuration file, one `[[platforms]]` table keyed by `id`.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "id", rename_all = "lowercase", deny_unknown_fields)]
 pub enum PlatformProfile {
     /// Google: the public client id and the ceremony versions advertised.
@@ -68,7 +69,7 @@ pub enum PlatformProfile {
         versions: Vec<u16>,
         /// The OAuth App's client secret; `GH_OAUTH_CLIENT_SECRET` overrides it.
         #[serde(default)]
-        client_secret: Option<String>,
+        client_secret: Option<SecretString>,
     },
 }
 
@@ -101,9 +102,9 @@ impl PlatformProfile {
     }
 
     /// The client secret the entry carries: GitHub's, when set.
-    pub fn client_secret(&self) -> Option<&str> {
+    pub fn client_secret(&self) -> Option<&SecretString> {
         match self {
-            Self::Github { client_secret, .. } => client_secret.as_deref(),
+            Self::Github { client_secret, .. } => client_secret.as_ref(),
             Self::Google { .. } | Self::X { .. } => None,
         }
     }
@@ -111,20 +112,6 @@ impl PlatformProfile {
     /// Whether this deployment enables the confidential GitHub exchange.
     pub fn is_github(&self) -> bool {
         self.id() == PlatformId::Github
-    }
-}
-
-/// `Debug` redacts the client secret.
-impl std::fmt::Debug for PlatformProfile {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut entry = f.debug_struct(self.id().as_str());
-        entry
-            .field("client_id", &self.client_id())
-            .field("versions", &self.versions());
-        if self.is_github() {
-            entry.field("client_secret", &self.client_secret().map(|_| "<redacted>"));
-        }
-        entry.finish()
     }
 }
 
@@ -178,7 +165,7 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>>
 /// The public ceremony configuration: what one deployment publishes.
 pub struct CeremonyConfig<'a> {
     /// The CCDP Distribution this deployment selects.
-    pub ccdp_origin: &'a str,
+    pub ccdp_origin: &'a crate::origin::Origin,
     /// The enabled platforms, checked.
     pub platforms: &'a [PlatformProfile],
 }
@@ -212,6 +199,8 @@ impl CeremonyConfig<'_> {
 
 #[cfg(test)]
 mod tests {
+    use secrecy::ExposeSecret;
+
     use super::*;
 
     const ONE: &str = r#"[{"id":"github","client_id":"Iv1.0","versions":[1]}]"#;
@@ -231,7 +220,7 @@ mod tests {
         assert_eq!(p.len(), 1);
         assert!(p[0].is_github());
         assert_eq!(p[0].versions(), [1]);
-        assert_eq!(p[0].client_secret(), None);
+        assert!(p[0].client_secret().is_none());
     }
 
     /// The github entry carries its secret; `Debug` does not print it.
@@ -241,10 +230,13 @@ mod tests {
             r#"[{"id":"github","client_id":"Iv1.0","versions":[1],"client_secret":"ghs_in_the_entry"}]"#,
         )
         .unwrap();
-        assert_eq!(p[0].client_secret(), Some("ghs_in_the_entry"));
+        assert_eq!(
+            p[0].client_secret().map(ExposeSecret::expose_secret),
+            Some("ghs_in_the_entry")
+        );
         let printed = format!("{:?}", p[0]);
         assert!(!printed.contains("ghs_"), "{printed}");
-        assert!(printed.contains("<redacted>"), "{printed}");
+        assert!(printed.contains("REDACTED"), "{printed}");
     }
 
     /// Each of these is refused at startup.

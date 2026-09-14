@@ -67,27 +67,41 @@ pub(crate) struct TokenRequestBody {
 }
 
 /// The notary's attestation of the exchange: the bytes it signed, and the
-/// signature over them, bounded separately (2 MiB and 65 bytes).
+/// signature over them, bounded separately (2 MiB and 65 bytes). Both are
+/// written as unpadded URL-safe base64.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct AttestationBody {
+struct AttestationBody<'a> {
     /// The attested record, byte for byte as the notary produced it.
-    attested_data: String,
+    #[serde(serialize_with = "url_safe_no_pad")]
+    attested_data: &'a [u8],
     /// EIP-191 over its keccak256 digest.
-    signature: String,
+    #[serde(serialize_with = "url_safe_no_pad")]
+    signature: &'a [u8],
 }
 
-/// What the browser gets back. `accessToken` is the bearer as GitHub spelled
-/// it; the other two are unpadded URL-safe base64.
+/// What the browser gets back: the session's result, borrowed. `accessToken`
+/// is the bearer as GitHub spelled it; the byte strings are written as
+/// unpadded URL-safe base64.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct TokenResponseBody {
+struct TokenResponseBody<'a> {
     /// The bearer, which the attestation commits to rather than discloses.
-    access_token: String,
+    access_token: &'a str,
     /// The notary's attestation of the session that produced it.
-    token_attestation: AttestationBody,
+    token_attestation: AttestationBody<'a>,
     /// What opens the attestation's committed bearer range.
-    bearer_opening: String,
+    #[serde(serialize_with = "url_safe_no_pad")]
+    bearer_opening: &'a [u8],
+}
+
+/// Unpadded URL-safe base64: the encoding of every byte string in the
+/// response.
+fn url_safe_no_pad<S: serde::Serializer>(
+    bytes: &&[u8],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&URL_SAFE_NO_PAD.encode(bytes))
 }
 
 /// A refusal: a status and a reason, never a partial result.
@@ -275,20 +289,15 @@ pub(crate) async fn github_token(
         StatusCode::OK,
         ON_EVERY_RESPONSE,
         Json(TokenResponseBody {
-            access_token: response.access_token,
+            access_token: &response.access_token,
             token_attestation: AttestationBody {
-                attested_data: b64(&response.token_attestation.attested_data),
-                signature: b64(&response.token_attestation.signature),
+                attested_data: &response.token_attestation.attested_data,
+                signature: &response.token_attestation.signature,
             },
-            bearer_opening: b64(&response.bearer_opening),
+            bearer_opening: &response.bearer_opening,
         }),
     )
         .into_response())
-}
-
-/// Unpadded URL-safe base64, for the byte strings of the response.
-fn b64(bytes: &[u8]) -> String {
-    URL_SAFE_NO_PAD.encode(bytes)
 }
 
 /// The host a notary origin names. HTTP is development-only on explicit
@@ -403,13 +412,15 @@ mod tests {
     /// contract's ceiling on the encoded body.
     #[test]
     fn the_largest_response_the_bounds_admit_fits_the_contract() {
+        let access_token = "t".repeat(MAX_ACCESS_TOKEN_BYTES);
+        let attested_data = vec![0xff; MAX_ATTESTED_DATA_BYTES];
         let body = TokenResponseBody {
-            access_token: "t".repeat(MAX_ACCESS_TOKEN_BYTES),
+            access_token: &access_token,
             token_attestation: AttestationBody {
-                attested_data: b64(&vec![0xff; MAX_ATTESTED_DATA_BYTES]),
-                signature: b64(&[0xff; SIGNATURE_LEN]),
+                attested_data: &attested_data,
+                signature: &[0xff; SIGNATURE_LEN],
             },
-            bearer_opening: b64(&[0xff; BEARER_OPENING_LEN]),
+            bearer_opening: &[0xff; BEARER_OPENING_LEN],
         };
         let encoded = serde_json::to_vec(&body).unwrap();
         assert!(

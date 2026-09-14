@@ -165,7 +165,7 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>>
 /// The public ceremony configuration: what one deployment publishes.
 pub struct CeremonyConfig<'a> {
     /// The CCDP Distribution this deployment selects.
-    pub ccdp_origin: &'a str,
+    pub ccdp_origin: &'a crate::origin::Origin,
     /// The enabled platforms, checked.
     pub platforms: &'a [PlatformProfile],
 }

@@ -61,7 +61,7 @@ fn admission(state: &AppState, headers: &HeaderMap) -> Option<Admission> {
             state
                 .allowed_origins
                 .iter()
-                .any(|a| a == value)
+                .any(|a| a.as_str() == value)
                 .then(|| Admission::Listed(origin.clone()))
         }
         crate::routes::Origins::Several => None,

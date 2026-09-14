@@ -44,7 +44,10 @@ use super::{
     DeploymentInputs,
     Published,
 };
-use crate::state::AppState;
+use crate::{
+    origin::Origin,
+    state::AppState,
+};
 
 /// The artifact's path under the CCDP origin.
 pub(crate) const ARTIFACT_PATH: &str = "/ccdp/callback.html";
@@ -151,7 +154,7 @@ enum Fetched {
 pub(crate) struct Upstream {
     /// The origin as configured: what `compose` inserts and what the policy
     /// admits a frame from.
-    origin: String,
+    origin: Origin,
     /// The host to dial and to name in SNI.
     host: String,
     /// The `Host` header, which carries the port only when it is not the
@@ -164,21 +167,12 @@ pub(crate) struct Upstream {
 }
 
 impl Upstream {
-    /// Parse a canonical origin into something dialable.
-    pub(crate) fn new(origin: &str) -> Result<Upstream, crate::error::Error> {
-        let refuse = |why: &str| crate::error::Error::Config {
-            detail: format!("CCDP_ORIGIN {origin} {why}"),
-        };
-        let url = url::Url::parse(origin).map_err(|e| refuse(&format!("{e}")))?;
+    /// A canonical origin as something dialable.
+    pub(crate) fn new(origin: &Origin) -> Upstream {
+        let url = url::Url::parse(origin.as_str()).expect("a canonical origin parses");
         // The scheme decides the transport and the default port.
-        let tls = match url.scheme() {
-            "https" => true,
-            "http" => false,
-            _ => return Err(refuse("is not http or https")),
-        };
-        let Some(spelling) = url.host_str() else {
-            return Err(refuse("names no host"));
-        };
+        let tls = url.scheme() == "https";
+        let spelling = url.host_str().expect("a canonical origin names a host");
         // A `Host` header carries an IPv6 literal in brackets; a socket
         // address and a TLS server name take it without.
         let host = match url.host() {
@@ -187,8 +181,8 @@ impl Upstream {
         };
         // `Url` drops a port that is its scheme's default, so `port()` is the
         // non-default port `Host` carries.
-        Ok(Upstream {
-            origin: origin.to_owned(),
+        Upstream {
+            origin: origin.clone(),
             host,
             authority: match url.port() {
                 Some(port) => format!("{spelling}:{port}"),
@@ -196,7 +190,7 @@ impl Upstream {
             },
             port: url.port().unwrap_or(if tls { 443 } else { 80 }),
             tls,
-        })
+        }
     }
 
     /// The URL this bridge retrieves, for a log line or a failure message.
@@ -209,7 +203,7 @@ impl Upstream {
     /// refresh loop both take this path.
     pub(crate) async fn retrieve(
         &self,
-        allowed_origins: &[String],
+        allowed_origins: &[Origin],
         etag: Option<&str>,
     ) -> Result<Option<Published>, FetchError> {
         match self.fetch(etag).await? {
@@ -428,9 +422,13 @@ mod tests {
         Reply,
     };
 
+    fn origin(spelling: &str) -> Origin {
+        Origin::parse("T", spelling).expect("an origin the tests dial")
+    }
+
     /// A Distribution as a deployment retrieves from it.
     fn upstream(distribution: &Distribution) -> Upstream {
-        Upstream::new(distribution.origin()).expect("a loopback origin parses")
+        Upstream::new(&origin(distribution.origin()))
     }
 
     /// An `https` origin that presents a certificate nothing trusts.
@@ -469,8 +467,8 @@ mod tests {
     }
 
     /// The origins a deployment admits.
-    fn origins() -> Vec<String> {
-        vec!["https://app.example".to_owned()]
+    fn origins() -> Vec<Origin> {
+        vec![origin("https://app.example")]
     }
 
     /// A deployment pointed at a fixture Distribution, built through
@@ -777,9 +775,9 @@ mod tests {
     /// refused, and the refusal names the certificate.
     #[tokio::test]
     async fn an_untrusted_certificate_is_refused_as_a_certificate() {
-        let origin = untrusted_tls_origin().await;
+        let untrusted = untrusted_tls_origin().await;
         let refusal = refused(
-            Upstream::new(&origin).unwrap(),
+            Upstream::new(&origin(&untrusted)),
             "an untrusted peer is not a Distribution",
         )
         .await;
@@ -788,24 +786,6 @@ mod tests {
             detail.contains("certificate") && detail.contains("UnknownIssuer"),
             "the refusal must name the certificate, and this one says: {detail}"
         );
-    }
-
-    /// An origin this cannot dial is refused at startup.
-    #[test]
-    fn an_origin_that_cannot_be_dialled_is_refused_at_startup() {
-        for spelling in [
-            "not an origin",
-            "https://",
-            "file:///etc/passwd",
-            // A special scheme with a known default port, which `Url` drops.
-            "ftp://dist.example",
-            "ws://dist.example",
-        ] {
-            assert!(
-                Upstream::new(spelling).is_err(),
-                "{spelling} must not parse into something dialable"
-            );
-        }
     }
 
     /// An encoded body is refused: the request admitted `identity` alone.
@@ -852,13 +832,13 @@ mod tests {
     /// `Host` carries the port only when it is not the scheme's default.
     #[test]
     fn the_host_header_omits_a_default_port() {
-        let authority = |origin| Upstream::new(origin).unwrap().authority;
+        let authority = |spelling| Upstream::new(&origin(spelling)).authority;
         assert_eq!(authority("https://lib.id"), "lib.id");
         assert_eq!(authority("https://lib.id:443"), "lib.id");
         assert_eq!(authority("https://lib.id:8443"), "lib.id:8443");
         assert_eq!(authority("http://127.0.0.1:8787"), "127.0.0.1:8787");
         // An IPv6 literal is bracketed in the header and bare for the socket.
-        let upstream = Upstream::new("http://[::1]:8787").unwrap();
+        let upstream = Upstream::new(&origin("https://[::1]:8787"));
         assert_eq!(upstream.authority, "[::1]:8787");
         assert_eq!(upstream.host, "::1");
     }

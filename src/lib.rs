@@ -38,10 +38,10 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
     let allowed_app_origins = allowed_app_origins(&cfg.allowed_app_origins)?;
     let ccdp_origin = canonical_origin("CCDP_ORIGIN", &cfg.ccdp_origin)?;
     let public_origin = public_origin(&cfg.public_origin)?;
-    // The effective set `allowedAppOrigins ∪ {ccdpOrigin}`, for the
-    // configuration route and the callback document. The resolved CCDP
-    // origin joins once; an overridden `CCDP_ORIGIN` does not keep
-    // `https://lib.id` admitted unless it is listed.
+    // The effective set `allowedAppOrigins ∪ {ccdpOrigin}`: the one admission
+    // rule of every gated route, and what the callback document is told. The
+    // resolved CCDP origin joins once; an overridden `CCDP_ORIGIN` does not
+    // keep `https://lib.id` admitted unless it is listed.
     let allowed_origins: Arc<[String]> = {
         let mut set = allowed_app_origins.clone();
         if !set.contains(&ccdp_origin) {
@@ -74,11 +74,16 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
                 },
                 redirect_uri: format!("{public_origin}{}", routes::CALLBACK_PATH),
                 egress: routes::github_token::NotaryEgress::new(cfg.notary_wire_port),
-                ccdp_origin: axum::http::HeaderValue::from_str(&ccdp_origin).map_err(
-                    |e| Error::Config {
-                        detail: format!("CCDP_ORIGIN {ccdp_origin}: {e}"),
-                    },
-                )?,
+                admitted: allowed_origins
+                    .iter()
+                    .map(|origin| {
+                        axum::http::HeaderValue::from_str(origin).map_err(|e| {
+                            Error::Config {
+                                detail: format!("admitted origin {origin}: {e}"),
+                            }
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
                 permits: Semaphore::new(state::MAX_CONCURRENT_EXCHANGES),
             }))
         }
@@ -415,11 +420,18 @@ mod tests {
 
     /// The effective set is `allowedAppOrigins ∪ {ccdpOrigin}`: the default
     /// joins, an override joins in its place, and an origin already listed is
-    /// not added twice.
+    /// not added twice. The token route holds the same set as header values.
     #[test]
     fn the_effective_admission_set_is_the_allowlist_plus_the_ccdp_origin() {
         let origins = |args: &[&str]| -> Vec<String> {
-            build_state(&config(args)).unwrap().allowed_origins.to_vec()
+            let state = build_state(&config(args)).unwrap();
+            let github = state.github.as_ref().expect("github is enabled");
+            assert_eq!(
+                github.admitted,
+                state.allowed_origins.to_vec(),
+                "the token route's set is the effective set"
+            );
+            state.allowed_origins.to_vec()
         };
 
         assert_eq!(

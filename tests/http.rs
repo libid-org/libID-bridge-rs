@@ -285,21 +285,23 @@ async fn the_token_preflight_admits_exactly_what_the_handler_does() {
             .unwrap()
     };
 
-    let resp = preflight(ORIGIN).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let h = resp.headers();
-    assert_eq!(h.get("access-control-allow-origin").unwrap(), ORIGIN);
-    assert_eq!(h.get("access-control-allow-methods").unwrap(), "POST");
-    assert_eq!(
-        h.get("access-control-allow-headers").unwrap(),
-        "content-type"
-    );
-    assert!(h.get("access-control-allow-credentials").is_none());
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    assert!(body.is_empty(), "a preflight carries no ceremony data");
+    for admitted in [ORIGIN, APP_ORIGIN, "https://wallet.example"] {
+        let resp = preflight(admitted).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{admitted}");
+        let h = resp.headers();
+        assert_eq!(h.get("access-control-allow-origin").unwrap(), admitted);
+        assert_eq!(h.get("access-control-allow-methods").unwrap(), "POST");
+        assert_eq!(
+            h.get("access-control-allow-headers").unwrap(),
+            "content-type"
+        );
+        assert!(h.get("access-control-allow-credentials").is_none());
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(body.is_empty(), "a preflight carries no ceremony data");
+    }
 
     // Everything else gets no allow-origin header.
-    for other in [APP_ORIGIN, "https://wallet.example", "https://evil.example"] {
+    for other in [BRIDGE_ORIGIN, "https://evil.example"] {
         let resp = preflight(other).await;
         assert!(
             resp.headers().get("access-control-allow-origin").is_none(),
@@ -308,11 +310,32 @@ async fn the_token_preflight_admits_exactly_what_the_handler_does() {
     }
 }
 
-/// This bridge's own public origin is not the CCDP origin, so it is refused.
+/// This bridge's own public origin is admitted exactly when it is listed as
+/// an application origin, like any other.
 #[tokio::test]
-async fn github_token_admits_the_ccdp_origin_and_not_the_bridges_own() {
+async fn the_bridges_own_origin_is_admitted_only_when_listed() {
     let resp = post_token(Some(BRIDGE_ORIGIN), valid_body()).await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN, "unlisted");
+
+    let listed = deployment(&[
+        "--allowed-app-origins",
+        "http://localhost:3000,https://bridge.example",
+    ]);
+    let resp = app(listed)
+        .oneshot(
+            Request::post("/api/v1/ceremony/github-token")
+                .header("content-type", "application/json")
+                .header("origin", BRIDGE_ORIGIN)
+                .body(Body::from(token_body(CODE, "tooshort")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "listed: admitted, then refused on the body"
+    );
 }
 
 // ─── the public ceremony configuration ───────────────────────────────────────
@@ -732,9 +755,10 @@ async fn github_token_refuses_a_body_without_a_notary_address() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-/// One valid `Origin`, exactly the configured CCDP origin, on every request.
+/// One valid `Origin`, in the effective set, on every request: the CCDP
+/// origin and every application origin are admitted, nothing else is.
 #[tokio::test]
-async fn github_token_admits_the_ccdp_origin_and_nothing_else() {
+async fn github_token_admits_every_allowed_origin_and_nothing_else() {
     // A body validation refuses, so admission is proved without a session.
     let body = r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"tooshort","notaryAddress":"https://127.0.0.1:7048"}"#;
     let post = |origins: Vec<&'static str>| async move {
@@ -750,16 +774,16 @@ async fn github_token_admits_the_ccdp_origin_and_nothing_else() {
             .status()
     };
 
-    assert_eq!(
-        post(vec![ORIGIN]).await,
-        StatusCode::BAD_REQUEST,
-        "the CCDP origin"
-    );
+    for admitted in [ORIGIN, APP_ORIGIN, "https://wallet.example"] {
+        assert_eq!(
+            post(vec![admitted]).await,
+            StatusCode::BAD_REQUEST,
+            "{admitted}: admitted, then refused on the body"
+        );
+    }
 
     for origins in [
-        // Admitted to read the configuration, and that grants nothing here.
-        vec![APP_ORIGIN],
-        vec!["https://wallet.example"],
+        vec![BRIDGE_ORIGIN],
         vec!["https://evil.example"],
         vec!["null"],
         vec!["not a url"],

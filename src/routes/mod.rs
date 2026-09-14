@@ -6,8 +6,10 @@
 //! - `OPTIONS`, `POST /api/v1/ceremony/github-token` (only when GitHub is enabled)
 //!
 //! Everything the browser runs is served by the CCDP Distribution at the
-//! configured `ccdpOrigin`. CORS is answered in two places: the configuration
-//! route echoes an admitted origin itself, and the token route carries a layer
+//! configured `ccdpOrigin`. One admission rule gates every route that has one:
+//! exactly one `Origin`, in the effective set `allowedAppOrigins ∪
+//! {ccdpOrigin}`. CORS is answered in two places: the configuration route
+//! echoes the admitted origin itself, and the token route carries a layer
 //! answering the preflight for the admitted origins (`POST`, `Content-Type`,
 //! no credentials). The callback carries none: it is a top-level navigation.
 
@@ -97,19 +99,19 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 .layer(DefaultBodyLimit::max(8 * 1024))
                 // `route_layer` applies only where this route matched; `layer`
                 // would also wrap the fallback `merge` carries to every path.
-                .route_layer(token_cors(&github.ccdp_origin))
+                .route_layer(token_cors(&github.admitted))
                 .with_state(github.clone()),
         );
     }
     router
 }
 
-/// The token route's CORS layer: the CCDP origin as a one-member list, so a
-/// caller from any other origin gets no allow-origin header; `POST`,
-/// `Content-Type`, no credentials.
-fn token_cors(ccdp_origin: &HeaderValue) -> CorsLayer {
+/// The token route's CORS layer: the admitted origins as a list, so a caller
+/// from any other origin gets no allow-origin header; `POST`, `Content-Type`,
+/// no credentials.
+fn token_cors(admitted: &[HeaderValue]) -> CorsLayer {
     CorsLayer::new()
-        .allow_origin(AllowOrigin::list([ccdp_origin.clone()]))
+        .allow_origin(AllowOrigin::list(admitted.iter().cloned()))
         .allow_methods([axum::http::Method::POST])
         .allow_headers([axum::http::header::CONTENT_TYPE])
 }

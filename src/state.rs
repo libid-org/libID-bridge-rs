@@ -28,9 +28,9 @@ pub struct GithubExchange {
     /// Dials the notary each token request names, on the wire port; refuses
     /// private and internal addresses.
     pub(crate) egress: crate::routes::github_token::NotaryEgress,
-    /// The CCDP Distribution this bridge selects: the only origin the token
-    /// route admits, as the `Origin` header value it is compared with.
-    pub(crate) ccdp_origin: axum::http::HeaderValue,
+    /// The effective admission set `allowedAppOrigins ∪ {ccdpOrigin}`, as the
+    /// `Origin` header values the token route and its preflight compare with.
+    pub(crate) admitted: Vec<axum::http::HeaderValue>,
     /// The exchange permits, [`MAX_CONCURRENT_EXCHANGES`] of them. A request
     /// that finds none is shed, not queued.
     pub(crate) permits: Semaphore,
@@ -41,9 +41,9 @@ pub struct AppState {
     /// The callback document and the policy it is served under, composed once
     /// at startup.
     pub(crate) callback: crate::artifact::CallbackDocument,
-    /// The effective admission set `allowedAppOrigins ∪ {ccdpOrigin}`: read by
-    /// the configuration route and inserted into the callback document. Exact
-    /// canonical strings, compared against what a browser sends.
+    /// The effective admission set `allowedAppOrigins ∪ {ccdpOrigin}`: the one
+    /// rule every gated route applies, and what the callback document is told.
+    /// Exact canonical strings, compared against what a browser sends.
     pub(crate) allowed_origins: Arc<[String]>,
     /// The public ceremony configuration, serialized once: the exact bytes
     /// every admitted caller receives.

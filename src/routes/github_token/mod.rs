@@ -194,17 +194,16 @@ pub(crate) async fn github_token(
     headers: HeaderMap,
     body: Result<Json<TokenRequestBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Response, TokenError> {
-    // Exactly one `Origin`, and exactly the configured CCDP origin. Missing,
-    // `null`, malformed and repeated all fail.
+    // Exactly one `Origin`, matching an admitted origin exactly. Missing,
+    // `null`, malformed, unlisted and repeated all fail.
     let admitted = matches!(
         crate::routes::Origins::of(&headers),
-        crate::routes::Origins::One(origin)
-            if origin.as_bytes() == github.ccdp_origin.as_bytes()
+        crate::routes::Origins::One(origin) if github.admitted.contains(origin)
     );
     if !admitted {
         return Err(TokenError {
             status: StatusCode::FORBIDDEN,
-            message: "this route is callable only from the configured CCDP origin".into(),
+            message: "this route is callable only from an admitted origin".into(),
         });
     }
 

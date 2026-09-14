@@ -1,5 +1,5 @@
-//! The OAuth Bridge of a libID ceremony. The contract is `OAUTH_BRIDGE.md` in
-//! the libid repository.
+//! The OAuth Bridge of a libID ceremony. The contract is `specs/oauth-bridge.md`
+//! in the libid repository.
 //!
 //! It publishes the configuration an application starts from, serves the one
 //! callback document the OAuth platforms redirect back to, and performs the

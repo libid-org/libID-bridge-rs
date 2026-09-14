@@ -22,6 +22,8 @@ use tower::ServiceExt;
 
 const APP_ORIGIN: &str = "http://localhost:3000";
 const CCDP_ORIGIN: &str = "https://ccdp.example";
+/// The fixture's public origin: where this bridge is reached.
+const BRIDGE_ORIGIN: &str = "https://bridge.example";
 
 /// A loopback port nothing listens on, bound once and released: a session a
 /// test does start fails at the dial instead of reaching a notary on this
@@ -43,6 +45,7 @@ fn deployment(overrides: &[&str]) -> Arc<AppState> {
     let mut flags: Vec<(&str, &str)> = vec![
         ("--host", "127.0.0.1"),
         ("--port", "8722"),
+        ("--public-origin", BRIDGE_ORIGIN),
         (
             "--allowed-app-origins",
             "http://localhost:3000,https://wallet.example",
@@ -127,14 +130,10 @@ async fn post_token(origin: Option<&str>, body: String) -> axum::response::Respo
 /// ledger. This bridge dials its host on the fixture's dead wire port.
 const NOTARY: &str = "https://127.0.0.1:7048";
 
-/// The registered callback URL a request carries: the fixture's callback path
-/// under a canonical origin.
-const REDIRECT: &str = "https://bridge.example/auth/callback";
-
 /// A request body carrying every field, varying only the two under test.
 fn token_body(code: &str, verifier: &str) -> String {
     format!(
-        r#"{{"code":"{code}","codeVerifier":"{verifier}","redirectUri":"{REDIRECT}","notaryAddress":"{NOTARY}"}}"#
+        r#"{{"code":"{code}","codeVerifier":"{verifier}","notaryAddress":"{NOTARY}"}}"#
     )
 }
 
@@ -163,40 +162,21 @@ async fn github_token_refuses_a_request_with_no_origin() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
-/// A body carrying a `clientId` or an endpoint is refused rather than ignored.
+/// A body naming the client, the redirect URI or an endpoint is refused
+/// rather than ignored: those are this service's own.
 #[tokio::test]
 async fn github_token_refuses_a_body_that_tries_to_steer_the_exchange() {
-    let body = format!(
-        r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"{REDIRECT}","notaryAddress":"{NOTARY}","clientId":"Iv1.other"}}"#
-    );
-    let resp = post_token(Some(ORIGIN), body).await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-}
-
-/// `redirectUri` is the callback path under a canonical origin; anything else
-/// is refused before a session is opened.
-#[tokio::test]
-async fn github_token_refuses_a_redirect_uri_that_is_not_the_registered_callback_url() {
-    for bad in [
-        "https://bridge.example/other",
-        "https://bridge.example/auth/callback/",
-        "https://bridge.example/auth/callback?x=1",
-        "http://bridge.example/auth/callback",
-        "https://user@bridge.example/auth/callback",
-        "/auth/callback",
-        "",
+    for steer in [
+        r#""clientId":"Iv1.other""#,
+        r#""redirectUri":"https://bridge.example/auth/callback""#,
+        r#""tokenUrl":"https://github.example/token""#,
     ] {
         let body = format!(
-            r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"{bad}","notaryAddress":"{NOTARY}"}}"#
+            r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","notaryAddress":"{NOTARY}",{steer}}}"#
         );
         let resp = post_token(Some(ORIGIN), body).await;
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{bad:?}");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{steer}");
     }
-    let body = format!(
-        r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","notaryAddress":"{NOTARY}"}}"#
-    );
-    let resp = post_token(Some(ORIGIN), body).await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "missing");
 }
 
 #[tokio::test]
@@ -328,10 +308,10 @@ async fn the_token_preflight_admits_exactly_what_the_handler_does() {
     }
 }
 
-/// This bridge's own origin is not the CCDP origin, so it is refused.
+/// This bridge's own public origin is not the CCDP origin, so it is refused.
 #[tokio::test]
 async fn github_token_admits_the_ccdp_origin_and_not_the_bridges_own() {
-    let resp = post_token(Some("http://127.0.0.1:8722"), valid_body()).await;
+    let resp = post_token(Some(BRIDGE_ORIGIN), valid_body()).await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
@@ -687,7 +667,7 @@ async fn github_token_takes_exactly_one_media_type() {
 #[tokio::test]
 async fn github_token_refuses_a_private_notary_and_dials_a_loopback_one() {
     let body = format!(
-        r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"{REDIRECT}","notaryAddress":"https://10.0.0.1:7048"}}"#
+        r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","notaryAddress":"https://10.0.0.1:7048"}}"#
     );
     let resp = post_token(Some(ORIGIN), body).await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -702,7 +682,7 @@ async fn github_token_refuses_a_private_notary_and_dials_a_loopback_one() {
 async fn github_token_admits_the_localhost_http_exception_and_nothing_like_it() {
     for admitted in ["http://localhost:7048", "http://127.0.0.1:7048"] {
         let body = format!(
-            r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"{REDIRECT}","notaryAddress":"{admitted}"}}"#
+            r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","notaryAddress":"{admitted}"}}"#
         );
         // Past the gate and dialled, on a port nothing listens on: a `502` is
         // the origin being admitted, where a `400` would be it refused.
@@ -715,7 +695,7 @@ async fn github_token_admits_the_localhost_http_exception_and_nothing_like_it() 
         "http://notary.example",
     ] {
         let body = format!(
-            r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"{REDIRECT}","notaryAddress":"{refused}"}}"#
+            r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","notaryAddress":"{refused}"}}"#
         );
         let resp = post_token(Some(ORIGIN), body).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{refused}");
@@ -737,7 +717,7 @@ async fn github_token_refuses_an_invalid_notary_origin() {
         "",
     ] {
         let body = format!(
-            r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"{REDIRECT}","notaryAddress":"{bad}"}}"#
+            r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","notaryAddress":"{bad}"}}"#
         );
         let resp = post_token(Some(ORIGIN), body).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{bad:?}");
@@ -747,9 +727,7 @@ async fn github_token_refuses_an_invalid_notary_origin() {
 /// `notaryAddress` is required.
 #[tokio::test]
 async fn github_token_refuses_a_body_without_a_notary_address() {
-    let body = format!(
-        r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}","redirectUri":"{REDIRECT}"}}"#
-    );
+    let body = format!(r#"{{"code":"6b7f2c1d9e4a8035","codeVerifier":"{VERIFIER}"}}"#);
     let resp = post_token(Some(ORIGIN), body).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }

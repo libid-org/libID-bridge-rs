@@ -1,8 +1,8 @@
 //! The request this service sends, and the one endpoint it may send it to.
 //!
-//! The endpoint is a constant and the field order is the profile's; the code,
-//! the verifier and the redirect URI are the caller's. Nothing a caller sends
-//! decides where this goes.
+//! The endpoint is a constant and the field order is the profile's; the code
+//! and the verifier are the caller's, the redirect URI is the deployment's.
+//! Nothing a caller sends decides where this goes.
 
 use axum::http::header;
 use libid_ceremony::token_exchange::TokenRequest;

@@ -50,9 +50,8 @@ mod transcript;
 
 pub(crate) use request::force_token_endpoint;
 
-/// What the browser sends: the code, the PKCE verifier, the redirect URI its
-/// authorization request carried, and the notary. The client, secret and
-/// endpoint are this service's own.
+/// What the browser sends: the code, the PKCE verifier and the notary. The
+/// client, secret, endpoint and redirect URI are this service's own.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct TokenRequestBody {
@@ -60,9 +59,6 @@ pub(crate) struct TokenRequestBody {
     code: String,
     /// The PKCE verifier the browser derived for this ceremony.
     code_verifier: String,
-    /// The registered callback URL: this bridge's public origin followed by
-    /// `/auth/callback`. Sent to GitHub byte for byte.
-    redirect_uri: String,
     /// The notary the browser's identity session ran against, as a canonical
     /// origin: HTTPS, or HTTP on exactly `localhost` or `127.0.0.1`. This
     /// bridge dials its host on the wire port for the token session.
@@ -244,11 +240,6 @@ pub(crate) async fn github_token(
             message: "the request body is not a TokenRequest".into(),
         }
     })?;
-    let redirect_uri = redirect_uri(&body.redirect_uri).ok_or_else(|| {
-        TokenError::bad_request(
-            "redirectUri is not /auth/callback under a canonical origin",
-        )
-    })?;
     // The spelling is checked here; where the host resolves, and whether it
     // is dialled, is decided in `egress` after the permit is taken.
     let notary_host = notary_host(&body.notary_address).ok_or_else(|| {
@@ -274,9 +265,10 @@ pub(crate) async fn github_token(
         message: "too many exchanges in flight; retry shortly".into(),
     })?;
 
-    let response = session::exchange(&github, &request, redirect_uri, &notary_host)
-        .await
-        .map_err(TokenError::from_exchange)?;
+    let response =
+        session::exchange(&github, &request, &github.redirect_uri, &notary_host)
+            .await
+            .map_err(TokenError::from_exchange)?;
     // The bounds are checked on the way out as well.
     response
         .validate()
@@ -303,25 +295,6 @@ pub(crate) async fn github_token(
 /// Unpadded URL-safe base64, for the byte strings of the response.
 fn b64(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
-}
-
-/// `spelling`, if it is the registered callback URL: a canonical origin --
-/// HTTPS, or HTTP on exactly `localhost` or `127.0.0.1` -- followed by exactly
-/// `/auth/callback`, with no query, fragment or credentials.
-fn redirect_uri(spelling: &str) -> Option<&str> {
-    let callback_path = crate::routes::CALLBACK_PATH;
-    let url = url::Url::parse(spelling).ok()?;
-    if !(url.scheme() == "https" || crate::is_plaintext_loopback(&url))
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.path() != callback_path
-        || format!("{}{callback_path}", url.origin().ascii_serialization()) != spelling
-    {
-        return None;
-    }
-    Some(spelling)
 }
 
 /// The host a notary origin names. HTTP is development-only on explicit
@@ -390,39 +363,7 @@ mod fixtures {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        notary_host,
-        redirect_uri,
-    };
-
-    /// The registered callback URL and nothing that merely resembles it.
-    #[test]
-    fn a_redirect_uri_is_the_callback_path_under_a_canonical_origin() {
-        for ok in [
-            "https://bridge.example/auth/callback",
-            "https://bridge.example:8443/auth/callback",
-            "http://localhost:8722/auth/callback",
-            "http://127.0.0.1:8722/auth/callback",
-        ] {
-            assert_eq!(redirect_uri(ok), Some(ok), "{ok}");
-        }
-        for bad in [
-            "https://bridge.example/auth/callback/",
-            "https://bridge.example/other",
-            "https://bridge.example",
-            "https://bridge.example:443/auth/callback",
-            "https://BRIDGE.example/auth/callback",
-            "https://bridge.example/auth/callback?x=1",
-            "https://bridge.example/auth/callback#x",
-            "https://user@bridge.example/auth/callback",
-            "http://bridge.example/auth/callback",
-            "http://[::1]:8722/auth/callback",
-            "/auth/callback",
-            "",
-        ] {
-            assert_eq!(redirect_uri(bad), None, "{bad}");
-        }
-    }
+    use super::notary_host;
 
     #[test]
     fn plaintext_notary_is_limited_to_explicit_loopback_hosts() {

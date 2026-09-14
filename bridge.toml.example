@@ -13,6 +13,10 @@
 host = "127.0.0.1"
 port = 8722
 
+# The origin this bridge is reached at: the one every OAuth App registers
+# /auth/callback under. The token exchange sends that URL as redirect_uri.
+public_origin = "https://bridge.example"
+
 # The port of the notary's MPC-TLS wire listener. The notary itself is named
 # by each token request; the bridge dials that host on this port.
 notary_wire_port = 7047

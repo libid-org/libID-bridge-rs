@@ -37,6 +37,7 @@ use url::Url;
 pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
     let allowed_app_origins = allowed_app_origins(&cfg.allowed_app_origins)?;
     let ccdp_origin = canonical_origin("CCDP_ORIGIN", &cfg.ccdp_origin)?;
+    let public_origin = public_origin(&cfg.public_origin)?;
     // The effective set `allowedAppOrigins ∪ {ccdpOrigin}`, for the
     // configuration route and the callback document. The resolved CCDP
     // origin joins once; an overridden `CCDP_ORIGIN` does not keep
@@ -71,6 +72,7 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
                     client_id: profile.client_id().to_owned(),
                     client_secret: secret,
                 },
+                redirect_uri: format!("{public_origin}{}", routes::CALLBACK_PATH),
                 egress: routes::github_token::NotaryEgress::new(cfg.notary_wire_port),
                 ccdp_origin: axum::http::HeaderValue::from_str(&ccdp_origin).map_err(
                     |e| Error::Config {
@@ -235,6 +237,19 @@ fn allowed_app_origins(list: &[String]) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// The origin this bridge is reached at, in canonical form. Empty is refused:
+/// the redirect URI derived from it must equal the OAuth Apps' registration.
+fn public_origin(spelling: &str) -> Result<String> {
+    if spelling.trim().is_empty() {
+        return Err(Error::Config {
+            detail: "PUBLIC_ORIGIN is empty; set it to the origin this bridge is \
+                     reached at, the one the OAuth Apps register /auth/callback under"
+                .into(),
+        });
+    }
+    canonical_origin("PUBLIC_ORIGIN", spelling)
+}
+
 /// The canonical form of a configured origin: `http` or `https`, a host, no
 /// path, query, fragment or credentials; plaintext only on `localhost` or
 /// `127.0.0.1`; a host made only of the bytes an origin is made of.
@@ -316,6 +331,7 @@ mod tests {
         let mut flags: Vec<(&str, &str)> = vec![
             ("--host", "127.0.0.1"),
             ("--port", "8722"),
+            ("--public-origin", "https://bridge.example"),
             ("--notary-wire-port", dead_port()),
             ("--allowed-app-origins", "https://app.example"),
             ("--ccdp-origin", "https://ccdp.example"),
@@ -384,6 +400,17 @@ mod tests {
         ] {
             assert!(canonical_origin("T", spelling).is_err(), "{spelling}");
         }
+    }
+
+    /// The redirect URI the exchange sends is the public origin, folded to its
+    /// canonical form, followed by `/auth/callback`.
+    #[test]
+    fn the_redirect_uri_is_the_callback_path_under_the_public_origin() {
+        let state =
+            build_state(&config(&["--public-origin", "https://Bridge.example:443"]))
+                .unwrap();
+        let github = state.github.as_ref().expect("github is enabled");
+        assert_eq!(github.redirect_uri, "https://bridge.example/auth/callback");
     }
 
     /// The effective set is `allowedAppOrigins ∪ {ccdpOrigin}`: the default
@@ -470,6 +497,15 @@ mod tests {
     #[test]
     fn a_deployment_that_could_not_serve_a_ceremony_stops_the_process() {
         for (why, args) in [
+            ("no public origin", vec!["--public-origin", ""]),
+            (
+                "a public origin carrying a path",
+                vec!["--public-origin", "https://bridge.example/auth"],
+            ),
+            (
+                "a plaintext public origin that is not localhost or 127.0.0.1",
+                vec!["--public-origin", "http://bridge.example"],
+            ),
             ("no admitted origin", vec!["--allowed-app-origins", ""]),
             (
                 "a duplicate admitted origin",

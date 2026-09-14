@@ -22,6 +22,9 @@ pub const MAX_CONCURRENT_EXCHANGES: usize = 8;
 pub struct GithubExchange {
     /// GitHub's confidential client.
     pub(crate) credentials: OAuthCredentials,
+    /// The redirect URI every exchange sends GitHub: the configured public
+    /// origin followed by `/auth/callback`, the OAuth App's registration.
+    pub(crate) redirect_uri: String,
     /// Dials the notary each token request names, on the wire port; refuses
     /// private and internal addresses.
     pub(crate) egress: crate::routes::github_token::NotaryEgress,

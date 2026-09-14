@@ -36,6 +36,12 @@ pub struct Config {
     #[arg(long, env = "PORT", default_value = "8722")]
     pub port: u16,
 
+    /// The origin this bridge is reached at: the canonical origin every OAuth
+    /// App registers `/auth/callback` under. The token exchange sends that
+    /// URL as its redirect URI. HTTPS, or HTTP on `localhost` or `127.0.0.1`.
+    #[arg(long, env = "PUBLIC_ORIGIN", default_value = "")]
+    pub public_origin: String,
+
     /// The port of the notary's MPC-TLS wire listener. Each token request
     /// names the notary; this bridge dials that host on this port.
     #[arg(long, env = "NOTARY_WIRE_PORT", default_value_t = 7047)]
@@ -87,6 +93,8 @@ pub struct FileConfig {
     pub host: Option<String>,
     /// [`Config::port`].
     pub port: Option<u16>,
+    /// [`Config::public_origin`].
+    pub public_origin: Option<String>,
     /// [`Config::notary_wire_port`].
     pub notary_wire_port: Option<u16>,
     /// [`Config::allowed_app_origins`].
@@ -153,6 +161,9 @@ impl Config {
         if defaulted(&matches, "port") {
             cfg.port = file.port.unwrap_or(cfg.port);
         }
+        if defaulted(&matches, "public_origin") {
+            cfg.public_origin = file.public_origin.unwrap_or(cfg.public_origin);
+        }
         if defaulted(&matches, "notary_wire_port") {
             cfg.notary_wire_port = file.notary_wire_port.unwrap_or(cfg.notary_wire_port);
         }
@@ -179,6 +190,7 @@ impl std::fmt::Debug for Config {
         f.debug_struct("Config")
             .field("host", &self.host)
             .field("port", &self.port)
+            .field("public_origin", &self.public_origin)
             .field("notary_wire_port", &self.notary_wire_port)
             .field("allowed_app_origins", &self.allowed_app_origins)
             .field("ccdp_origin", &self.ccdp_origin)
@@ -216,6 +228,7 @@ mod file_tests {
         let cfg = resolved(
             r#"
             port = 9110
+            public_origin = "https://bridge.example"
             allowed_app_origins = ["https://app.example", "https://wallet.example"]
 
             [[platforms]]
@@ -229,6 +242,7 @@ mod file_tests {
         .expect("a file this deployment can read");
 
         assert_eq!(cfg.port, 9110);
+        assert_eq!(cfg.public_origin, "https://bridge.example");
         assert_eq!(
             cfg.allowed_app_origins,
             ["https://app.example", "https://wallet.example"]
@@ -273,6 +287,7 @@ mod file_tests {
             .expect("the example beside this code");
 
         assert_eq!(cfg.port, 8722);
+        assert_eq!(cfg.public_origin, "https://bridge.example");
         assert_eq!(cfg.notary_wire_port, 7047);
         assert_eq!(
             cfg.allowed_app_origins,

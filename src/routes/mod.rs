@@ -93,7 +93,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             Router::new()
                 .route(TOKEN_PATH, post(github_token::github_token))
                 // A `TokenRequest` is a 1 KiB code, a 43-character verifier
-                // and two URLs; the extractor runs before the handler.
+                // and a notary origin; the extractor runs before the handler.
                 .layer(DefaultBodyLimit::max(8 * 1024))
                 // `route_layer` applies only where this route matched; `layer`
                 // would also wrap the fallback `merge` carries to every path.

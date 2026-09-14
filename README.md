@@ -66,17 +66,15 @@ and is the one route that accepts a query.
 
 The one route needing a client secret.
 
-Request — the code, the PKCE verifier, the redirect URI the authorization
-request carried, and the notary the browser resolved from the ledger; the
-client, secret and endpoint are this server's own. `redirectUri` must be
-`/auth/callback` under a canonical origin; GitHub checks it against the App's
-registration:
+Request — the code, the PKCE verifier and the notary the browser resolved from
+the ledger; the client, secret, endpoint and redirect URI are this server's
+own. The redirect URI it sends is `PUBLIC_ORIGIN` followed by `/auth/callback`,
+which GitHub checks against the App's registration:
 
 ```json
 {
   "code": "…",
   "codeVerifier": "…",
-  "redirectUri": "https://bridge.example/auth/callback",
   "notaryAddress": "https://notary.example"
 }
 ```
@@ -108,11 +106,10 @@ Neither X nor Google has a confidential route; both run browser ↔ notary.
 
 ## The CCDP Distribution
 
-The contract this server implements is `ts/packages/ceremony/OAUTH_BRIDGE.md`
-in the libid repository (branch `docs/ceremony-browser-architecture`). Where
-`specs/platform-ceremonies.md` §6.3 describes the same wire differently — route
-path, a `schema` member, a single-string attestation — this server follows
-OAUTH_BRIDGE.md, by decision.
+The contract this server implements is `specs/oauth-bridge.md` in the libid
+repository (pull request 13). Where `specs/platform-ceremonies.md` §6.3
+describes the same wire differently — route path, a `schema` member, a
+single-string attestation — this server follows `oauth-bridge.md`, by decision.
 
 This server is the **OAuth Bridge**, and only that. Everything the browser
 executes — the Callback implementation, the prover, the circuits and
@@ -178,6 +175,7 @@ file, then default. `bridge.toml.example` beside this README is a complete
 starting point:
 
 ```toml
+public_origin       = "https://bridge.example"
 allowed_app_origins = ["https://app.example", "https://wallet.example"]
 
 [[platforms]]
@@ -198,6 +196,7 @@ control (`bridge.toml` is ignored by git).
 |---|---|---|---|
 | `host` | `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` in the container image). |
 | `port` | `PORT` | `8722` | Bind port. |
+| `public_origin` | `PUBLIC_ORIGIN` | *(required)* | The origin this bridge is reached at: the one every OAuth App registers `/auth/callback` under. The token exchange sends that URL as its redirect URI. HTTPS, or HTTP on `localhost` or `127.0.0.1`; folded to canonical form. |
 | `allowed_app_origins` | `ALLOWED_APP_ORIGINS`, comma-separated | *(required)* | Application origins. Exact origins, no patterns; HTTPS, or HTTP on `localhost` or `127.0.0.1`. Each must already be canonical — a trailing slash, an uppercase host or a default port is refused with the canonical spelling named, not folded — and a duplicate is refused. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once, and it governs the configuration route and what the callback document is told. The token route admits `CCDP_ORIGIN` alone. |
 | `ccdp_origin` | `CCDP_ORIGIN` | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/callback.html` and everything the browser runs after it, HTTPS, or HTTP on `localhost` or `127.0.0.1`. Published in the configuration and inserted into the callback document. Omitting it selects the canonical libID Distribution. |
 | `callback_artifact_path` | `CALLBACK_ARTIFACT_PATH` | *(empty)* | A `callback.html` obtained from the CCDP Distribution, served instead of the compiled-in floor. Read once at startup and held to the same shape either way. **Unset means the floor, which completes no ceremony** — set this to run real ceremonies. |

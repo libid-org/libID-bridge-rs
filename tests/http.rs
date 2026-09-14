@@ -435,17 +435,106 @@ async fn config_admits_nothing_on_referer_or_host() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
-/// The response varies on `Origin`, on refusals too.
+/// The response varies on `Origin` and `Sec-Fetch-Site`, on refusals too.
 #[tokio::test]
-async fn config_varies_on_origin() {
+async fn config_varies_on_origin_and_fetch_site() {
     let admitted = config_with(test_state(), &[("origin", APP_ORIGIN)], "").await;
     assert_eq!(admitted.status(), StatusCode::OK);
-    assert_eq!(admitted.headers().get("vary").unwrap(), "origin");
+    assert_eq!(
+        admitted.headers().get("vary").unwrap(),
+        "origin, sec-fetch-site"
+    );
 
     let refused =
         config_with(test_state(), &[("origin", "https://evil.example")], "").await;
     assert_eq!(refused.status(), StatusCode::FORBIDDEN);
-    assert_eq!(refused.headers().get("vary").unwrap(), "origin");
+    assert_eq!(
+        refused.headers().get("vary").unwrap(),
+        "origin, sec-fetch-site"
+    );
+}
+
+/// A page served from this bridge's own origin reads the configuration with
+/// no `Origin` and no CORS: `Sec-Fetch-Site: same-origin`, when the public
+/// origin is itself listed.
+#[tokio::test]
+async fn config_admits_a_same_origin_read_when_the_public_origin_is_listed() {
+    let listed = deployment(&[
+        "--allowed-app-origins",
+        "http://localhost:3000,https://bridge.example",
+    ]);
+    let resp = config_with(listed, &[("sec-fetch-site", "same-origin")], "").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let h = resp.headers();
+    assert!(
+        h.get("access-control-allow-origin").is_none(),
+        "a same-origin read needs no CORS header"
+    );
+    assert_eq!(h.get("vary").unwrap(), "origin, sec-fetch-site");
+    assert_eq!(h.get("cache-control").unwrap(), "no-store");
+    assert_eq!(h.get("content-type").unwrap(), "application/json");
+    let body = body_of(resp).await;
+    assert_eq!(body["ccdpOrigin"], CCDP_ORIGIN);
+}
+
+/// Fetch metadata admits nothing on its own: the public origin must be
+/// listed, the site must be exactly `same-origin` and sent once, and an
+/// explicit `Origin` is judged as an `Origin`, whatever the metadata says.
+#[tokio::test]
+async fn config_does_not_infer_admission_from_fetch_metadata_alone() {
+    let unlisted =
+        config_with(test_state(), &[("sec-fetch-site", "same-origin")], "").await;
+    assert_eq!(
+        unlisted.status(),
+        StatusCode::FORBIDDEN,
+        "the public origin is not listed"
+    );
+
+    let listed = || {
+        deployment(&[
+            "--allowed-app-origins",
+            "http://localhost:3000,https://bridge.example",
+        ])
+    };
+    for headers in [
+        vec![("sec-fetch-site", "same-site")],
+        vec![("sec-fetch-site", "cross-site")],
+        vec![("sec-fetch-site", "none")],
+        vec![("sec-fetch-site", "SAME-ORIGIN")],
+        vec![
+            ("sec-fetch-site", "same-origin"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+        vec![
+            ("origin", "https://evil.example"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+        vec![("origin", "null"), ("sec-fetch-site", "same-origin")],
+        vec![
+            ("referer", "https://bridge.example/"),
+            ("host", "bridge.example"),
+        ],
+    ] {
+        let resp = config_with(listed(), &headers, "").await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{headers:?}");
+        assert!(resp.headers().get("access-control-allow-origin").is_none());
+    }
+
+    let resp = config_with(
+        listed(),
+        &[("origin", APP_ORIGIN), ("sec-fetch-site", "cross-site")],
+        "",
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "an admitted Origin is judged as one"
+    );
+    assert_eq!(
+        resp.headers().get("access-control-allow-origin").unwrap(),
+        APP_ORIGIN
+    );
 }
 
 /// The record carries exactly `ccdpOrigin` and `platforms`: no secret and no

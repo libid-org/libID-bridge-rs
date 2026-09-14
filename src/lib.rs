@@ -107,6 +107,7 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
             &ccdp_origin,
             &allowed_origins,
         )?,
+        public_origin_admitted: allowed_origins.contains(&public_origin),
         allowed_origins,
         github,
     }))
@@ -416,6 +417,19 @@ mod tests {
                 .unwrap();
         let github = state.github.as_ref().expect("github is enabled");
         assert_eq!(github.redirect_uri, "https://bridge.example/auth/callback");
+    }
+
+    /// A same-origin read of the configuration is admitted exactly when the
+    /// public origin is listed as an application origin.
+    #[test]
+    fn a_same_origin_read_is_admitted_only_when_the_public_origin_is_listed() {
+        assert!(!build_state(&config(&[])).unwrap().public_origin_admitted);
+        let listed = build_state(&config(&[
+            "--allowed-app-origins",
+            "https://app.example,https://bridge.example",
+        ]))
+        .unwrap();
+        assert!(listed.public_origin_admitted);
     }
 
     /// The effective set is `allowedAppOrigins ∪ {ccdpOrigin}`: the default

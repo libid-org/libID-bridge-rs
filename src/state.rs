@@ -48,6 +48,10 @@ pub struct AppState {
     /// The public ceremony configuration, serialized once: the exact bytes
     /// every admitted caller receives.
     pub(crate) ceremony_config: bytes::Bytes,
+    /// Whether the configured public origin is itself in the effective set:
+    /// then a same-origin `GET` of the configuration, which carries no
+    /// `Origin`, is admitted on `Sec-Fetch-Site: same-origin`.
+    pub(crate) public_origin_admitted: bool,
     /// The confidential exchange, present when the deployment enables GitHub.
     /// `None` means the token route is not mounted.
     pub(crate) github: Option<Arc<GithubExchange>>,

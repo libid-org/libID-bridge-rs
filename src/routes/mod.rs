@@ -2,7 +2,7 @@
 //!
 //! - `GET  /health`
 //! - `GET  /api/v1/ceremony/config`
-//! - `GET  {callback path}` (configured, default `/auth/callback`)
+//! - `GET  /auth/callback`
 //! - `OPTIONS`, `POST /api/v1/ceremony/github-token` (only when GitHub is enabled)
 //!
 //! Everything the browser runs is served by the CCDP Distribution at the
@@ -70,24 +70,22 @@ async fn health() -> impl axum::response::IntoResponse {
     )
 }
 
-/// The liveness probe. The configured callback path is refused when it
-/// collides with a fixed route.
+/// The liveness probe.
 pub(crate) const HEALTH_PATH: &str = "/health";
+/// The registered OAuth callback: the callback document.
+pub const CALLBACK_PATH: &str = "/auth/callback";
 /// The public ceremony configuration.
 pub(crate) const CONFIG_PATH: &str = "/api/v1/ceremony/config";
 /// The confidential GitHub exchange.
 pub(crate) const TOKEN_PATH: &str = "/api/v1/ceremony/github-token";
 
-/// Every fixed path, for the configured callback path to be checked against.
-pub(crate) const FIXED_PATHS: [&str; 3] = [HEALTH_PATH, CONFIG_PATH, TOKEN_PATH];
-
-/// The route table for this deployment: the callback at its configured path,
-/// and the token route only where GitHub is enabled.
+/// The route table for this deployment: the token route only where GitHub is
+/// enabled.
 pub fn build_router(state: Arc<AppState>) -> Router {
     let mut router = Router::new()
         .route(HEALTH_PATH, get(health))
         .route(CONFIG_PATH, get(config::config))
-        .route(&state.callback_path, get(callback::callback))
+        .route(CALLBACK_PATH, get(callback::callback))
         .with_state(state.clone());
 
     if let Some(github) = &state.github {

@@ -22,9 +22,6 @@ pub const MAX_CONCURRENT_EXCHANGES: usize = 8;
 pub struct GithubExchange {
     /// GitHub's confidential client.
     pub(crate) credentials: OAuthCredentials,
-    /// The path providers redirect back to. A request's `redirectUri` is the
-    /// bridge's origin followed by exactly this.
-    pub(crate) callback_path: String,
     /// Dials the notary each token request names, on the wire port; refuses
     /// private and internal addresses.
     pub(crate) egress: crate::routes::github_token::NotaryEgress,
@@ -38,9 +35,6 @@ pub struct GithubExchange {
 
 /// Configuration every route reads.
 pub struct AppState {
-    /// The path the providers redirect back to, where the callback document
-    /// answers.
-    pub(crate) callback_path: String,
     /// The callback document and the policy it is served under, composed once
     /// at startup.
     pub(crate) callback: crate::artifact::CallbackDocument,

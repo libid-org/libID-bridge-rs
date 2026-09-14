@@ -46,11 +46,6 @@ pub struct Config {
     #[arg(long, env = "ALLOWED_APP_ORIGINS", value_delimiter = ',')]
     pub allowed_app_origins: Vec<String>,
 
-    /// The path the providers redirect back to. The registered OAuth callback
-    /// URL is this bridge's public origin followed by this path.
-    #[arg(long, env = "CALLBACK_PATH", default_value = "/auth/callback")]
-    pub callback_path: String,
-
     /// The CCDP Distribution this bridge selects: the canonical origin serving
     /// the Callback artifact and everything the browser runs after it.
     /// Published in the configuration and inserted into the callback document.
@@ -64,13 +59,13 @@ pub struct Config {
     pub callback_artifact_path: String,
 
     /// The enabled platforms, from the configuration file's `[[platforms]]`
-    /// tables: each names a platform, its public client id and the ceremony
-    /// versions it advertises.
+    /// tables: each names a platform, its public client id, the ceremony
+    /// versions it advertises and, for `github`, its client secret.
     #[arg(skip)]
     pub platforms: Vec<PlatformProfile>,
 
-    /// GitHub OAuth App client secret. Required when the platforms enable
-    /// `github`, refused when they do not.
+    /// GitHub OAuth App client secret: overrides the `client_secret` of the
+    /// `github` platform table. Refused when no platform is `github`.
     #[arg(
         long,
         env = "GH_OAUTH_CLIENT_SECRET",
@@ -96,8 +91,6 @@ pub struct FileConfig {
     pub notary_wire_port: Option<u16>,
     /// [`Config::allowed_app_origins`].
     pub allowed_app_origins: Option<Vec<String>>,
-    /// [`Config::callback_path`].
-    pub callback_path: Option<String>,
     /// [`Config::ccdp_origin`].
     pub ccdp_origin: Option<String>,
     /// [`Config::callback_artifact_path`].
@@ -109,10 +102,9 @@ pub struct FileConfig {
     /// id = "github"
     /// client_id = "Iv1.0123456789abcdef"
     /// versions = [1]
+    /// client_secret = "..."
     /// ```
     pub platforms: Option<Vec<PlatformProfile>>,
-    /// [`Config::gh_oauth_client_secret`].
-    pub gh_oauth_client_secret: Option<String>,
 }
 
 /// Whether clap supplied `id` from its default rather than from the command
@@ -164,9 +156,6 @@ impl Config {
         if defaulted(&matches, "notary_wire_port") {
             cfg.notary_wire_port = file.notary_wire_port.unwrap_or(cfg.notary_wire_port);
         }
-        if defaulted(&matches, "callback_path") {
-            cfg.callback_path = file.callback_path.unwrap_or(cfg.callback_path);
-        }
         if defaulted(&matches, "ccdp_origin") {
             cfg.ccdp_origin = file.ccdp_origin.unwrap_or(cfg.ccdp_origin);
         }
@@ -174,11 +163,6 @@ impl Config {
             cfg.callback_artifact_path = file
                 .callback_artifact_path
                 .unwrap_or(cfg.callback_artifact_path);
-        }
-        if defaulted(&matches, "gh_oauth_client_secret") {
-            cfg.gh_oauth_client_secret = file
-                .gh_oauth_client_secret
-                .unwrap_or(cfg.gh_oauth_client_secret);
         }
         if defaulted(&matches, "allowed_app_origins") {
             cfg.allowed_app_origins =
@@ -197,7 +181,6 @@ impl std::fmt::Debug for Config {
             .field("port", &self.port)
             .field("notary_wire_port", &self.notary_wire_port)
             .field("allowed_app_origins", &self.allowed_app_origins)
-            .field("callback_path", &self.callback_path)
             .field("ccdp_origin", &self.ccdp_origin)
             .field("callback_artifact_path", &self.callback_artifact_path)
             .field("platforms", &self.platforms)
@@ -233,54 +216,43 @@ mod file_tests {
         let cfg = resolved(
             r#"
             port = 9110
-            callback_path = "/oauth/return"
             allowed_app_origins = ["https://app.example", "https://wallet.example"]
-            gh_oauth_client_secret = "ghs_from_the_file"
 
             [[platforms]]
             id = "github"
             client_id = "Iv1.0123456789abcdef"
             versions = [1]
+            client_secret = "ghs_from_the_file"
             "#,
             &[],
         )
         .expect("a file this deployment can read");
 
         assert_eq!(cfg.port, 9110);
-        assert_eq!(cfg.callback_path, "/oauth/return");
         assert_eq!(
             cfg.allowed_app_origins,
             ["https://app.example", "https://wallet.example"]
         );
-        assert_eq!(cfg.gh_oauth_client_secret, "ghs_from_the_file");
         let platforms = crate::deployment::platforms(cfg.platforms)
             .expect("the records the table describes");
         assert_eq!(platforms.len(), 1);
-        assert_eq!(platforms[0].client_id, "Iv1.0123456789abcdef");
+        assert_eq!(platforms[0].client_id(), "Iv1.0123456789abcdef");
+        assert_eq!(platforms[0].client_secret(), Some("ghs_from_the_file"));
     }
 
     /// A flag beats the file.
     #[test]
     fn the_command_line_beats_the_file() {
-        let cfg = resolved(
-            "port = 9110\ngh_oauth_client_secret = \"ghs_from_the_file\"\n",
-            &[
-                "--port",
-                "9999",
-                "--gh-oauth-client-secret",
-                "ghs_from_a_flag",
-            ],
-        )
-        .expect("a file this deployment can read");
+        let cfg = resolved("port = 9110\n", &["--port", "9999"])
+            .expect("a file this deployment can read");
         assert_eq!(cfg.port, 9999);
-        assert_eq!(cfg.gh_oauth_client_secret, "ghs_from_a_flag");
     }
 
     /// Where neither says anything, the default stands.
     #[test]
     fn a_silent_file_changes_nothing() {
         let cfg = resolved("port = 9110\n", &[]).expect("readable");
-        assert_eq!(cfg.callback_path, "/auth/callback");
+        assert_eq!(cfg.ccdp_origin, "https://lib.id");
     }
 
     /// A file with no `[[platforms]]` table enables no platform, which the
@@ -318,11 +290,12 @@ mod file_tests {
         assert!(err.to_string().contains("prot"), "{err}");
     }
 
-    /// The flag beats the file, and `Debug` prints neither secret.
+    /// `Debug` prints neither the flag's secret nor the table's.
     #[test]
     fn the_secret_is_redacted_from_debug_output() {
         let cfg = resolved(
-            "gh_oauth_client_secret = \"ghs_from_the_file\"\n",
+            "[[platforms]]\nid = \"github\"\nclient_id = \"Iv1.0\"\nversions = [1]\n\
+             client_secret = \"ghs_from_the_file\"\n",
             &["--gh-oauth-client-secret", "ghs_from_a_flag"],
         )
         .expect("readable");

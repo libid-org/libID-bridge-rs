@@ -54,8 +54,8 @@ out; origin checks and a closed input surface cannot constrain its owner.
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | Liveness probe. Returns `OK`. Not one of the contract's routes — see below. |
-| `GET` | `/api/v1/ceremony/config` | The public ceremony configuration: `{ callbackPath, ccdpOrigin, platforms }`. Readable only from an admitted origin. |
-| `GET` | `{CALLBACK_PATH}` (default `/auth/callback`) | The registered OAuth callback document: the CCDP Distribution's artifact with this deployment's data inserted, identical for every request. |
+| `GET` | `/api/v1/ceremony/config` | The public ceremony configuration: `{ ccdpOrigin, platforms }`. Readable only from an admitted origin. |
+| `GET` | `/auth/callback` | The registered OAuth callback document: the CCDP Distribution's artifact with this deployment's data inserted, identical for every request. |
 | `POST` | `/api/v1/ceremony/github-token` | The confidential token exchange, run inside a TLSNotary session. Callable only from the configured CCDP origin, whose preflight it answers. The body carries `notaryAddress`, the notary the browser resolved from the ledger; this bridge dials the same host on the wire port, refusing a private or internal one. `403` for any other origin or a refused notary, `400` for a query, `415` for any media type but exactly `application/json`. |
 
 `/health` is not one of the contract's three routes. The published image's
@@ -68,9 +68,9 @@ The one route needing a client secret.
 
 Request — the code, the PKCE verifier, the redirect URI the authorization
 request carried, and the notary the browser resolved from the ledger; the
-client, secret and endpoint are this server's own. `redirectUri` must be this
-bridge's callback path under a canonical origin; GitHub checks it against the
-App's registration:
+client, secret and endpoint are this server's own. `redirectUri` must be
+`/auth/callback` under a canonical origin; GitHub checks it against the App's
+registration:
 
 ```json
 {
@@ -189,8 +189,9 @@ versions  = [1]
 An unknown key is refused at startup. The platforms are set only in the file,
 one `[[platforms]]` table per enabled platform: its `id` (`github`, `google` or
 `x`), its public `client_id`, and the ceremony `versions` it advertises; the
-GitHub token exchange implements version 1. `gh_oauth_client_secret` may be set
-in the file or in the environment; a file that carries it stays out of version
+GitHub token exchange implements version 1 and spends the App's
+`client_secret`, set in the `github` table or in `GH_OAUTH_CLIENT_SECRET`,
+which overrides it. A file that carries the secret stays out of version
 control (`bridge.toml` is ignored by git).
 
 | Key | Environment | Default | Meaning |
@@ -198,12 +199,11 @@ control (`bridge.toml` is ignored by git).
 | `host` | `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` in the container image). |
 | `port` | `PORT` | `8722` | Bind port. |
 | `allowed_app_origins` | `ALLOWED_APP_ORIGINS`, comma-separated | *(required)* | Application origins. Exact origins, no patterns; HTTPS, or HTTP on `localhost` or `127.0.0.1`. Each must already be canonical — a trailing slash, an uppercase host or a default port is refused with the canonical spelling named, not folded — and a duplicate is refused. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once, and it governs the configuration route and what the callback document is told. The token route admits `CCDP_ORIGIN` alone. |
-| `callback_path` | `CALLBACK_PATH` | `/auth/callback` | The path providers redirect back to; the registered OAuth callback URL is this bridge's public origin followed by it, and `/config` publishes it as `callbackPath`. There is no alias and no redirect. |
 | `ccdp_origin` | `CCDP_ORIGIN` | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/callback.html` and everything the browser runs after it, HTTPS, or HTTP on `localhost` or `127.0.0.1`. Published in the configuration and inserted into the callback document. Omitting it selects the canonical libID Distribution. |
 | `callback_artifact_path` | `CALLBACK_ARTIFACT_PATH` | *(empty)* | A `callback.html` obtained from the CCDP Distribution, served instead of the compiled-in floor. Read once at startup and held to the same shape either way. **Unset means the floor, which completes no ceremony** — set this to run real ceremonies. |
 | `notary_wire_port` | `NOTARY_WIRE_PORT` | `7047` | The port of the notary's MPC-TLS wire listener. The notary itself is named by each token request's `notaryAddress`; this bridge dials that host on this port. A private or internal address is refused; loopback is not. |
-| `platforms` | — | *(required)* | The enabled platforms, as `[[platforms]]` tables. File only. |
-| `gh_oauth_client_secret` | `GH_OAUTH_CLIENT_SECRET` | *(none)* | GitHub OAuth App client secret. Required exactly when a platform is `github`, and refused otherwise. |
+| `platforms` | — | *(required)* | The enabled platforms, as `[[platforms]]` tables: `id`, `client_id`, `versions`, and for `github` its `client_secret`. File only. |
+| — | `GH_OAUTH_CLIENT_SECRET` | *(none)* | GitHub OAuth App client secret, overriding the `github` table's `client_secret`. Refused when no platform is `github`. |
 | — | `LIBID_CONFIG`, `--config` | *(none)* | Path to the configuration file. |
 
 ### On Google

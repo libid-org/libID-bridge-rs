@@ -43,7 +43,6 @@ fn deployment(overrides: &[&str]) -> Arc<AppState> {
     let mut flags: Vec<(&str, &str)> = vec![
         ("--host", "127.0.0.1"),
         ("--port", "8722"),
-        ("--callback-path", "/auth/callback"),
         (
             "--allowed-app-origins",
             "http://localhost:3000,https://wallet.example",
@@ -446,17 +445,16 @@ async fn config_varies_on_origin() {
     assert_eq!(refused.headers().get("vary").unwrap(), "origin");
 }
 
-/// The record carries exactly `callbackPath`, `ccdpOrigin` and `platforms`:
-/// no secret and no allowlist.
+/// The record carries exactly `ccdpOrigin` and `platforms`: no secret and no
+/// allowlist.
 #[tokio::test]
 async fn config_carries_no_secret_and_no_admitted_origin() {
     let body = body_of(get_config(Some(APP_ORIGIN), "").await).await;
     let object = body.as_object().unwrap();
     let mut keys: Vec<_> = object.keys().map(String::as_str).collect();
     keys.sort_unstable();
-    assert_eq!(keys, ["callbackPath", "ccdpOrigin", "platforms"]);
+    assert_eq!(keys, ["ccdpOrigin", "platforms"]);
     assert_eq!(body["ccdpOrigin"], CCDP_ORIGIN);
-    assert_eq!(body["callbackPath"], "/auth/callback");
     assert_eq!(body["platforms"]["github"]["clientId"], "test-client-id");
     assert_eq!(body["platforms"]["github"]["ceremonyVersions"][0], 1);
 

@@ -13,10 +13,6 @@
 host = "127.0.0.1"
 port = 8722
 
-# The path providers redirect back to. The registered OAuth callback URL is
-# this bridge's public origin followed by it.
-callback_path = "/auth/callback"
-
 # The port of the notary's MPC-TLS wire listener. The notary itself is named
 # by each token request; the bridge dials that host on this port.
 notary_wire_port = 7047
@@ -34,18 +30,16 @@ ccdp_origin = "https://lib.id"
 # compiled-in one.
 # callback_artifact_path = "/etc/libid/callback.html"
 
-# The GitHub OAuth App client secret, required when a platform below is
-# "github". A file that sets it stays out of version control; the
-# GH_OAUTH_CLIENT_SECRET environment variable overrides it.
-# gh_oauth_client_secret = "..."
-
 # The enabled platforms: one table per platform, with its public client id and
 # the ceremony versions it advertises. The GitHub token exchange implements
-# version 1.
+# version 1 and spends the App's client secret: set it here, in a file kept
+# out of version control, or in the GH_OAUTH_CLIENT_SECRET environment
+# variable, which overrides it.
 [[platforms]]
 id = "github"
 client_id = "Iv1.0123456789abcdef"
 versions = [1]
+# client_secret = "..."
 
 # [[platforms]]
 # id = "google"

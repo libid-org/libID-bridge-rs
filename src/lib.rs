@@ -35,8 +35,6 @@ use url::Url;
 /// Build the shared [`AppState`] from the configuration. Everything that must
 /// be well-formed for a request to succeed is checked here, at startup.
 pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
-    let callback_path = callback_path(&cfg.callback_path)?;
-
     let allowed_app_origins = allowed_app_origins(&cfg.allowed_app_origins)?;
     let ccdp_origin = canonical_origin("CCDP_ORIGIN", &cfg.ccdp_origin)?;
     // The effective set `allowedAppOrigins ∪ {ccdpOrigin}`, for the
@@ -53,19 +51,26 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
     let platforms = deployment::platforms(cfg.platforms.clone())?;
     routes::github_token::force_token_endpoint();
 
-    // The exchange is present exactly when a github platform and a secret are
-    // both set; one without the other refuses to start.
-    let github = match (
-        platforms.iter().find(|p| p.is_github()),
-        cfg.gh_oauth_client_secret.as_str(),
-    ) {
-        (Some(profile), secret) if !secret.is_empty() => {
+    // The exchange is present exactly when a github platform is enabled. Its
+    // secret is `GH_OAUTH_CLIENT_SECRET` where set, else the table's.
+    let github = match platforms.iter().find(|p| p.is_github()) {
+        Some(profile) => {
+            let secret = match cfg.gh_oauth_client_secret.as_str() {
+                "" => profile.client_secret().unwrap_or_default().to_owned(),
+                overriding => overriding.to_owned(),
+            };
+            if secret.is_empty() {
+                return Err(Error::Config {
+                    detail: "the platforms enable github; set client_secret in its \
+                             [[platforms]] table or GH_OAUTH_CLIENT_SECRET"
+                        .into(),
+                });
+            }
             Some(Arc::new(state::GithubExchange {
                 credentials: oauth::OAuthCredentials {
-                    client_id: profile.client_id.clone(),
-                    client_secret: secret.to_owned(),
+                    client_id: profile.client_id().to_owned(),
+                    client_secret: secret,
                 },
-                callback_path: callback_path.clone(),
                 egress: routes::github_token::NotaryEgress::new(cfg.notary_wire_port),
                 ccdp_origin: axum::http::HeaderValue::from_str(&ccdp_origin).map_err(
                     |e| Error::Config {
@@ -75,15 +80,8 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
                 permits: Semaphore::new(state::MAX_CONCURRENT_EXCHANGES),
             }))
         }
-        (None, "") => None,
-        (Some(_), _) => {
-            return Err(Error::Config {
-                detail: "the platforms enable github, so GH_OAUTH_CLIENT_SECRET must \
-                         be set"
-                    .into(),
-            })
-        }
-        (None, _) => {
+        None if cfg.gh_oauth_client_secret.is_empty() => None,
+        None => {
             return Err(Error::Config {
                 detail: "GH_OAUTH_CLIENT_SECRET is set but no platform enables github"
                     .into(),
@@ -93,7 +91,6 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
 
     Ok(Arc::new(AppState {
         ceremony_config: deployment::CeremonyConfig {
-            callback_path: &callback_path,
             ccdp_origin: &ccdp_origin,
             platforms: &platforms,
         }
@@ -104,7 +101,6 @@ pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
             &allowed_origins,
         )?,
         allowed_origins,
-        callback_path,
         github,
     }))
 }
@@ -295,55 +291,6 @@ pub(crate) fn is_plaintext_loopback(url: &Url) -> bool {
     url.scheme() == "http" && matches!(url.host_str(), Some("localhost" | "127.0.0.1"))
 }
 
-/// The path the providers redirect back to: begins with `/` and not `//`; no
-/// braces and no segment beginning with `:` or `*`; no query, fragment,
-/// whitespace, control byte or byte a browser would percent-encode; and not a
-/// fixed route.
-fn callback_path(path: &str) -> Result<String> {
-    let refuse = |why: &str| Error::Config {
-        detail: format!("CALLBACK_PATH {path} {why}"),
-    };
-    if !path.starts_with('/') {
-        return Err(refuse("does not begin with `/`"));
-    }
-    // A browser reads `//host/...` as scheme-relative.
-    if path.starts_with("//") {
-        return Err(refuse(
-            "begins with `//`, which a browser reads as scheme-relative, so \
-             the document could not clear the return out of its own URL",
-        ));
-    }
-    // axum path-pattern syntax, current and former.
-    if path.contains(['{', '}'])
-        || path
-            .split('/')
-            .any(|seg| seg.starts_with(':') || seg.starts_with('*'))
-    {
-        return Err(refuse(
-            "contains a brace, or a segment beginning with `:` or `*`, which \
-             axum reads as a path pattern",
-        ));
-    }
-    if path.contains(['?', '#'])
-        || path.chars().any(|c| c.is_whitespace() || c.is_control())
-    {
-        return Err(refuse(
-            "carries a query, fragment, whitespace or control byte",
-        ));
-    }
-    // axum matches the raw path; a browser sends these percent-encoded.
-    if !path.is_ascii() || path.chars().any(|c| "%\"<>\\^`|".contains(c)) {
-        return Err(refuse(
-            "carries a byte a browser would percent-encode, so the route it \
-             registers is not the one requests arrive at",
-        ));
-    }
-    if routes::FIXED_PATHS.contains(&path) {
-        return Err(refuse("collides with a route this service already serves"));
-    }
-    Ok(path.to_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,7 +317,6 @@ mod tests {
             ("--host", "127.0.0.1"),
             ("--port", "8722"),
             ("--notary-wire-port", dead_port()),
-            ("--callback-path", "/auth/callback"),
             ("--allowed-app-origins", "https://app.example"),
             ("--ccdp-origin", "https://ccdp.example"),
             (
@@ -537,34 +483,6 @@ mod tests {
                 vec!["--allowed-app-origins", "http://app.example"],
             ),
             (
-                "a relative callback path",
-                vec!["--callback-path", "auth/callback"],
-            ),
-            (
-                "a callback path axum reads as a brace pattern",
-                vec!["--callback-path", "/auth/{rest}"],
-            ),
-            (
-                "a callback path with a colon segment",
-                vec!["--callback-path", "/auth/:cb"],
-            ),
-            (
-                "a callback path with a star segment",
-                vec!["--callback-path", "/auth/*rest"],
-            ),
-            (
-                "a callback path a browser would percent-encode",
-                vec!["--callback-path", "/auth/c\u{e4}llback"],
-            ),
-            (
-                "a callback path colliding with a fixed route",
-                vec!["--callback-path", "/api/v1/ceremony/config"],
-            ),
-            (
-                "a scheme-relative callback path",
-                vec!["--callback-path", "//evil.example/cb"],
-            ),
-            (
                 "a CCDP origin whose host carries a CSP directive separator",
                 vec!["--ccdp-origin", "https://a;b.example"],
             ),
@@ -617,10 +535,32 @@ mod tests {
 
     /// A github platform without a secret, or a secret without a github
     /// platform, refuses to start; neither is a deployment without the route.
+    /// The table's secret serves, and `GH_OAUTH_CLIENT_SECRET` overrides it.
     #[test]
     fn the_github_secret_and_the_github_platform_require_each_other() {
         let no_secret = vec!["--gh-oauth-client-secret", ""];
         assert!(build_state(&config(&no_secret)).is_err());
+
+        let in_the_table = vec![
+            "--platforms",
+            r#"[{"id":"github","client_id":"gh","versions":[1],"client_secret":"ghs_in_the_table"}]"#,
+            "--gh-oauth-client-secret",
+            "",
+        ];
+        let state = build_state(&config(&in_the_table)).unwrap();
+        assert_eq!(
+            state.github.as_ref().unwrap().credentials.client_secret,
+            "ghs_in_the_table"
+        );
+        let overridden = vec![
+            "--platforms",
+            r#"[{"id":"github","client_id":"gh","versions":[1],"client_secret":"ghs_in_the_table"}]"#,
+        ];
+        let state = build_state(&config(&overridden)).unwrap();
+        assert_eq!(
+            state.github.as_ref().unwrap().credentials.client_secret,
+            "ghs_secret"
+        );
 
         let x_only = vec![
             "--platforms",

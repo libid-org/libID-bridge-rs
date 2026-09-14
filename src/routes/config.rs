@@ -1,4 +1,4 @@
-//! The public ceremony configuration: `{ callbackPath, ccdpOrigin, platforms }`,
+//! The public ceremony configuration: `{ ccdpOrigin, platforms }`,
 //! one record built at startup and served to every admitted origin. It carries
 //! no secret, no admitted origin, no asset URL and no notary setting.
 

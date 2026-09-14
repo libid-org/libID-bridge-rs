@@ -61,7 +61,7 @@ pub(crate) struct TokenRequestBody {
     /// The PKCE verifier the browser derived for this ceremony.
     code_verifier: String,
     /// The registered callback URL: this bridge's public origin followed by
-    /// its callback path. Sent to GitHub byte for byte.
+    /// `/auth/callback`. Sent to GitHub byte for byte.
     redirect_uri: String,
     /// The notary the browser's identity session ran against, as a canonical
     /// origin: HTTPS, or HTTP on exactly `localhost` or `127.0.0.1`. This
@@ -244,12 +244,11 @@ pub(crate) async fn github_token(
             message: "the request body is not a TokenRequest".into(),
         }
     })?;
-    let redirect_uri = redirect_uri(&body.redirect_uri, &github.callback_path)
-        .ok_or_else(|| {
-            TokenError::bad_request(
-                "redirectUri is not this bridge's callback path under a canonical origin",
-            )
-        })?;
+    let redirect_uri = redirect_uri(&body.redirect_uri).ok_or_else(|| {
+        TokenError::bad_request(
+            "redirectUri is not /auth/callback under a canonical origin",
+        )
+    })?;
     // The spelling is checked here; where the host resolves, and whether it
     // is dialled, is decided in `egress` after the permit is taken.
     let notary_host = notary_host(&body.notary_address).ok_or_else(|| {
@@ -308,8 +307,9 @@ fn b64(bytes: &[u8]) -> String {
 
 /// `spelling`, if it is the registered callback URL: a canonical origin --
 /// HTTPS, or HTTP on exactly `localhost` or `127.0.0.1` -- followed by exactly
-/// `callback_path`, with no query, fragment or credentials.
-fn redirect_uri<'a>(spelling: &'a str, callback_path: &str) -> Option<&'a str> {
+/// `/auth/callback`, with no query, fragment or credentials.
+fn redirect_uri(spelling: &str) -> Option<&str> {
+    let callback_path = crate::routes::CALLBACK_PATH;
     let url = url::Url::parse(spelling).ok()?;
     if !(url.scheme() == "https" || crate::is_plaintext_loopback(&url))
         || url.query().is_some()
@@ -404,7 +404,7 @@ mod tests {
             "http://localhost:8722/auth/callback",
             "http://127.0.0.1:8722/auth/callback",
         ] {
-            assert_eq!(redirect_uri(ok, "/auth/callback"), Some(ok), "{ok}");
+            assert_eq!(redirect_uri(ok), Some(ok), "{ok}");
         }
         for bad in [
             "https://bridge.example/auth/callback/",
@@ -420,12 +420,8 @@ mod tests {
             "/auth/callback",
             "",
         ] {
-            assert_eq!(redirect_uri(bad, "/auth/callback"), None, "{bad}");
+            assert_eq!(redirect_uri(bad), None, "{bad}");
         }
-        assert_eq!(
-            redirect_uri("https://bridge.example/auth/callback", "/oauth/return"),
-            None
-        );
     }
 
     #[test]

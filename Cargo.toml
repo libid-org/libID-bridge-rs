@@ -66,6 +66,9 @@ clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 serde_json = "1.0"
+# The client secret's type: `Debug` redacts it, reading it is an explicit call,
+# and the memory is zeroed when it is dropped.
+secrecy = { version = "0.10", features = ["serde"] }
 thiserror = "2"
 tokio = { version = "1", features = [
     "rt-multi-thread",

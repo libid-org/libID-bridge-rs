@@ -331,7 +331,7 @@ mod fixtures {
     pub(super) fn credentials(client_secret: &str) -> crate::oauth::OAuthCredentials {
         crate::oauth::OAuthCredentials {
             client_id: "Iv1.0123456789abcdef".into(),
-            client_secret: client_secret.into(),
+            client_secret: secrecy::SecretString::from(client_secret.to_owned()),
         }
     }
 

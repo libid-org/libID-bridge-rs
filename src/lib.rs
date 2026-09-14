@@ -31,6 +31,10 @@ use error::{
     Error,
     Result,
 };
+use secrecy::{
+    ExposeSecret,
+    SecretString,
+};
 use state::AppState;
 use tokio::sync::Semaphore;
 use url::Url;
@@ -58,20 +62,22 @@ pub async fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
     routes::github_token::force_token_endpoint();
 
     // The exchange is present exactly when a github platform is enabled. Its
-    // secret is `GH_OAUTH_CLIENT_SECRET` where set, else the table's.
+    // secret is `GH_OAUTH_CLIENT_SECRET` where set, else the table's; an empty
+    // value is unset.
+    let set = |secret: &SecretString| !secret.expose_secret().is_empty();
+    let overriding = cfg.gh_oauth_client_secret.as_ref().filter(|s| set(s));
     let github = match platforms.iter().find(|p| p.is_github()) {
         Some(profile) => {
-            let secret = match cfg.gh_oauth_client_secret.as_str() {
-                "" => profile.client_secret().unwrap_or_default().to_owned(),
-                overriding => overriding.to_owned(),
-            };
-            if secret.is_empty() {
+            let Some(secret) = overriding
+                .or_else(|| profile.client_secret().filter(|s| set(s)))
+                .cloned()
+            else {
                 return Err(Error::Config {
                     detail: "the platforms enable github; set client_secret in its \
                              [[platforms]] table or GH_OAUTH_CLIENT_SECRET"
                         .into(),
                 });
-            }
+            };
             Some(Arc::new(state::GithubExchange {
                 credentials: oauth::OAuthCredentials {
                     client_id: profile.client_id().to_owned(),
@@ -92,7 +98,7 @@ pub async fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
                 permits: Semaphore::new(state::MAX_CONCURRENT_EXCHANGES),
             }))
         }
-        None if cfg.gh_oauth_client_secret.is_empty() => None,
+        None if overriding.is_none() => None,
         None => {
             return Err(Error::Config {
                 detail: "GH_OAUTH_CLIENT_SECRET is set but no platform enables github"
@@ -462,7 +468,13 @@ mod tests {
         ];
         let state = build_state(&Config::fixture(&in_the_table)).await.unwrap();
         assert_eq!(
-            state.github.as_ref().unwrap().credentials.client_secret,
+            state
+                .github
+                .as_ref()
+                .unwrap()
+                .credentials
+                .client_secret
+                .expose_secret(),
             "ghs_in_the_table"
         );
         let overridden = vec![
@@ -471,7 +483,13 @@ mod tests {
         ];
         let state = build_state(&Config::fixture(&overridden)).await.unwrap();
         assert_eq!(
-            state.github.as_ref().unwrap().credentials.client_secret,
+            state
+                .github
+                .as_ref()
+                .unwrap()
+                .credentials
+                .client_secret
+                .expose_secret(),
             "ghs_secret"
         );
 

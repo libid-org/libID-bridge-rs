@@ -237,6 +237,30 @@ mod file_tests {
         );
     }
 
+    /// An `x` table carries a client id and versions and no secret; the
+    /// deployment it describes runs no token exchange.
+    #[test]
+    fn an_x_table_is_a_public_client_with_no_secret() {
+        let cfg = resolved(
+            r#"
+            [[platforms]]
+            id = "x"
+            client_id = "WHRlc3RjbGllbnQ6MTpjaQ"
+            versions = [1]
+            "#,
+            &[],
+        )
+        .expect("a file this deployment can read");
+        let platforms = crate::deployment::platforms(cfg.platforms)
+            .expect("the records the table describes");
+        assert_eq!(platforms.len(), 1);
+        assert_eq!(platforms[0].id(), crate::deployment::PlatformId::X);
+        assert_eq!(platforms[0].client_id(), "WHRlc3RjbGllbnQ6MTpjaQ");
+        assert_eq!(platforms[0].versions(), [1]);
+        assert!(platforms[0].client_secret().is_none());
+        assert!(!platforms[0].is_github());
+    }
+
     /// A flag beats the file.
     #[test]
     fn the_command_line_beats_the_file() {

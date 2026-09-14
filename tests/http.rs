@@ -548,6 +548,30 @@ async fn config_carries_no_secret_and_no_admitted_origin() {
     );
 }
 
+/// An enabled X platform is published as its client id and versions, and
+/// nothing else: X's ceremony runs browser to notary, and the bridge holds
+/// no secret for it.
+#[tokio::test]
+async fn config_publishes_an_x_entry_of_exactly_client_id_and_versions() {
+    let state = deployment(&[
+        "--platforms",
+        &format!(
+            r#"[{{"id":"github","client_id":"{}","versions":[1]}},{{"id":"x","client_id":"WHRlc3RjbGllbnQ6MTpjaQ","versions":[1]}}]"#,
+            fixtures::CLIENT_ID
+        ),
+    ])
+    .await;
+    let body = body_of(config_with(state, &[("origin", APP_ORIGIN)], "").await).await;
+
+    let x = body["platforms"]["x"].as_object().expect("an x entry");
+    let mut keys: Vec<_> = x.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["ceremonyVersions", "clientId"]);
+    assert_eq!(x["clientId"], "WHRlc3RjbGllbnQ6MTpjaQ");
+    assert_eq!(x["ceremonyVersions"], serde_json::json!([1]));
+    assert_eq!(body["platforms"]["github"]["clientId"], fixtures::CLIENT_ID);
+}
+
 /// The origin is decided before the query.
 #[tokio::test]
 async fn config_refuses_a_query_but_reads_the_origin_first() {
@@ -613,6 +637,11 @@ async fn the_callback_document_is_the_same_bytes_whatever_the_request() {
         (
             "/auth/callback",
             vec![("referer", "https://github.com/login")],
+        ),
+        // X's return: a long code, and X's own page as the referrer.
+        (
+            "/auth/callback?code=WjE2YmZDNVFrWXNOVHdyOHdLbWZ6dWpqUzRXbjZ4R1pyY2JmT2JJWGhMTXFhOjE3NTgwMDAwMDAwMDA6MTowOmFjOjE&state=v1.9e1f",
+            vec![("referer", "https://x.com/")],
         ),
         // A fragment never reaches the wire.
         ("/auth/callback#id_token=x&state=v1.9e1f", vec![]),

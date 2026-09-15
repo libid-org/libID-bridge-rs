@@ -211,9 +211,6 @@ impl Distribution {
     }
 }
 
-/// The public origin every fixture deployment is reached at.
-pub const PUBLIC_ORIGIN: &str = "https://bridge.example";
-
 /// The client id every fixture deployment enables GitHub with.
 pub const CLIENT_ID: &str = "Iv1.0123456789abcdef";
 
@@ -237,7 +234,6 @@ impl config::Config {
         let mut flags: Vec<(&str, &str)> = vec![
             ("--host", "127.0.0.1"),
             ("--port", "8722"),
-            ("--public-origin", PUBLIC_ORIGIN),
             ("--allowed-app-origins", "https://app.example"),
             ("--ccdp-origin", Distribution::shared().origin()),
             ("--platforms", &platforms),

@@ -21,8 +21,8 @@ gas, keeps no database, and talks to no chain.
 1. The application reads `GET /api/v1/ceremony/config` from an admitted
    origin: the CCDP Distribution to load and, per enabled platform, the public
    client id, the ceremony versions and, for GitHub, the public
-   `tokenExchangeCredential`. It derives the redirect URI itself:
-   `{publicOrigin}/auth/callback`.
+   `tokenExchangeCredential`. It derives the redirect URI itself from the
+   bridge origin it already knows: `{bridgeOrigin}/auth/callback`.
 2. The browser derives its PKCE verifier, opens the provider's authorization
    page, and is redirected to `GET /auth/callback` on this bridge: one
    document, the same bytes for every request, written by the Distribution.
@@ -55,7 +55,7 @@ out; origin checks and a closed input surface cannot constrain its owner.
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | Liveness probe. Returns `OK`. Not one of the contract's routes — see below. |
-| `GET` | `/api/v1/ceremony/config` | The public ceremony configuration: `{ ccdpOrigin, platforms }`. Readable from an admitted origin, or by a same-origin `GET` without `Origin` when this bridge's public origin is itself listed. `403` for any other origin, `400` for a query. |
+| `GET` | `/api/v1/ceremony/config` | The public ceremony configuration: `{ ccdpOrigin, platforms }`. Readable from an admitted origin, or by a same-origin `GET` without `Origin` on `Sec-Fetch-Site: same-origin`. `403` for any other origin, `400` for a query. |
 | `GET` | `/auth/callback` | The registered OAuth callback document: the CCDP Distribution's artifact with this deployment's data inserted, identical for every request. |
 
 `/health` is not one of the contract's two routes. The published image's
@@ -158,7 +158,6 @@ file, then default. `bridge.toml.example` beside this README is a complete
 starting point:
 
 ```toml
-public_origin       = "https://bridge.example"
 allowed_app_origins = ["https://app.example", "https://wallet.example"]
 
 [[platforms]]
@@ -179,8 +178,7 @@ the credential.
 |---|---|---|---|
 | `host` | `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` in the container image). |
 | `port` | `PORT` | `8722` | Bind port. |
-| `public_origin` | `PUBLIC_ORIGIN` | *(required)* | The origin this bridge is reached at: the one every OAuth App registers `/auth/callback` under, and the one the application derives its redirect URI from. HTTPS, or HTTP on `localhost` or `127.0.0.1`; folded to canonical form. Listed in `allowed_app_origins`, it also admits a same-origin read of the configuration. |
-| `allowed_app_origins` | `ALLOWED_APP_ORIGINS`, comma-separated | *(required)* | Application origins. Exact origins, no patterns; HTTPS, or HTTP on `localhost` or `127.0.0.1`. Each must already be canonical — a trailing slash, an uppercase host or a default port is refused with the canonical spelling named, not folded — and a duplicate is refused. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once. It is the one admission rule: the configuration route admits exactly one `Origin` from it, and the callback document is told the same set. |
+| `allowed_app_origins` | `ALLOWED_APP_ORIGINS`, comma-separated | *(required)* | Application origins. Exact origins, no patterns; HTTPS, or HTTP on `localhost` or `127.0.0.1`. Each must already be canonical — a trailing slash, an uppercase host or a default port is refused with the canonical spelling named, not folded — and a duplicate is refused. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once. It is the one admission rule: the configuration route admits exactly one `Origin` from it, and the callback document is told the same set. A same-origin read carries no `Origin` and is admitted on `Sec-Fetch-Site: same-origin` alone. |
 | `ccdp_origin` | `CCDP_ORIGIN` | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/callback.html` and everything the browser runs after it, HTTPS, or HTTP on `localhost` or `127.0.0.1`. Published in the configuration and inserted into the callback document. Omitting it selects the canonical libID Distribution. |
 | `platforms` | — | *(required)* | The enabled platforms, as `[[platforms]]` tables: `id`, `client_id`, `versions`, and for `github` its `token_exchange_credential`. File only. |
 | — | `LIBID_CONFIG`, `--config` | *(none)* | Path to the configuration file. |

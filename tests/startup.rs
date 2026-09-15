@@ -33,10 +33,8 @@ fn config_file(platforms: &str) -> std::path::PathBuf {
         &path,
         format!(
             "host = \"127.0.0.1\"\nport = 0\n\
-             public_origin = \"{}\"\n\
              allowed_app_origins = [\"https://app.example\"]\n\
              ccdp_origin = \"{}\"\n{platforms}",
-            fixtures::PUBLIC_ORIGIN,
             Distribution::shared().origin(),
         ),
     )

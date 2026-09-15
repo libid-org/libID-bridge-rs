@@ -1,7 +1,7 @@
 //! The public ceremony configuration: `{ ccdpOrigin, platforms }`, one record
 //! built at startup and served to every admitted origin, and to a same-origin
-//! read when this bridge's own origin is admitted. It carries no secret, no
-//! admitted origin, no asset URL and no notary setting.
+//! read. It carries no secret, no admitted origin, no asset URL and no notary
+//! setting.
 
 use std::sync::Arc;
 
@@ -42,8 +42,7 @@ enum Admission {
     /// allow-origin.
     Listed(HeaderValue),
     /// No `Origin`: a same-origin browser `GET`, which carries none, on
-    /// `Sec-Fetch-Site: same-origin` when this bridge's public origin is
-    /// itself admitted. It needs no CORS header.
+    /// `Sec-Fetch-Site: same-origin`. It needs no CORS header.
     SameOrigin,
 }
 
@@ -52,8 +51,8 @@ enum Admission {
 /// One `Origin` must match an admitted origin exactly: `null`, a malformed
 /// value, an unlisted one and two headers are refused whatever else the
 /// request carries. With no `Origin`, exactly one `Sec-Fetch-Site:
-/// same-origin` admits when the public origin is listed. `Referer`, the
-/// request host and absent fetch metadata admit nothing.
+/// same-origin` admits. `Referer`, the request host and absent fetch
+/// metadata admit nothing.
 fn admission(state: &AppState, headers: &HeaderMap) -> Option<Admission> {
     match crate::routes::Origins::of(headers) {
         crate::routes::Origins::One(origin) => {
@@ -68,9 +67,7 @@ fn admission(state: &AppState, headers: &HeaderMap) -> Option<Admission> {
         crate::routes::Origins::Absent => {
             let mut sites = headers.get_all(SEC_FETCH_SITE).iter();
             match (sites.next(), sites.next()) {
-                (Some(site), None)
-                    if site == "same-origin" && state.public_origin_admitted =>
-                {
+                (Some(site), None) if site == "same-origin" => {
                     Some(Admission::SameOrigin)
                 }
                 _ => None,

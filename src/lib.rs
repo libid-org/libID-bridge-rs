@@ -41,7 +41,6 @@ use state::AppState;
 pub async fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
     let allowed_app_origins = allowed_app_origins(&cfg.allowed_app_origins)?;
     let ccdp_origin = Origin::parse("CCDP_ORIGIN", &cfg.ccdp_origin)?;
-    let public_origin = public_origin(&cfg.public_origin)?;
     // The effective set `allowedAppOrigins ∪ {ccdpOrigin}`: the one admission
     // rule of the configuration route, and what the callback document is
     // told. The resolved CCDP origin joins once; an overridden `CCDP_ORIGIN`
@@ -68,7 +67,6 @@ pub async fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
         callback,
         callback_tx,
         upstream,
-        public_origin_admitted: allowed_origins.contains(&public_origin),
         allowed_origins,
     }))
 }
@@ -126,20 +124,6 @@ fn allowed_app_origins(list: &[String]) -> Result<Vec<Origin>> {
     Ok(out)
 }
 
-/// The origin this bridge is reached at, in canonical form: the one every
-/// OAuth App registers `/auth/callback` under, and the one a same-origin read
-/// of the configuration is judged against. Empty is refused.
-fn public_origin(spelling: &str) -> Result<Origin> {
-    if spelling.trim().is_empty() {
-        return Err(Error::Config {
-            detail: "PUBLIC_ORIGIN is empty; set it to the origin this bridge is \
-                     reached at, the one the OAuth Apps register /auth/callback under"
-                .into(),
-        });
-    }
-    Origin::parse("PUBLIC_ORIGIN", spelling)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -167,28 +151,6 @@ mod tests {
         let record: serde_json::Value =
             serde_json::from_slice(&state.ceremony_config).unwrap();
         assert_eq!(record["ccdpOrigin"], Distribution::shared().origin());
-    }
-
-    /// A same-origin read of the configuration is admitted exactly when the
-    /// public origin is listed as an application origin; the public origin is
-    /// folded to its canonical form first.
-    #[tokio::test]
-    async fn a_same_origin_read_is_admitted_only_when_the_public_origin_is_listed() {
-        assert!(
-            !build_state(&Config::fixture(&[]))
-                .await
-                .unwrap()
-                .public_origin_admitted
-        );
-        let listed = build_state(&Config::fixture(&[
-            "--public-origin",
-            "https://Bridge.example:443",
-            "--allowed-app-origins",
-            "https://app.example,https://bridge.example",
-        ]))
-        .await
-        .unwrap();
-        assert!(listed.public_origin_admitted);
     }
 
     /// The effective set is `allowedAppOrigins ∪ {ccdpOrigin}`: the resolved
@@ -220,15 +182,6 @@ mod tests {
     #[tokio::test]
     async fn a_deployment_that_could_not_serve_a_ceremony_stops_the_process() {
         for (why, args) in [
-            ("no public origin", vec!["--public-origin", ""]),
-            (
-                "a public origin carrying a path",
-                vec!["--public-origin", "https://bridge.example/auth"],
-            ),
-            (
-                "a plaintext public origin that is not localhost or 127.0.0.1",
-                vec!["--public-origin", "http://bridge.example"],
-            ),
             ("no admitted origin", vec!["--allowed-app-origins", ""]),
             (
                 "a duplicate admitted origin",

@@ -13,10 +13,6 @@
 host = "127.0.0.1"
 port = 8722
 
-# The origin this bridge is reached at: the one every OAuth App registers
-# /auth/callback under.
-public_origin = "https://bridge.example"
-
 # Application origins admitted to read the public ceremony configuration, each
 # in canonical form: no trailing slash, lowercase host, no default port.
 allowed_app_origins = ["https://app.example", "https://wallet.example"]

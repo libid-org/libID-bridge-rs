@@ -36,12 +36,6 @@ pub struct Config {
     #[arg(long, env = "PORT", default_value = "8722")]
     pub port: u16,
 
-    /// The origin this bridge is reached at: the canonical origin every OAuth
-    /// App registers `/auth/callback` under. HTTPS, or HTTP on `localhost` or
-    /// `127.0.0.1`.
-    #[arg(long, env = "PUBLIC_ORIGIN", default_value = "")]
-    pub public_origin: String,
-
     /// Comma-separated application origins admitted to read the public
     /// ceremony configuration. Nonempty, each in canonical form.
     #[arg(long, env = "ALLOWED_APP_ORIGINS", value_delimiter = ',')]
@@ -73,8 +67,6 @@ pub struct FileConfig {
     pub host: Option<String>,
     /// [`Config::port`].
     pub port: Option<u16>,
-    /// [`Config::public_origin`].
-    pub public_origin: Option<String>,
     /// [`Config::allowed_app_origins`].
     pub allowed_app_origins: Option<Vec<String>>,
     /// [`Config::ccdp_origin`].
@@ -137,9 +129,6 @@ impl Config {
         if defaulted(&matches, "port") {
             cfg.port = file.port.unwrap_or(cfg.port);
         }
-        if defaulted(&matches, "public_origin") {
-            cfg.public_origin = file.public_origin.unwrap_or(cfg.public_origin);
-        }
         if defaulted(&matches, "ccdp_origin") {
             cfg.ccdp_origin = file.ccdp_origin.unwrap_or(cfg.ccdp_origin);
         }
@@ -180,7 +169,6 @@ mod file_tests {
         let cfg = resolved(
             r#"
             port = 9110
-            public_origin = "https://bridge.example"
             allowed_app_origins = ["https://app.example", "https://wallet.example"]
 
             [[platforms]]
@@ -194,7 +182,6 @@ mod file_tests {
         .expect("a file this deployment can read");
 
         assert_eq!(cfg.port, 9110);
-        assert_eq!(cfg.public_origin, "https://bridge.example");
         assert_eq!(
             cfg.allowed_app_origins,
             ["https://app.example", "https://wallet.example"]
@@ -284,7 +271,6 @@ mod file_tests {
             .expect("the example beside this code");
 
         assert_eq!(cfg.port, 8722);
-        assert_eq!(cfg.public_origin, "https://bridge.example");
         assert_eq!(
             cfg.allowed_app_origins,
             ["https://app.example", "https://wallet.example"]
@@ -305,11 +291,13 @@ mod file_tests {
         assert!(err.to_string().contains("prot"), "{err}");
     }
 
-    /// `notary_wire_port` and `gh_oauth_client_secret` are not settings: a
-    /// file naming either is refused like any other unknown key.
+    /// `public_origin`, `notary_wire_port` and `gh_oauth_client_secret` are
+    /// not settings: a file naming any of them is refused like any other
+    /// unknown key.
     #[test]
     fn a_former_key_is_refused() {
         for former in [
+            "public_origin = \"https://bridge.example\"\n",
             "notary_wire_port = 7047\n",
             "gh_oauth_client_secret = \"s\"\n",
         ] {

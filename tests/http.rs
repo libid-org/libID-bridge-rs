@@ -186,13 +186,12 @@ async fn config_varies_on_origin_and_fetch_site() {
 }
 
 /// A page served from this bridge's own origin reads the configuration with
-/// no `Origin` and no CORS: `Sec-Fetch-Site: same-origin`, when the public
-/// origin is itself listed.
+/// no `Origin` and no CORS: `Sec-Fetch-Site: same-origin` alone admits it,
+/// whatever the allowlist holds.
 #[tokio::test]
-async fn config_admits_a_same_origin_read_when_the_public_origin_is_listed() {
-    let origins = format!("{APP_ORIGIN},https://bridge.example");
-    let listed = deployment(&["--allowed-app-origins", &origins]).await;
-    let resp = config_with(listed, &[("sec-fetch-site", "same-origin")], "").await;
+async fn config_admits_a_same_origin_read() {
+    let resp =
+        config_with(test_state().await, &[("sec-fetch-site", "same-origin")], "").await;
     assert_eq!(resp.status(), StatusCode::OK);
     let h = resp.headers();
     assert!(
@@ -206,22 +205,11 @@ async fn config_admits_a_same_origin_read_when_the_public_origin_is_listed() {
     assert_eq!(body["ccdpOrigin"], ccdp_origin());
 }
 
-/// Fetch metadata admits nothing on its own: the public origin must be
-/// listed, the site must be exactly `same-origin` and sent once, and an
-/// explicit `Origin` is judged as an `Origin`, whatever the metadata says.
+/// Fetch metadata admits nothing but exactly one `Sec-Fetch-Site:
+/// same-origin`, and an explicit `Origin` is judged as an `Origin`, whatever
+/// the metadata says.
 #[tokio::test]
 async fn config_does_not_infer_admission_from_fetch_metadata_alone() {
-    let unlisted =
-        config_with(test_state().await, &[("sec-fetch-site", "same-origin")], "").await;
-    assert_eq!(
-        unlisted.status(),
-        StatusCode::FORBIDDEN,
-        "the public origin is not listed"
-    );
-
-    let origins = format!("{APP_ORIGIN},https://bridge.example");
-    let args = ["--allowed-app-origins", origins.as_str()];
-    let listed = || deployment(&args);
     for headers in [
         vec![("sec-fetch-site", "same-site")],
         vec![("sec-fetch-site", "cross-site")],
@@ -241,13 +229,13 @@ async fn config_does_not_infer_admission_from_fetch_metadata_alone() {
             ("host", "bridge.example"),
         ],
     ] {
-        let resp = config_with(listed().await, &headers, "").await;
+        let resp = config_with(test_state().await, &headers, "").await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{headers:?}");
         assert!(resp.headers().get("access-control-allow-origin").is_none());
     }
 
     let resp = config_with(
-        listed().await,
+        test_state().await,
         &[("origin", APP_ORIGIN), ("sec-fetch-site", "cross-site")],
         "",
     )
@@ -330,11 +318,13 @@ async fn config_publishes_an_x_entry_of_exactly_client_id_and_versions() {
     assert_eq!(body["platforms"]["github"]["clientId"], fixtures::CLIENT_ID);
 }
 
-/// This bridge's own public origin, sent as an `Origin`, is admitted exactly
-/// when it is listed as an application origin, like any other.
+/// This bridge's own origin, sent as an `Origin`, is admitted exactly when
+/// it is listed as an application origin, like any other: the bridge does
+/// not know its own origin.
 #[tokio::test]
 async fn the_bridges_own_origin_is_admitted_only_when_listed() {
-    let resp = get_config(Some(fixtures::PUBLIC_ORIGIN), "").await;
+    const BRIDGE_ORIGIN: &str = "https://bridge.example";
+    let resp = get_config(Some(BRIDGE_ORIGIN), "").await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN, "unlisted");
 
     let listed = deployment(&[
@@ -342,12 +332,9 @@ async fn the_bridges_own_origin_is_admitted_only_when_listed() {
         "https://app.example,https://bridge.example",
     ])
     .await;
-    let resp = config_with(listed, &[("origin", fixtures::PUBLIC_ORIGIN)], "").await;
+    let resp = config_with(listed, &[("origin", BRIDGE_ORIGIN)], "").await;
     assert_eq!(resp.status(), StatusCode::OK, "listed");
-    assert_eq!(
-        resp.headers()["access-control-allow-origin"],
-        fixtures::PUBLIC_ORIGIN
-    );
+    assert_eq!(resp.headers()["access-control-allow-origin"], BRIDGE_ORIGIN);
 }
 
 /// The origin is decided before the query.

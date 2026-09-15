@@ -292,14 +292,14 @@ mod file_tests {
     /// not settings: a file naming any of them is refused like any other
     /// unknown key.
     #[test]
-    fn a_former_key_is_refused() {
-        for former in [
+    fn a_key_this_bridge_does_not_read_is_refused() {
+        for unread in [
             "public_origin = \"https://bridge.example\"\n",
             "notary_wire_port = 7047\n",
             "gh_oauth_client_secret = \"s\"\n",
         ] {
-            let err = resolved(former, &[]).expect_err("a key this bridge does not read");
-            let key = former.split(' ').next().unwrap();
+            let err = resolved(unread, &[]).expect_err("a key this bridge does not read");
+            let key = unread.split(' ').next().unwrap();
             assert!(err.to_string().contains(key), "{err}");
         }
     }

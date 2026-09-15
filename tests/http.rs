@@ -350,12 +350,12 @@ async fn config_refuses_a_query_but_reads_the_origin_first() {
     );
 }
 
-/// The former token route is not served: a `POST` and a preflight on its
-/// path are answered `404` with no CORS header, GitHub enabled or not.
+/// `/api/v1/ceremony/github-token` is not served: a `POST` and a preflight
+/// there are answered `404` with no CORS header, GitHub enabled or not.
 /// Nothing is exchanged and no notary is dialled.
 #[tokio::test]
-async fn the_former_token_route_is_not_served() {
-    const FORMER: &str = "/api/v1/ceremony/github-token";
+async fn the_github_token_path_is_not_served() {
+    const PATH: &str = "/api/v1/ceremony/github-token";
     const BODY: &str = r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"iMSTNh6gQkRnBGlY1c0MUOsD7MCO4G8C7ph1_gIZs5I","notaryAddress":"https://127.0.0.1:7048"}"#;
     let x_only = deployment(&[
         "--platforms",
@@ -366,7 +366,7 @@ async fn the_former_token_route_is_not_served() {
     for state in [test_state().await, x_only] {
         let resp = app(state.clone())
             .oneshot(
-                Request::post(FORMER)
+                Request::post(PATH)
                     .header("origin", ccdp_origin())
                     .header("content-type", "application/json")
                     .body(Body::from(BODY))
@@ -381,7 +381,7 @@ async fn the_former_token_route_is_not_served() {
             .oneshot(
                 Request::builder()
                     .method("OPTIONS")
-                    .uri(FORMER)
+                    .uri(PATH)
                     .header("origin", ccdp_origin())
                     .header("access-control-request-method", "POST")
                     .header("access-control-request-headers", "content-type")

@@ -203,25 +203,26 @@ fn foreign_subtree(html: &str, open: usize) -> Result<Option<usize>, ArtifactErr
         return Ok(Some(tag_end));
     }
 
-    // Otherwise walk to the matching close, counting nesting.
+    // Otherwise walk to the matching close, counting nesting. Every tag of
+    // the subtree begins with `<`, so one forward pass over the bytes reaches
+    // the match: the position never moves back, whatever the nesting.
     let tail = &html.as_bytes()[tag_end..];
     let (o, c) = (format!("<{name}"), format!("</{name}"));
     let (o, c) = (o.as_bytes(), c.as_bytes());
     let (mut depth, mut i) = (1usize, 0usize);
     while depth > 0 {
-        let next_open = find_ci(&tail[i..], o).map(|k| i + k);
-        let Some(next_close) = find_ci(&tail[i..], c).map(|k| i + k) else {
+        let Some(k) = tail[i..].iter().position(|b| *b == b'<') else {
             return Err(ArtifactError::Malformed(open));
         };
-        match next_open {
-            Some(n) if n < next_close => {
-                depth += 1;
-                i = n + o.len();
-            }
-            _ => {
-                depth -= 1;
-                i = next_close + c.len();
-            }
+        let at = i + k;
+        if starts_with_ci(&tail[at..], c) {
+            depth -= 1;
+            i = at + c.len();
+        } else if starts_with_ci(&tail[at..], o) {
+            depth += 1;
+            i = at + o.len();
+        } else {
+            i = at + 1;
         }
     }
     let end = end_of_tag(html, open, tag_end + i)?;
@@ -410,6 +411,31 @@ mod tests {
             Layout::scan(&module("let x = 1;\u{0}")),
             Err(ArtifactError::Forbidden("a control byte", _))
         ));
+    }
+
+    /// A subtree nested a hundred thousand deep is walked in one pass over
+    /// its bytes.
+    #[test]
+    fn a_deeply_nested_subtree_is_walked_once() {
+        const DEPTH: usize = 100_000;
+        let mut logo = String::with_capacity(DEPTH * 11);
+        for _ in 0..DEPTH {
+            logo.push_str("<svg>");
+        }
+        for _ in 0..DEPTH {
+            logo.push_str("</svg>");
+        }
+
+        let started = std::time::Instant::now();
+        let end = foreign_subtree(&logo, 0).expect("a well-formed subtree");
+        let took = started.elapsed();
+
+        assert_eq!(end, Some(logo.len()));
+        assert!(
+            took < std::time::Duration::from_secs(5),
+            "the walk took {took:?} over {} bytes",
+            logo.len()
+        );
     }
 
     /// Every script shape but the two this bridge reads is refused; foreign

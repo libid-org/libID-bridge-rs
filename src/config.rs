@@ -5,7 +5,6 @@ use clap::{
     FromArgMatches,
     Parser,
 };
-use secrecy::SecretString;
 use serde::Deserialize;
 
 use crate::{
@@ -38,15 +37,10 @@ pub struct Config {
     pub port: u16,
 
     /// The origin this bridge is reached at: the canonical origin every OAuth
-    /// App registers `/auth/callback` under. The token exchange sends that
-    /// URL as its redirect URI. HTTPS, or HTTP on `localhost` or `127.0.0.1`.
+    /// App registers `/auth/callback` under. HTTPS, or HTTP on `localhost` or
+    /// `127.0.0.1`.
     #[arg(long, env = "PUBLIC_ORIGIN", default_value = "")]
     pub public_origin: String,
-
-    /// The port of the notary's MPC-TLS wire listener. Each token request
-    /// names the notary; this bridge dials that host on this port.
-    #[arg(long, env = "NOTARY_WIRE_PORT", default_value_t = 7047)]
-    pub notary_wire_port: u16,
 
     /// Comma-separated application origins admitted to read the public
     /// ceremony configuration. Nonempty, each in canonical form.
@@ -61,24 +55,10 @@ pub struct Config {
 
     /// The enabled platforms, from the configuration file's `[[platforms]]`
     /// tables: each names a platform, its public client id, the ceremony
-    /// versions it advertises and, for `github`, its client secret.
+    /// versions it advertises and, for `github`, the public token-exchange
+    /// credential.
     #[arg(skip)]
     pub platforms: Vec<PlatformProfile>,
-
-    /// GitHub OAuth App client secret: overrides the `client_secret` of the
-    /// `github` platform table. Refused when no platform is `github`.
-    #[arg(
-        long,
-        env = "GH_OAUTH_CLIENT_SECRET",
-        hide_env_values = true,
-        value_parser = secret
-    )]
-    pub gh_oauth_client_secret: Option<SecretString>,
-}
-
-/// A flag or variable value as a secret.
-fn secret(spelling: &str) -> std::result::Result<SecretString, std::convert::Infallible> {
-    Ok(SecretString::from(spelling.to_owned()))
 }
 
 /// The configuration file.
@@ -95,8 +75,6 @@ pub struct FileConfig {
     pub port: Option<u16>,
     /// [`Config::public_origin`].
     pub public_origin: Option<String>,
-    /// [`Config::notary_wire_port`].
-    pub notary_wire_port: Option<u16>,
     /// [`Config::allowed_app_origins`].
     pub allowed_app_origins: Option<Vec<String>>,
     /// [`Config::ccdp_origin`].
@@ -108,7 +86,7 @@ pub struct FileConfig {
     /// id = "github"
     /// client_id = "Iv1.0123456789abcdef"
     /// versions = [1]
-    /// client_secret = "..."
+    /// token_exchange_credential = "..."
     /// ```
     pub platforms: Option<Vec<PlatformProfile>>,
 }
@@ -162,9 +140,6 @@ impl Config {
         if defaulted(&matches, "public_origin") {
             cfg.public_origin = file.public_origin.unwrap_or(cfg.public_origin);
         }
-        if defaulted(&matches, "notary_wire_port") {
-            cfg.notary_wire_port = file.notary_wire_port.unwrap_or(cfg.notary_wire_port);
-        }
         if defaulted(&matches, "ccdp_origin") {
             cfg.ccdp_origin = file.ccdp_origin.unwrap_or(cfg.ccdp_origin);
         }
@@ -179,9 +154,8 @@ impl Config {
 
 #[cfg(test)]
 mod file_tests {
-    use secrecy::ExposeSecret;
-
     use super::*;
+    use crate::deployment::PlatformId;
 
     /// Write a configuration file and resolve against it.
     fn resolved(toml: &str, flags: &[&str]) -> Result<Config> {
@@ -213,7 +187,7 @@ mod file_tests {
             id = "github"
             client_id = "Iv1.0123456789abcdef"
             versions = [1]
-            client_secret = "ghs_from_the_file"
+            token_exchange_credential = "c0ffee_from_the_file"
             "#,
             &[],
         )
@@ -230,17 +204,34 @@ mod file_tests {
         assert_eq!(platforms.len(), 1);
         assert_eq!(platforms[0].client_id(), "Iv1.0123456789abcdef");
         assert_eq!(
-            platforms[0]
-                .client_secret()
-                .map(ExposeSecret::expose_secret),
-            Some("ghs_from_the_file")
+            platforms[0].token_exchange_credential(),
+            Some("c0ffee_from_the_file")
         );
     }
 
-    /// An `x` table carries a client id and versions and no secret; the
-    /// deployment it describes runs no token exchange.
+    /// A `github` table without its credential is refused, with the missing
+    /// key named.
     #[test]
-    fn an_x_table_is_a_public_client_with_no_secret() {
+    fn a_github_table_without_its_credential_is_refused() {
+        let err = resolved(
+            r#"
+            [[platforms]]
+            id = "github"
+            client_id = "Iv1.0123456789abcdef"
+            versions = [1]
+            "#,
+            &[],
+        )
+        .expect_err("no credential");
+        assert!(
+            err.to_string().contains("token_exchange_credential"),
+            "{err}"
+        );
+    }
+
+    /// An `x` table carries a client id and versions and no credential.
+    #[test]
+    fn an_x_table_is_a_public_client_with_no_credential() {
         let cfg = resolved(
             r#"
             [[platforms]]
@@ -254,11 +245,10 @@ mod file_tests {
         let platforms = crate::deployment::platforms(cfg.platforms)
             .expect("the records the table describes");
         assert_eq!(platforms.len(), 1);
-        assert_eq!(platforms[0].id(), crate::deployment::PlatformId::X);
+        assert_eq!(platforms[0].id(), PlatformId::X);
         assert_eq!(platforms[0].client_id(), "WHRlc3RjbGllbnQ6MTpjaQ");
         assert_eq!(platforms[0].versions(), [1]);
-        assert!(platforms[0].client_secret().is_none());
-        assert!(!platforms[0].is_github());
+        assert!(platforms[0].token_exchange_credential().is_none());
     }
 
     /// A flag beats the file.
@@ -295,14 +285,17 @@ mod file_tests {
 
         assert_eq!(cfg.port, 8722);
         assert_eq!(cfg.public_origin, "https://bridge.example");
-        assert_eq!(cfg.notary_wire_port, 7047);
         assert_eq!(
             cfg.allowed_app_origins,
             ["https://app.example", "https://wallet.example"]
         );
         let platforms = crate::deployment::platforms(cfg.platforms)
             .expect("the example's platform table");
-        assert!(platforms.iter().any(|p| p.is_github()));
+        let github = platforms
+            .iter()
+            .find(|p| p.id() == PlatformId::Github)
+            .expect("the example enables github");
+        assert!(github.token_exchange_credential().is_some());
     }
 
     /// A misspelled key is refused rather than ignored.
@@ -312,17 +305,17 @@ mod file_tests {
         assert!(err.to_string().contains("prot"), "{err}");
     }
 
-    /// `Debug` prints neither the flag's secret nor the table's.
+    /// `notary_wire_port` and `gh_oauth_client_secret` are not settings: a
+    /// file naming either is refused like any other unknown key.
     #[test]
-    fn the_secret_is_redacted_from_debug_output() {
-        let cfg = resolved(
-            "[[platforms]]\nid = \"github\"\nclient_id = \"Iv1.0\"\nversions = [1]\n\
-             client_secret = \"ghs_from_the_file\"\n",
-            &["--gh-oauth-client-secret", "ghs_from_a_flag"],
-        )
-        .expect("readable");
-        let printed = format!("{cfg:?}");
-        assert!(!printed.contains("ghs_"), "{printed}");
-        assert!(printed.contains("REDACTED"), "{printed}");
+    fn a_former_key_is_refused() {
+        for former in [
+            "notary_wire_port = 7047\n",
+            "gh_oauth_client_secret = \"s\"\n",
+        ] {
+            let err = resolved(former, &[]).expect_err("a key this bridge does not read");
+            let key = former.split(' ').next().unwrap();
+            assert!(err.to_string().contains(key), "{err}");
+        }
     }
 }

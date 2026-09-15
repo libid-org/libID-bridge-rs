@@ -22,8 +22,7 @@ use libid_server_rs::fixtures::{
     Distribution,
 };
 
-/// A configuration file for the binary, pointed at the shared Distribution
-/// and a wire port nothing listens on.
+/// A configuration file for the binary, pointed at the shared Distribution.
 fn config_file(platforms: &str) -> std::path::PathBuf {
     let path = std::env::temp_dir().join(format!(
         "libid-startup-{}-{:?}.toml",
@@ -33,11 +32,10 @@ fn config_file(platforms: &str) -> std::path::PathBuf {
     std::fs::write(
         &path,
         format!(
-            "host = \"127.0.0.1\"\nport = 0\nnotary_wire_port = {}\n\
+            "host = \"127.0.0.1\"\nport = 0\n\
              public_origin = \"{}\"\n\
              allowed_app_origins = [\"https://app.example\"]\n\
              ccdp_origin = \"{}\"\n{platforms}",
-            fixtures::dead_port(),
             fixtures::PUBLIC_ORIGIN,
             Distribution::shared().origin(),
         ),
@@ -46,16 +44,15 @@ fn config_file(platforms: &str) -> std::path::PathBuf {
     path
 }
 
-/// The binary, started on `config` with exactly `env` in its environment and
-/// its output captured.
-fn binary(config: &std::path::Path, env: &[(&str, &str)]) -> Child {
+/// The binary, started on `config` with nothing but the configuration path
+/// and the log filter in its environment, and its output captured.
+fn binary(config: &std::path::Path) -> Child {
     Command::new(env!("CARGO_BIN_EXE_libid-server-rs"))
         .env_clear()
         // The coverage profile path, when this test runs under one.
         .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|v| ("LLVM_PROFILE_FILE", v)))
         .env("LIBID_CONFIG", config)
         .env("RUST_LOG", "info")
-        .envs(env.iter().copied())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -71,10 +68,10 @@ struct Started {
 }
 
 impl Started {
-    /// Start the binary on `config` with `env` and wait for it to bind: the
-    /// address is the one thing it says before it serves.
-    fn on(config: &std::path::Path, env: &[(&str, &str)]) -> Started {
-        let mut child = binary(config, env);
+    /// Start the binary on `config` and wait for it to bind: the address is
+    /// the one thing it says before it serves.
+    fn on(config: &std::path::Path) -> Started {
+        let mut child = binary(config);
         let mut stdout = BufReader::new(child.stdout.take().unwrap());
         let address = loop {
             let mut line = String::new();
@@ -141,13 +138,12 @@ impl Started {
 #[test]
 fn the_binary_serves_until_interrupted() {
     let config = config_file(&format!(
-        "[[platforms]]\nid = \"github\"\nclient_id = \"{}\"\nversions = [1]\n",
-        fixtures::CLIENT_ID
+        "[[platforms]]\nid = \"github\"\nclient_id = \"{}\"\nversions = [1]\n\
+         token_exchange_credential = \"{}\"\n",
+        fixtures::CLIENT_ID,
+        fixtures::TOKEN_EXCHANGE_CREDENTIAL
     ));
-    let bridge = Started::on(
-        &config,
-        &[("GH_OAUTH_CLIENT_SECRET", fixtures::CLIENT_SECRET)],
-    );
+    let bridge = Started::on(&config);
 
     let (status, body) = bridge.request("GET", "/health", &[], "");
     assert_eq!(status, 200, "{body}");
@@ -158,15 +154,15 @@ fn the_binary_serves_until_interrupted() {
     assert!(rest.contains("shutting down"), "{rest}");
 }
 
-/// A deployment enabling X alone starts with no `GH_OAUTH_CLIENT_SECRET`
-/// in its environment: it publishes the X entry and mounts no token route.
+/// A deployment enabling X alone starts, publishes the X entry and no github
+/// entry, and answers the former token path with `404`.
 #[test]
-fn an_x_only_deployment_starts_with_no_secret_in_its_environment() {
+fn an_x_only_deployment_starts_and_serves_no_token_route() {
     let config = config_file(
         "[[platforms]]\nid = \"x\"\nclient_id = \"WHRlc3RjbGllbnQ6MTpjaQ\"\n\
          versions = [1]\n",
     );
-    let bridge = Started::on(&config, &[]);
+    let bridge = Started::on(&config);
 
     let (status, body) = bridge.request(
         "GET",
@@ -206,7 +202,7 @@ fn an_x_only_deployment_starts_with_no_secret_in_its_environment() {
 #[test]
 fn a_configuration_the_binary_cannot_serve_stops_it() {
     let config = config_file("");
-    let output = binary(&config, &[]).wait_with_output().unwrap();
+    let output = binary(&config).wait_with_output().unwrap();
     assert!(!output.status.success(), "{}", output.status);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("[[platforms]]"), "{stderr}");

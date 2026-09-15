@@ -1,7 +1,7 @@
 //! What the tests build a deployment from: a Distribution on loopback serving
-//! the fixture artifact, a wire port nothing listens on, and a configuration
-//! naming both. Compiled for the crate's own tests and, under the `fixtures`
-//! feature, for the integration tests.
+//! the fixture artifact, and a configuration naming it. Compiled for the
+//! crate's own tests and, under the `fixtures` feature, for the integration
+//! tests.
 
 use std::{
     collections::VecDeque,
@@ -211,25 +211,15 @@ impl Distribution {
     }
 }
 
-/// A loopback port nothing listens on, bound once and released: a session a
-/// test does start fails at the dial instead of reaching a notary on this
-/// machine.
-pub fn dead_port() -> &'static str {
-    static PORT: OnceLock<String> = OnceLock::new();
-    PORT.get_or_init(|| {
-        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        free.local_addr().unwrap().port().to_string()
-    })
-}
-
 /// The public origin every fixture deployment is reached at.
 pub const PUBLIC_ORIGIN: &str = "https://bridge.example";
 
 /// The client id every fixture deployment enables GitHub with.
 pub const CLIENT_ID: &str = "Iv1.0123456789abcdef";
 
-/// The secret every fixture deployment holds.
-pub const CLIENT_SECRET: &str = "ghs_secret";
+/// The public token-exchange credential every fixture deployment publishes
+/// for GitHub.
+pub const TOKEN_EXCHANGE_CREDENTIAL: &str = "d3b07384d113edec49eaa6238ad5ff00c1f2e3a4";
 
 impl config::Config {
     /// A configuration that starts, with `args` replacing any default it
@@ -241,17 +231,16 @@ impl config::Config {
     /// fills from the configuration file. The CCDP origin is the shared
     /// Distribution's unless `args` names another.
     pub fn fixture(args: &[&str]) -> config::Config {
-        let platforms =
-            format!(r#"[{{"id":"github","client_id":"{CLIENT_ID}","versions":[1]}}]"#);
+        let platforms = format!(
+            r#"[{{"id":"github","client_id":"{CLIENT_ID}","versions":[1],"token_exchange_credential":"{TOKEN_EXCHANGE_CREDENTIAL}"}}]"#
+        );
         let mut flags: Vec<(&str, &str)> = vec![
             ("--host", "127.0.0.1"),
             ("--port", "8722"),
             ("--public-origin", PUBLIC_ORIGIN),
-            ("--notary-wire-port", dead_port()),
             ("--allowed-app-origins", "https://app.example"),
             ("--ccdp-origin", Distribution::shared().origin()),
             ("--platforms", &platforms),
-            ("--gh-oauth-client-secret", CLIENT_SECRET),
         ];
         for pair in args.chunks(2) {
             let [flag, value] = pair else {

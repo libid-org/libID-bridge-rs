@@ -78,8 +78,7 @@ impl Schedule {
 }
 
 /// The TLS configuration every retrieval shares, built once. The anchors are
-/// compiled in from `webpki-root-certs`, the crate `libid-tlsn` builds its
-/// root store from; no system trust store is read.
+/// compiled in from `webpki-root-certs`; no system trust store is read.
 static TLS: LazyLock<Arc<ClientConfig>> = LazyLock::new(|| {
     let mut roots = RootCertStore::empty();
     let (added, refused) = roots

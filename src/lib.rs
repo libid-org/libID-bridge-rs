@@ -1,16 +1,16 @@
 //! The OAuth Bridge of a libID ceremony. The contract is `specs/oauth-bridge.md`
 //! in the libid repository.
 //!
-//! It publishes the configuration an application starts from, serves the one
-//! callback document the OAuth platforms redirect back to, and performs the
-//! one exchange a browser cannot: GitHub's, which needs a client secret.
-//! `/health` is a liveness probe for the container healthcheck.
+//! It publishes the configuration an application starts from and serves the
+//! one callback document the OAuth platforms redirect back to. `/health` is a
+//! liveness probe for the container healthcheck.
 //!
 //! The callback document is the CCDP Distribution's artifact with this
 //! deployment's data inserted into its one slot; everything the browser runs
-//! after the callback is served by that Distribution. This service verifies
-//! no proof, holds no key of its own, keeps no ceremony state, and talks to
-//! no chain.
+//! after the callback is served by that Distribution. This service performs
+//! no token exchange, opens no notary connection, verifies no proof, holds no
+//! secret and no key of its own, keeps no ceremony state, and talks to no
+//! chain.
 
 #![warn(missing_docs)]
 
@@ -21,7 +21,6 @@ pub mod error;
 #[cfg(any(test, feature = "fixtures"))]
 #[doc(hidden)]
 pub mod fixtures;
-pub(crate) mod oauth;
 pub(crate) mod origin;
 pub mod routes;
 pub mod state;
@@ -33,12 +32,7 @@ use error::{
     Result,
 };
 use origin::Origin;
-use secrecy::{
-    ExposeSecret,
-    SecretString,
-};
 use state::AppState;
-use tokio::sync::Semaphore;
 
 /// Build the shared [`AppState`] from the configuration. Everything that must
 /// be well-formed for a request to succeed is checked here, at startup, and
@@ -49,9 +43,9 @@ pub async fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
     let ccdp_origin = Origin::parse("CCDP_ORIGIN", &cfg.ccdp_origin)?;
     let public_origin = public_origin(&cfg.public_origin)?;
     // The effective set `allowedAppOrigins ∪ {ccdpOrigin}`: the one admission
-    // rule of every gated route, and what the callback document is told. The
-    // resolved CCDP origin joins once; an overridden `CCDP_ORIGIN` does not
-    // keep `https://lib.id` admitted unless it is listed.
+    // rule of the configuration route, and what the callback document is
+    // told. The resolved CCDP origin joins once; an overridden `CCDP_ORIGIN`
+    // does not keep `https://lib.id` admitted unless it is listed.
     let allowed_origins: Arc<[Origin]> = {
         let mut set = allowed_app_origins.clone();
         if !set.contains(&ccdp_origin) {
@@ -60,44 +54,6 @@ pub async fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
         set.into()
     };
     let platforms = deployment::platforms(cfg.platforms.clone())?;
-    routes::github_token::force_token_endpoint();
-
-    // The exchange is present exactly when a github platform is enabled. Its
-    // secret is `GH_OAUTH_CLIENT_SECRET` where set, else the table's; an empty
-    // value is unset.
-    let set = |secret: &SecretString| !secret.expose_secret().is_empty();
-    let overriding = cfg.gh_oauth_client_secret.as_ref().filter(|s| set(s));
-    let github = match platforms.iter().find(|p| p.is_github()) {
-        Some(profile) => {
-            let Some(secret) = overriding
-                .or_else(|| profile.client_secret().filter(|s| set(s)))
-                .cloned()
-            else {
-                return Err(Error::Config {
-                    detail: "the platforms enable github; set client_secret in its \
-                             [[platforms]] table or GH_OAUTH_CLIENT_SECRET"
-                        .into(),
-                });
-            };
-            Some(Arc::new(state::GithubExchange {
-                credentials: oauth::OAuthCredentials {
-                    client_id: profile.client_id().to_owned(),
-                    client_secret: secret,
-                },
-                redirect_uri: format!("{public_origin}{}", routes::CALLBACK_PATH),
-                egress: routes::github_token::NotaryEgress::new(cfg.notary_wire_port),
-                admitted: allowed_origins.iter().map(Origin::header_value).collect(),
-                permits: Semaphore::new(state::MAX_CONCURRENT_EXCHANGES),
-            }))
-        }
-        None if overriding.is_none() => None,
-        None => {
-            return Err(Error::Config {
-                detail: "GH_OAUTH_CLIENT_SECRET is set but no platform enables github"
-                    .into(),
-            })
-        }
-    };
 
     let upstream = artifact::upstream::Upstream::new(&ccdp_origin);
     let published = artifact::Published::retrieved(&upstream, &allowed_origins).await?;
@@ -114,7 +70,6 @@ pub async fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
         upstream,
         public_origin_admitted: allowed_origins.contains(&public_origin),
         allowed_origins,
-        github,
     }))
 }
 
@@ -171,8 +126,9 @@ fn allowed_app_origins(list: &[String]) -> Result<Vec<Origin>> {
     Ok(out)
 }
 
-/// The origin this bridge is reached at, in canonical form. Empty is refused:
-/// the redirect URI derived from it must equal the OAuth Apps' registration.
+/// The origin this bridge is reached at, in canonical form: the one every
+/// OAuth App registers `/auth/callback` under, and the one a same-origin read
+/// of the configuration is judged against. Empty is refused.
 fn public_origin(spelling: &str) -> Result<Origin> {
     if spelling.trim().is_empty() {
         return Err(Error::Config {
@@ -188,7 +144,10 @@ fn public_origin(spelling: &str) -> Result<Origin> {
 mod tests {
     use super::{
         config::Config,
-        fixtures::Distribution,
+        fixtures::{
+            self,
+            Distribution,
+        },
         *,
     };
 
@@ -210,22 +169,9 @@ mod tests {
         assert_eq!(record["ccdpOrigin"], Distribution::shared().origin());
     }
 
-    /// The redirect URI the exchange sends is the public origin, folded to its
-    /// canonical form, followed by `/auth/callback`.
-    #[tokio::test]
-    async fn the_redirect_uri_is_the_callback_path_under_the_public_origin() {
-        let state = build_state(&Config::fixture(&[
-            "--public-origin",
-            "https://Bridge.example:443",
-        ]))
-        .await
-        .unwrap();
-        let github = state.github.as_ref().expect("github is enabled");
-        assert_eq!(github.redirect_uri, "https://bridge.example/auth/callback");
-    }
-
     /// A same-origin read of the configuration is admitted exactly when the
-    /// public origin is listed as an application origin.
+    /// public origin is listed as an application origin; the public origin is
+    /// folded to its canonical form first.
     #[tokio::test]
     async fn a_same_origin_read_is_admitted_only_when_the_public_origin_is_listed() {
         assert!(
@@ -235,6 +181,8 @@ mod tests {
                 .public_origin_admitted
         );
         let listed = build_state(&Config::fixture(&[
+            "--public-origin",
+            "https://Bridge.example:443",
             "--allowed-app-origins",
             "https://app.example,https://bridge.example",
         ]))
@@ -244,22 +192,11 @@ mod tests {
     }
 
     /// The effective set is `allowedAppOrigins ∪ {ccdpOrigin}`: the resolved
-    /// origin joins once, and an origin already listed is not added twice. The
-    /// token route holds the same set as header values.
+    /// origin joins once, and an origin already listed is not added twice.
     #[tokio::test]
     async fn the_effective_admission_set_is_the_allowlist_plus_the_ccdp_origin() {
         async fn origins(args: &[&str]) -> Vec<String> {
             let state = build_state(&Config::fixture(args)).await.unwrap();
-            let github = state.github.as_ref().expect("github is enabled");
-            assert_eq!(
-                github.admitted,
-                state
-                    .allowed_origins
-                    .iter()
-                    .map(Origin::header_value)
-                    .collect::<Vec<_>>(),
-                "the token route's set is the effective set"
-            );
             state
                 .allowed_origins
                 .iter()
@@ -324,6 +261,13 @@ mod tests {
                 "an admitted origin carrying a default port",
                 vec!["--allowed-app-origins", "https://app.example:443"],
             ),
+            (
+                "a github platform whose credential carries whitespace",
+                vec![
+                    "--platforms",
+                    r#"[{"id":"github","client_id":"gh","versions":[1],"token_exchange_credential":"c0f fee"}]"#,
+                ],
+            ),
         ] {
             assert!(
                 build_state(&Config::fixture(&args)).await.is_err(),
@@ -333,12 +277,13 @@ mod tests {
     }
 
     /// The published record keys every enabled platform by name and carries
-    /// its client id and versions, and no secret.
+    /// its client id and versions; the github entry carries its public
+    /// token-exchange credential, and no other entry carries one.
     #[tokio::test]
     async fn the_published_configuration_keys_every_enabled_platform_by_name() {
         let state = build_state(&Config::fixture(&[
             "--platforms",
-            r#"[{"id":"google","client_id":"g","versions":[1,2]},{"id":"x","client_id":"xc","versions":[3]},{"id":"github","client_id":"gh","versions":[1]}]"#,
+            r#"[{"id":"google","client_id":"g","versions":[1,2]},{"id":"x","client_id":"xc","versions":[3]},{"id":"github","client_id":"gh","versions":[1],"token_exchange_credential":"c0ffee"}]"#,
         ])).await
         .unwrap();
         let record: serde_json::Value =
@@ -352,85 +297,28 @@ mod tests {
             serde_json::json!([1, 2])
         );
         assert_eq!(platforms["x"]["clientId"], "xc");
-        assert!(!String::from_utf8_lossy(&state.ceremony_config).contains("ghs_secret"));
+        assert_eq!(platforms["github"]["tokenExchangeCredential"], "c0ffee");
+        assert!(platforms["google"].get("tokenExchangeCredential").is_none());
+        assert!(platforms["x"].get("tokenExchangeCredential").is_none());
     }
 
-    /// A github platform without a secret, or a secret without a github
-    /// platform, refuses to start; neither is a deployment without the route.
-    /// The table's secret serves, and `GH_OAUTH_CLIENT_SECRET` overrides it.
+    /// The fixture deployment publishes the fixture credential.
     #[tokio::test]
-    async fn the_github_secret_and_the_github_platform_require_each_other() {
-        let no_secret = vec!["--gh-oauth-client-secret", ""];
-        assert!(build_state(&Config::fixture(&no_secret)).await.is_err());
-
-        let in_the_table = vec![
-            "--platforms",
-            r#"[{"id":"github","client_id":"gh","versions":[1],"client_secret":"ghs_in_the_table"}]"#,
-            "--gh-oauth-client-secret",
-            "",
-        ];
-        let state = build_state(&Config::fixture(&in_the_table)).await.unwrap();
+    async fn the_fixture_deployment_publishes_its_credential() {
+        let state = build_state(&Config::fixture(&[])).await.unwrap();
+        let record: serde_json::Value =
+            serde_json::from_slice(&state.ceremony_config).unwrap();
         assert_eq!(
-            state
-                .github
-                .as_ref()
-                .unwrap()
-                .credentials
-                .client_secret
-                .expose_secret(),
-            "ghs_in_the_table"
+            record["platforms"]["github"]["tokenExchangeCredential"],
+            fixtures::TOKEN_EXCHANGE_CREDENTIAL
         );
-        let overridden = vec![
-            "--platforms",
-            r#"[{"id":"github","client_id":"gh","versions":[1],"client_secret":"ghs_in_the_table"}]"#,
-        ];
-        let state = build_state(&Config::fixture(&overridden)).await.unwrap();
-        assert_eq!(
-            state
-                .github
-                .as_ref()
-                .unwrap()
-                .credentials
-                .client_secret
-                .expose_secret(),
-            "ghs_secret"
-        );
-
-        let x_only = vec![
-            "--platforms",
-            r#"[{"id":"x","client_id":"abc","versions":[1]}]"#,
-        ];
-        assert!(
-            build_state(&Config::fixture(&x_only)).await.is_err(),
-            "a secret with no github platform must stop the process"
-        );
-
-        let neither = vec![
-            "--platforms",
-            r#"[{"id":"x","client_id":"abc","versions":[1]}]"#,
-            "--gh-oauth-client-secret",
-            "",
-        ];
-        let state = build_state(&Config::fixture(&neither)).await.unwrap();
-        assert!(state.github.is_none());
     }
 
-    /// `build_router` mounts every path for a deployment with the token route
-    /// and one without.
+    /// `build_router` mounts every path.
     #[tokio::test]
     async fn building_the_router_for_a_configured_deployment_does_not_panic() {
         let state = build_state(&Config::fixture(&[])).await.unwrap();
         let _: axum::Router = routes::build_router(state);
-
-        let x_only = build_state(&Config::fixture(&[
-            "--platforms",
-            r#"[{"id":"x","client_id":"abc","versions":[1]}]"#,
-            "--gh-oauth-client-secret",
-            "",
-        ]))
-        .await
-        .unwrap();
-        let _: axum::Router = routes::build_router(x_only);
     }
 
     /// The bound listener answers until told to stop, and `serve` returns.

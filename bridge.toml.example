@@ -14,12 +14,8 @@ host = "127.0.0.1"
 port = 8722
 
 # The origin this bridge is reached at: the one every OAuth App registers
-# /auth/callback under. The token exchange sends that URL as redirect_uri.
+# /auth/callback under.
 public_origin = "https://bridge.example"
-
-# The port of the notary's MPC-TLS wire listener. The notary itself is named
-# by each token request; the bridge dials that host on this port.
-notary_wire_port = 7047
 
 # Application origins admitted to read the public ceremony configuration, each
 # in canonical form: no trailing slash, lowercase host, no default port.
@@ -32,15 +28,15 @@ ccdp_origin = "https://lib.id"
 
 
 # The enabled platforms: one table per platform, with its public client id and
-# the ceremony versions it advertises. The GitHub token exchange implements
-# version 1 and spends the App's client secret: set it here, in a file kept
-# out of version control, or in the GH_OAUTH_CLIENT_SECRET environment
-# variable, which overrides it.
+# the ceremony versions it advertises. The github table also carries the OAuth
+# App's client secret, which the bridge publishes as tokenExchangeCredential:
+# public application configuration the browser's token request sends as
+# client_secret.
 [[platforms]]
 id = "github"
 client_id = "Iv1.0123456789abcdef"
 versions = [1]
-# client_secret = "..."
+token_exchange_credential = "0123456789abcdef0123456789abcdef01234567"
 
 # [[platforms]]
 # id = "google"

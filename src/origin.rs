@@ -3,7 +3,6 @@
 
 use std::fmt;
 
-use axum::http::HeaderValue;
 use serde::Serialize;
 use url::Url;
 
@@ -87,11 +86,6 @@ impl Origin {
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
-
-    /// The origin as the `Origin` header value a browser sends for it.
-    pub(crate) fn header_value(&self) -> HeaderValue {
-        HeaderValue::from_str(&self.0).expect("a canonical origin is visible ASCII")
-    }
 }
 
 impl fmt::Display for Origin {
@@ -117,7 +111,6 @@ mod tests {
         let folded = Origin::parse("T", "https://Bridge.example:443/").unwrap();
         assert_eq!(folded.as_str(), "https://bridge.example");
         assert_eq!(folded.to_string(), "https://bridge.example");
-        assert_eq!(folded.header_value(), "https://bridge.example");
 
         let refusal = Origin::listed("T", "https://Bridge.example:443/").unwrap_err();
         assert!(

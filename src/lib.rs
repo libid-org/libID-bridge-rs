@@ -98,12 +98,13 @@ pub async fn refresh_callback(state: Arc<AppState>) {
 /// written: one that is not already canonical is refused, not folded.
 fn allowed_app_origins(list: &[String]) -> Result<Vec<Origin>> {
     let mut out = Vec::new();
-    for (i, spelling) in list
-        .iter()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .enumerate()
-    {
+    // The index is the member's own, so a refusal names the entry the
+    // operator wrote even where a blank one precedes it.
+    for (i, spelling) in list.iter().enumerate() {
+        let spelling = spelling.trim();
+        if spelling.is_empty() {
+            continue;
+        }
         let field = format!("ALLOWED_APP_ORIGINS[{i}]");
         let origin = Origin::listed(&field, spelling)?;
         // A duplicate is refused, not folded.
@@ -176,6 +177,21 @@ mod tests {
             origins(&["--allowed-app-origins", &listed]).await,
             ["https://app.example".to_owned(), ccdp]
         );
+    }
+
+    /// A refusal names the member the operator wrote, by its own index in
+    /// the list, whatever blanks the list carries.
+    #[tokio::test]
+    async fn a_refused_application_origin_carries_its_own_index() {
+        let err = build_state(&Config::fixture(&[
+            "--allowed-app-origins",
+            ",https://app.example,https://APP.example",
+        ]))
+        .await
+        .err()
+        .expect("the third member is not canonical");
+        let text = err.to_string();
+        assert!(text.contains("ALLOWED_APP_ORIGINS[2]"), "{text}");
     }
 
     /// Each of these is refused at startup.

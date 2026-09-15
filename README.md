@@ -1,48 +1,49 @@
 # libid-server-rs
 
-The server side of a libID ceremony.
+The OAuth Bridge of a libID ceremony.
 
 A platform ceremony runs in the browser: it opens the provider, consumes the
-redirect against its own live state, notarizes what it needs, and builds the
-proof. The one thing a browser cannot hold is a confidential client secret, so
-GitHub's token exchange happens here. Google and X have no confidential route.
+redirect against its own live state, exchanges the code where its ceremony
+takes a token, notarizes what it needs, and builds the proof. This service
+publishes the configuration an application starts from and serves the one
+callback document the providers redirect back to. It performs no token
+exchange and opens no notary connection. GitHub's exchange, which GitHub
+answers only with the App's `client_secret`, runs in the browser too; the
+bridge publishes that value as public application configuration.
 
 It keeps no ceremony state, no session, no challenge and no result. A timeout,
 a duplicate request, a restart or a lost response leave no record here, and
 recovery is a fresh ceremony rather than a lookup. It holds no wallet, pays no
 gas, keeps no database, and talks to no chain.
 
-Built on the [libid-rs](https://github.com/libid-org/libid-rs) crates
-(MPC-TLS session driver, transcript math, ceremony wire constructions).
+## How a claim works
 
-## How a GitHub claim works
-
-1. The browser derives its PKCE verifier, opens GitHub's authorization page,
-   and consumes the redirect against the ceremony it started. None of that
-   reaches this service.
-2. It calls `POST /api/v1/ceremony/github-token` with the authorization code
-   and that verifier. This service performs the token exchange **inside a
-   TLSNotary session**, revealing the client id, the code, the redirect URI
-   and the verifier, and committing the client secret and the returned bearer
-   rather than disclosing them.
-3. It returns the bearer, the notary's attestation of that session, and the
-   opening for the bearer commitment — one result from one session — and
-   forgets all of it.
-4. The browser checks that response against what it asked for, then runs its
-   own notarized `GET /user` and builds the proof. This service sees none of
-   that and verifies nothing.
+1. The application reads `GET /api/v1/ceremony/config` from an admitted
+   origin: the CCDP Distribution to load and, per enabled platform, the public
+   client id, the ceremony versions and, for GitHub, the public
+   `tokenExchangeCredential`. It derives the redirect URI itself:
+   `{publicOrigin}/auth/callback`.
+2. The browser derives its PKCE verifier, opens the provider's authorization
+   page, and is redirected to `GET /auth/callback` on this bridge: one
+   document, the same bytes for every request, written by the Distribution.
+   The handler reads nothing from the request; the code in the query never
+   reaches this process.
+3. Everything after that runs in the browser on the Distribution's code: the
+   token exchange, the notarized sessions, the proof. GitHub's token request
+   carries the published credential as `client_secret` and is revealed whole.
+   This service sees none of it and verifies nothing.
 
 ## Trust model
 
-**The notary is the only trust root.** This service signs nothing and holds no
-key of its own: the single signature in a proof is the notary's, and this
-service only carries what the notary said, byte for byte.
+**The notary is the only trust root.** This service signs nothing and holds
+no key and no secret: the single signature in a proof is the notary's.
 
-What it does hold is GitHub's client secret, and that is a real power — it can
-perform an exchange nobody asked for. What it cannot do is make that exchange
-look like someone else's ceremony: the browser checks that the returned
-attestation reveals the exact code and verifier it supplied, and discards the
-response otherwise. The secret buys a token, not a proof.
+GitHub's `client_secret` is published on purpose. GitHub requires it in every
+token request, PKCE or not, so a browser client has to carry it; libID treats
+it as public application configuration, and the GitHub ceremony's proof
+statement covers the complete revealed token request, the credential
+included. It identifies the App, not a user, and the ledger accepts nothing
+the notary did not attest.
 
 The configured origin and everything it serves are a code-supply-chain
 boundary besides. A malicious server can replace the browser code it hands
@@ -54,69 +55,52 @@ out; origin checks and a closed input surface cannot constrain its owner.
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | Liveness probe. Returns `OK`. Not one of the contract's routes — see below. |
-| `GET` | `/api/v1/ceremony/config` | The public ceremony configuration: `{ ccdpOrigin, platforms }`. Readable from an admitted origin, or by a same-origin `GET` without `Origin` when this bridge's public origin is itself listed. |
+| `GET` | `/api/v1/ceremony/config` | The public ceremony configuration: `{ ccdpOrigin, platforms }`. Readable from an admitted origin, or by a same-origin `GET` without `Origin` when this bridge's public origin is itself listed. `403` for any other origin, `400` for a query. |
 | `GET` | `/auth/callback` | The registered OAuth callback document: the CCDP Distribution's artifact with this deployment's data inserted, identical for every request. |
-| `POST` | `/api/v1/ceremony/github-token` | The confidential token exchange, run inside a TLSNotary session. Callable from any admitted origin, whose preflight it answers. The body carries `notaryAddress`, the notary the browser resolved from the ledger; this bridge dials the same host on the wire port, refusing a private or internal one. `403` for any other origin or a refused notary, `400` for a query, `415` for any media type but exactly `application/json`. |
 
-`/health` is not one of the contract's three routes. The published image's
+`/health` is not one of the contract's two routes. The published image's
 `HEALTHCHECK` targets it; it reads nothing from the request, answers two bytes,
 and is the one route that accepts a query.
 
-### `POST /api/v1/ceremony/github-token`
+Any other path, `POST /api/v1/ceremony/github-token` included, is answered
+`404` with no CORS header.
 
-The one route needing a client secret.
-
-Request — the code, the PKCE verifier and the notary the browser resolved from
-the ledger; the client, secret, endpoint and redirect URI are this server's
-own. The redirect URI it sends is `PUBLIC_ORIGIN` followed by `/auth/callback`,
-which GitHub checks against the App's registration:
+### `GET /api/v1/ceremony/config`
 
 ```json
 {
-  "code": "…",
-  "codeVerifier": "…",
-  "notaryAddress": "https://notary.example"
+  "ccdpOrigin": "https://lib.id",
+  "platforms": {
+    "github": {
+      "clientId": "Iv1.0123456789abcdef",
+      "ceremonyVersions": [1],
+      "tokenExchangeCredential": "…"
+    },
+    "x": {
+      "clientId": "…",
+      "ceremonyVersions": [1]
+    }
+  }
 }
 ```
 
-Response. `accessToken` is the bearer as GitHub spelled it; the other two are
-byte strings, unpadded URL-safe base64:
-
-```json
-{
-  "accessToken": "…",
-  "tokenAttestation": { "attestedData": "…", "signature": "…" },
-  "bearerOpening": "…"
-}
-```
-
-No `schema` member is carried. `attestedData` decodes to at most 2 MiB and
-`signature` to exactly 65 bytes; the whole encoded body is at most 3 MiB.
-
-The exchange reveals the client id, the code, the redirect URI and the PKCE
-verifier, and commits the `client_secret` and the returned bearer. The secret
-is last in the request body, so the committed range is a suffix and the
-transcript tiles.
-
-A failure returns none of the three values, and the caller starts a fresh
-ceremony. Nothing about the request is stored.
-
-Neither X nor Google has a confidential route; both run browser ↔ notary.
-
+`tokenExchangeCredential` is present on exactly the entries whose ceremony
+sends one: GitHub's. It is nonempty printable ASCII without whitespace,
+checked at startup. The record carries no redirect URI, no allowlist, no
+notary setting and no user token.
 
 ## The CCDP Distribution
 
 The contract this server implements is `specs/oauth-bridge.md` in the libid
-repository (pull request 13). Where `specs/platform-ceremonies.md` §6.3
-describes the same wire differently — route path, a `schema` member, a
-single-string attestation — this server follows `oauth-bridge.md`, by decision.
+repository (pull request 13); the GitHub profile whose token request carries
+the public credential is `specs/platform-ceremonies.md` (pull request 35).
 
 This server is the **OAuth Bridge**, and only that. Everything the browser
 executes — the Callback implementation, the prover, the circuits and
 notarization client — is served by a separate static **CCDP Distribution** at
 `CCDP_ORIGIN`, which may be cross-site and knows nothing about this bridge. The
-bridge publishes configuration, serves one callback document, and performs
-GitHub's exchange. It serves no CCDP resource and no proving asset.
+bridge publishes configuration and serves one callback document. It serves no
+CCDP resource and no proving asset.
 
 ### The callback document
 
@@ -158,17 +142,12 @@ exception the origin rules make.
 
 ## What the operator has to supply
 
-Two things this server does not do.
+One thing this server does not do.
 
 **Redact the callback query from proxy access logs.** The handler reads
 nothing from the request, so the authorization code never reaches this
 process — but a proxy that logs request lines by default writes it to disk
 before this server sees the request at all.
-
-**Rate-limit `/api/v1/ceremony/github-token` by client.** The route caps
-concurrent exchanges at 8 and answers `503` past that; it does not limit by
-client, and the `Origin` check is not caller authentication. A per-client
-limit belongs in the proxy, where the client is identified.
 
 ## Configuration
 
@@ -183,36 +162,37 @@ public_origin       = "https://bridge.example"
 allowed_app_origins = ["https://app.example", "https://wallet.example"]
 
 [[platforms]]
-id        = "github"
-client_id = "Iv1.0123456789abcdef"
-versions  = [1]
+id                        = "github"
+client_id                 = "Iv1.0123456789abcdef"
+versions                  = [1]
+token_exchange_credential = "…"
 ```
 
 An unknown key is refused at startup. The platforms are set only in the file,
 one `[[platforms]]` table per enabled platform: its `id` (`github`, `google` or
-`x`), its public `client_id`, and the ceremony `versions` it advertises; the
-GitHub token exchange implements version 1 and spends the App's
-`client_secret`, set in the `github` table or in `GH_OAUTH_CLIENT_SECRET`,
-which overrides it. A file that carries the secret stays out of version
-control (`bridge.toml` is ignored by git).
+`x`), its public `client_id`, the ceremony `versions` it advertises and, for
+`github`, the App's client secret as `token_exchange_credential`, which the
+bridge publishes. There is no notary setting and no environment variable for
+the credential.
 
 | Key | Environment | Default | Meaning |
 |---|---|---|---|
 | `host` | `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` in the container image). |
 | `port` | `PORT` | `8722` | Bind port. |
-| `public_origin` | `PUBLIC_ORIGIN` | *(required)* | The origin this bridge is reached at: the one every OAuth App registers `/auth/callback` under. The token exchange sends that URL as its redirect URI. HTTPS, or HTTP on `localhost` or `127.0.0.1`; folded to canonical form. Listed in `allowed_app_origins`, it also admits a same-origin read of the configuration. |
-| `allowed_app_origins` | `ALLOWED_APP_ORIGINS`, comma-separated | *(required)* | Application origins. Exact origins, no patterns; HTTPS, or HTTP on `localhost` or `127.0.0.1`. Each must already be canonical — a trailing slash, an uppercase host or a default port is refused with the canonical spelling named, not folded — and a duplicate is refused. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once. It is the one admission rule: the configuration route, the token route and its preflight all admit exactly one `Origin` from it, and the callback document is told the same set. |
+| `public_origin` | `PUBLIC_ORIGIN` | *(required)* | The origin this bridge is reached at: the one every OAuth App registers `/auth/callback` under, and the one the application derives its redirect URI from. HTTPS, or HTTP on `localhost` or `127.0.0.1`; folded to canonical form. Listed in `allowed_app_origins`, it also admits a same-origin read of the configuration. |
+| `allowed_app_origins` | `ALLOWED_APP_ORIGINS`, comma-separated | *(required)* | Application origins. Exact origins, no patterns; HTTPS, or HTTP on `localhost` or `127.0.0.1`. Each must already be canonical — a trailing slash, an uppercase host or a default port is refused with the canonical spelling named, not folded — and a duplicate is refused. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once. It is the one admission rule: the configuration route admits exactly one `Origin` from it, and the callback document is told the same set. |
 | `ccdp_origin` | `CCDP_ORIGIN` | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/callback.html` and everything the browser runs after it, HTTPS, or HTTP on `localhost` or `127.0.0.1`. Published in the configuration and inserted into the callback document. Omitting it selects the canonical libID Distribution. |
-| `notary_wire_port` | `NOTARY_WIRE_PORT` | `7047` | The port of the notary's MPC-TLS wire listener. The notary itself is named by each token request's `notaryAddress`; this bridge dials that host on this port. A private or internal address is refused; loopback is not. |
-| `platforms` | — | *(required)* | The enabled platforms, as `[[platforms]]` tables: `id`, `client_id`, `versions`, and for `github` its `client_secret`. File only. |
-| — | `GH_OAUTH_CLIENT_SECRET` | *(none)* | GitHub OAuth App client secret, overriding the `github` table's `client_secret`. Refused when no platform is `github`. |
+| `platforms` | — | *(required)* | The enabled platforms, as `[[platforms]]` tables: `id`, `client_id`, `versions`, and for `github` its `token_exchange_credential`. File only. |
 | — | `LIBID_CONFIG`, `--config` | *(none)* | Path to the configuration file. |
 
-### On Google
+### Per platform
 
-Nothing here serves the Google ceremony: its identity evidence is a signed ID
-Token the browser reads out of the redirect fragment, so there is no secret to
-hold and nothing to exchange.
+GitHub's entry carries the App's client secret as the public
+`tokenExchangeCredential`; the browser's token request sends it as
+`client_secret`. X runs a public PKCE client, browser to notary, and Google's
+identity evidence is a signed ID Token the browser reads out of the redirect
+fragment: neither entry carries a credential, and nothing here takes part in
+either ceremony beyond the configuration and the callback document.
 
 ## Running with Docker
 
@@ -220,7 +200,6 @@ hold and nothing to exchange.
 docker run --rm -p 8722:8722 \
   -v ./bridge.toml:/etc/libid/bridge.toml:ro \
   -e LIBID_CONFIG=/etc/libid/bridge.toml \
-  -e GH_OAUTH_CLIENT_SECRET=... \
   ghcr.io/libid-org/libid-server-rs:latest
 ```
 

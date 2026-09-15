@@ -25,14 +25,14 @@ ccdp_origin = "https://lib.id"
 
 # The enabled platforms: one table per platform, with its public client id and
 # the ceremony versions it advertises. The github table also carries the OAuth
-# App's client secret, which the bridge publishes as tokenExchangeCredential:
+# App's client secret, which the bridge publishes as clientCredential:
 # public application configuration the browser's token request sends as
 # client_secret.
 [[platforms]]
 id = "github"
 client_id = "Iv1.0123456789abcdef"
 versions = [1]
-token_exchange_credential = "0123456789abcdef0123456789abcdef01234567"
+client_credential = "0123456789abcdef0123456789abcdef01234567"
 
 # [[platforms]]
 # id = "google"

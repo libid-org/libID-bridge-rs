@@ -206,8 +206,8 @@ async fn config_admits_a_same_origin_read() {
 }
 
 /// Fetch metadata admits nothing but exactly one `Sec-Fetch-Site:
-/// same-origin`, and an explicit `Origin` is judged as an `Origin`, whatever
-/// the metadata says.
+/// same-origin`; `Referer`, `Host` and forwarding headers admit nothing; and
+/// an explicit `Origin` is judged as an `Origin`, whatever the metadata says.
 #[tokio::test]
 async fn config_does_not_infer_admission_from_fetch_metadata_alone() {
     for headers in [
@@ -227,6 +227,10 @@ async fn config_does_not_infer_admission_from_fetch_metadata_alone() {
         vec![
             ("referer", "https://bridge.example/"),
             ("host", "bridge.example"),
+        ],
+        vec![
+            ("x-forwarded-host", "app.example"),
+            ("forwarded", "for=203.0.113.9;host=app.example;proto=https"),
         ],
     ] {
         let resp = config_with(test_state().await, &headers, "").await;
@@ -252,7 +256,7 @@ async fn config_does_not_infer_admission_from_fetch_metadata_alone() {
 }
 
 /// The record carries exactly `ccdpOrigin` and `platforms`; the github entry
-/// carries exactly its client id, its versions and its public token-exchange
+/// carries exactly its client id, its versions and its public client
 /// credential. No allowlist, redirect URI or notary setting travels.
 #[tokio::test]
 async fn config_carries_the_public_credential_and_no_allowlist() {
@@ -266,16 +270,10 @@ async fn config_carries_the_public_credential_and_no_allowlist() {
     let github = body["platforms"]["github"].as_object().unwrap();
     let mut keys: Vec<_> = github.keys().map(String::as_str).collect();
     keys.sort_unstable();
-    assert_eq!(
-        keys,
-        ["ceremonyVersions", "clientId", "tokenExchangeCredential"]
-    );
+    assert_eq!(keys, ["ceremonyVersions", "clientCredential", "clientId"]);
     assert_eq!(github["clientId"], fixtures::CLIENT_ID);
     assert_eq!(github["ceremonyVersions"], serde_json::json!([1]));
-    assert_eq!(
-        github["tokenExchangeCredential"],
-        fixtures::TOKEN_EXCHANGE_CREDENTIAL
-    );
+    assert_eq!(github["clientCredential"], fixtures::CLIENT_CREDENTIAL);
 
     let raw = body.to_string();
     assert!(!raw.contains(APP_ORIGIN));
@@ -301,9 +299,9 @@ async fn config_publishes_an_x_entry_of_exactly_client_id_and_versions() {
     let state = deployment(&[
         "--platforms",
         &format!(
-            r#"[{{"id":"github","client_id":"{}","versions":[1],"token_exchange_credential":"{}"}},{{"id":"x","client_id":"WHRlc3RjbGllbnQ6MTpjaQ","versions":[1]}}]"#,
+            r#"[{{"id":"github","client_id":"{}","versions":[1],"client_credential":"{}"}},{{"id":"x","client_id":"WHRlc3RjbGllbnQ6MTpjaQ","versions":[1]}}]"#,
             fixtures::CLIENT_ID,
-            fixtures::TOKEN_EXCHANGE_CREDENTIAL
+            fixtures::CLIENT_CREDENTIAL
         ),
     ])
     .await;
@@ -509,7 +507,7 @@ async fn the_callback_document_carries_the_exact_response_policy() {
     let html = std::str::from_utf8(&body).unwrap();
     assert!(html.contains("<main id=\"libid-root\"></main>"));
     assert!(
-        !html.contains(fixtures::TOKEN_EXCHANGE_CREDENTIAL),
+        !html.contains(fixtures::CLIENT_CREDENTIAL),
         "the document carries no platform configuration"
     );
 

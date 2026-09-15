@@ -214,9 +214,9 @@ impl Distribution {
 /// The client id every fixture deployment enables GitHub with.
 pub const CLIENT_ID: &str = "Iv1.0123456789abcdef";
 
-/// The public token-exchange credential every fixture deployment publishes
+/// The public client credential every fixture deployment publishes
 /// for GitHub.
-pub const TOKEN_EXCHANGE_CREDENTIAL: &str = "d3b07384d113edec49eaa6238ad5ff00c1f2e3a4";
+pub const CLIENT_CREDENTIAL: &str = "d3b07384d113edec49eaa6238ad5ff00c1f2e3a4";
 
 impl config::Config {
     /// A configuration that starts, with `args` replacing any default it
@@ -229,7 +229,7 @@ impl config::Config {
     /// Distribution's unless `args` names another.
     pub fn fixture(args: &[&str]) -> config::Config {
         let platforms = format!(
-            r#"[{{"id":"github","client_id":"{CLIENT_ID}","versions":[1],"token_exchange_credential":"{TOKEN_EXCHANGE_CREDENTIAL}"}}]"#
+            r#"[{{"id":"github","client_id":"{CLIENT_ID}","versions":[1],"client_credential":"{CLIENT_CREDENTIAL}"}}]"#
         );
         let mut flags: Vec<(&str, &str)> = vec![
             ("--host", "127.0.0.1"),

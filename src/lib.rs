@@ -218,7 +218,7 @@ mod tests {
                 "a github platform whose credential carries whitespace",
                 vec![
                     "--platforms",
-                    r#"[{"id":"github","client_id":"gh","versions":[1],"token_exchange_credential":"c0f fee"}]"#,
+                    r#"[{"id":"github","client_id":"gh","versions":[1],"client_credential":"c0f fee"}]"#,
                 ],
             ),
         ] {
@@ -231,12 +231,12 @@ mod tests {
 
     /// The published record keys every enabled platform by name and carries
     /// its client id and versions; the github entry carries its public
-    /// token-exchange credential, and no other entry carries one.
+    /// client credential, and no other entry carries one.
     #[tokio::test]
     async fn the_published_configuration_keys_every_enabled_platform_by_name() {
         let state = build_state(&Config::fixture(&[
             "--platforms",
-            r#"[{"id":"google","client_id":"g","versions":[1,2]},{"id":"x","client_id":"xc","versions":[3]},{"id":"github","client_id":"gh","versions":[1],"token_exchange_credential":"c0ffee"}]"#,
+            r#"[{"id":"google","client_id":"g","versions":[1,2]},{"id":"x","client_id":"xc","versions":[3]},{"id":"github","client_id":"gh","versions":[1],"client_credential":"c0ffee"}]"#,
         ])).await
         .unwrap();
         let record: serde_json::Value =
@@ -250,9 +250,9 @@ mod tests {
             serde_json::json!([1, 2])
         );
         assert_eq!(platforms["x"]["clientId"], "xc");
-        assert_eq!(platforms["github"]["tokenExchangeCredential"], "c0ffee");
-        assert!(platforms["google"].get("tokenExchangeCredential").is_none());
-        assert!(platforms["x"].get("tokenExchangeCredential").is_none());
+        assert_eq!(platforms["github"]["clientCredential"], "c0ffee");
+        assert!(platforms["google"].get("clientCredential").is_none());
+        assert!(platforms["x"].get("clientCredential").is_none());
     }
 
     /// The fixture deployment publishes the fixture credential.
@@ -262,8 +262,8 @@ mod tests {
         let record: serde_json::Value =
             serde_json::from_slice(&state.ceremony_config).unwrap();
         assert_eq!(
-            record["platforms"]["github"]["tokenExchangeCredential"],
-            fixtures::TOKEN_EXCHANGE_CREDENTIAL
+            record["platforms"]["github"]["clientCredential"],
+            fixtures::CLIENT_CREDENTIAL
         );
     }
 

@@ -65,9 +65,9 @@ pub enum PlatformProfile {
         /// Platform ceremony versions, nonempty and duplicate-free.
         versions: Vec<u16>,
         /// The OAuth App's client secret, published as
-        /// `tokenExchangeCredential`: public application configuration,
+        /// `clientCredential`: public application configuration,
         /// nonempty printable ASCII without whitespace.
-        token_exchange_credential: String,
+        client_credential: String,
     },
 }
 
@@ -99,13 +99,12 @@ impl PlatformProfile {
         }
     }
 
-    /// The public token-exchange credential the entry carries: GitHub's.
-    pub fn token_exchange_credential(&self) -> Option<&str> {
+    /// The public client credential the entry carries: GitHub's.
+    pub fn client_credential(&self) -> Option<&str> {
         match self {
             Self::Github {
-                token_exchange_credential,
-                ..
-            } => Some(token_exchange_credential),
+                client_credential, ..
+            } => Some(client_credential),
             Self::Google { .. } | Self::X { .. } => None,
         }
     }
@@ -113,7 +112,7 @@ impl PlatformProfile {
 
 /// Check the enabled set: nonempty, each platform once, each with a client id,
 /// a nonempty, duplicate-free version list and, where its ceremony takes one,
-/// a token-exchange credential of nonempty printable ASCII without whitespace.
+/// a client credential of nonempty printable ASCII without whitespace.
 pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>> {
     let refuse = |detail: String| Error::Config {
         detail: format!("platforms: {detail}"),
@@ -149,15 +148,13 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>>
                 )));
             }
         }
-        if let Some(credential) = p.token_exchange_credential() {
+        if let Some(credential) = p.client_credential() {
             if credential.is_empty() {
-                return Err(refuse(format!(
-                    "{id} carries an empty token_exchange_credential"
-                )));
+                return Err(refuse(format!("{id} carries an empty client_credential")));
             }
             if !credential.bytes().all(|b| (0x21..=0x7E).contains(&b)) {
                 return Err(refuse(format!(
-                    "{id}'s token_exchange_credential is not printable ASCII \
+                    "{id}'s client_credential is not printable ASCII \
                      without whitespace"
                 )));
             }
@@ -182,8 +179,8 @@ impl CeremonyConfig<'_> {
                 "clientId": p.client_id(),
                 "ceremonyVersions": p.versions(),
             });
-            if let Some(credential) = p.token_exchange_credential() {
-                entry["tokenExchangeCredential"] = Value::from(credential);
+            if let Some(credential) = p.client_credential() {
+                entry["clientCredential"] = Value::from(credential);
             }
             by_id.insert(p.id().as_str().to_owned(), entry);
         }
@@ -206,7 +203,7 @@ impl CeremonyConfig<'_> {
 mod tests {
     use super::*;
 
-    const ONE: &str = r#"[{"id":"github","client_id":"Iv1.0","versions":[1],"token_exchange_credential":"c0ffee"}]"#;
+    const ONE: &str = r#"[{"id":"github","client_id":"Iv1.0","versions":[1],"client_credential":"c0ffee"}]"#;
 
     /// Parse records as the configuration file would, then check them.
     fn checked(json: &str) -> Result<Vec<PlatformProfile>> {
@@ -217,13 +214,13 @@ mod tests {
         platforms(records)
     }
 
-    /// One github entry whose `token_exchange_credential` is `credential`.
+    /// One github entry whose `client_credential` is `credential`.
     fn github_with(credential: impl Into<Value>) -> String {
         json!([{
             "id": "github",
             "client_id": "a",
             "versions": [1],
-            "token_exchange_credential": credential.into(),
+            "client_credential": credential.into(),
         }])
         .to_string()
     }
@@ -235,16 +232,16 @@ mod tests {
         assert_eq!(p[0].id(), PlatformId::Github);
         assert_eq!(p[0].client_id(), "Iv1.0");
         assert_eq!(p[0].versions(), [1]);
-        assert_eq!(p[0].token_exchange_credential(), Some("c0ffee"));
+        assert_eq!(p[0].client_credential(), Some("c0ffee"));
     }
 
     /// The record carries a github entry's credential as
-    /// `tokenExchangeCredential`, and an entry that has none carries no such
+    /// `clientCredential`, and an entry that has none carries no such
     /// key.
     #[test]
     fn the_record_publishes_the_credential_where_there_is_one() {
         let platforms = checked(
-            r#"[{"id":"github","client_id":"Iv1.0","versions":[1],"token_exchange_credential":"c0ffee"},{"id":"x","client_id":"xc","versions":[2]}]"#,
+            r#"[{"id":"github","client_id":"Iv1.0","versions":[1],"client_credential":"c0ffee"},{"id":"x","client_id":"xc","versions":[2]}]"#,
         )
         .unwrap();
         let ccdp_origin =
@@ -261,11 +258,8 @@ mod tests {
         let github = record["platforms"]["github"].as_object().unwrap();
         let mut keys: Vec<&str> = github.keys().map(String::as_str).collect();
         keys.sort_unstable();
-        assert_eq!(
-            keys,
-            ["ceremonyVersions", "clientId", "tokenExchangeCredential"]
-        );
-        assert_eq!(github["tokenExchangeCredential"], "c0ffee");
+        assert_eq!(keys, ["ceremonyVersions", "clientCredential", "clientId"]);
+        assert_eq!(github["clientCredential"], "c0ffee");
 
         let x = record["platforms"]["x"].as_object().unwrap();
         let mut keys: Vec<&str> = x.keys().map(String::as_str).collect();
@@ -313,7 +307,7 @@ mod tests {
             ("a credential outside ASCII", github_with(around(0xE9))),
             (
                 "a credential on a platform that has none",
-                r#"[{"id":"x","client_id":"a","versions":[1],"token_exchange_credential":"c0ffee"}]"#.to_owned(),
+                r#"[{"id":"x","client_id":"a","versions":[1],"client_credential":"c0ffee"}]"#.to_owned(),
             ),
         ] {
             assert!(checked(&json).is_err(), "{why} must be refused");
@@ -326,7 +320,7 @@ mod tests {
         let err =
             checked(&github_with("zzMarkerzz fee")).expect_err("a space is refused");
         let text = err.to_string();
-        assert!(text.contains("token_exchange_credential"), "{text}");
+        assert!(text.contains("client_credential"), "{text}");
         assert!(!text.contains("zzMarkerzz"), "{text}");
     }
 }

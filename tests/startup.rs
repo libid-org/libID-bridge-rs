@@ -137,9 +137,9 @@ impl Started {
 fn the_binary_serves_until_interrupted() {
     let config = config_file(&format!(
         "[[platforms]]\nid = \"github\"\nclient_id = \"{}\"\nversions = [1]\n\
-         token_exchange_credential = \"{}\"\n",
+         client_credential = \"{}\"\n",
         fixtures::CLIENT_ID,
-        fixtures::TOKEN_EXCHANGE_CREDENTIAL
+        fixtures::CLIENT_CREDENTIAL
     ));
     let bridge = Started::on(&config);
 

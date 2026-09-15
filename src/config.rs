@@ -49,7 +49,7 @@ pub struct Config {
 
     /// The enabled platforms, from the configuration file's `[[platforms]]`
     /// tables: each names a platform, its public client id, the ceremony
-    /// versions it advertises and, for `github`, the public token-exchange
+    /// versions it advertises and, for `github`, the public client
     /// credential.
     #[arg(skip)]
     pub platforms: Vec<PlatformProfile>,
@@ -78,7 +78,7 @@ pub struct FileConfig {
     /// id = "github"
     /// client_id = "Iv1.0123456789abcdef"
     /// versions = [1]
-    /// token_exchange_credential = "..."
+    /// client_credential = "..."
     /// ```
     pub platforms: Option<Vec<PlatformProfile>>,
 }
@@ -175,7 +175,7 @@ mod file_tests {
             id = "github"
             client_id = "Iv1.0123456789abcdef"
             versions = [1]
-            token_exchange_credential = "c0ffee_from_the_file"
+            client_credential = "c0ffee_from_the_file"
             "#,
             &[],
         )
@@ -191,7 +191,7 @@ mod file_tests {
         assert_eq!(platforms.len(), 1);
         assert_eq!(platforms[0].client_id(), "Iv1.0123456789abcdef");
         assert_eq!(
-            platforms[0].token_exchange_credential(),
+            platforms[0].client_credential(),
             Some("c0ffee_from_the_file")
         );
     }
@@ -210,10 +210,7 @@ mod file_tests {
             &[],
         )
         .expect_err("no credential");
-        assert!(
-            err.to_string().contains("token_exchange_credential"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("client_credential"), "{err}");
     }
 
     /// An `x` table carries a client id and versions and no credential.
@@ -235,7 +232,7 @@ mod file_tests {
         assert_eq!(platforms[0].id(), PlatformId::X);
         assert_eq!(platforms[0].client_id(), "WHRlc3RjbGllbnQ6MTpjaQ");
         assert_eq!(platforms[0].versions(), [1]);
-        assert!(platforms[0].token_exchange_credential().is_none());
+        assert!(platforms[0].client_credential().is_none());
     }
 
     /// A flag beats the file.
@@ -281,7 +278,7 @@ mod file_tests {
             .iter()
             .find(|p| p.id() == PlatformId::Github)
             .expect("the example enables github");
-        assert!(github.token_exchange_credential().is_some());
+        assert!(github.client_credential().is_some());
     }
 
     /// A misspelled key is refused rather than ignored.

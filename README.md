@@ -1,4 +1,4 @@
-# libid-server-rs
+# libID-server-rs
 
 A minimal libID server for on-chain handle claims. It does exactly one
 job: run the OAuth + MPC-TLS flow that turns "I control this GitHub account"
@@ -6,7 +6,7 @@ into a bind-ready cryptographic proof, and hand that proof back to the UI.
 The UI submits the bind on-chain itself — this server holds no wallets, pays
 no gas, keeps no database, and talks to no chain.
 
-Built on the [libid-rs](https://github.com/libid-org/libid-rs) crates
+Built on the [libID-rs](https://github.com/libid-org/libID-rs) crates
 (MPC-TLS session driver, transcript math, digests, signing).
 
 ## How a claim works

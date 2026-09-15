@@ -208,3 +208,21 @@ fn a_configuration_the_binary_cannot_serve_stops_it() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("[[platforms]]"), "{stderr}");
 }
+
+/// A run that names no configuration file stops before it binds, naming the
+/// file it was not given rather than the platforms the file would carry.
+#[test]
+fn a_run_with_no_configuration_file_names_it() {
+    let output = Command::new(env!("CARGO_BIN_EXE_libid-server-rs"))
+        .env_clear()
+        .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|v| ("LLVM_PROFILE_FILE", v)))
+        .env("HOST", "127.0.0.1")
+        .env("PORT", "0")
+        .output()
+        .expect("the binary runs");
+
+    assert!(!output.status.success(), "{}", output.status);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("LIBID_CONFIG"), "{stderr}");
+    assert!(!stderr.contains("[[platforms]]"), "{stderr}");
+}

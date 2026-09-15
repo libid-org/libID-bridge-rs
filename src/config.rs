@@ -120,8 +120,14 @@ impl Config {
         let mut cfg = Config::from_arg_matches(&matches).map_err(|e| Error::Config {
             detail: e.to_string(),
         })?;
+        // The enabled platforms are read from the file and nowhere else, so a
+        // run that names none could serve no ceremony.
         let Some(path) = cfg.config.clone() else {
-            return Ok(cfg);
+            return Err(Error::Config {
+                detail: "no configuration file; name one with --config or \
+                         LIBID_CONFIG. The enabled platforms are read from it."
+                    .into(),
+            });
         };
 
         let refuse = |detail: String| Error::Config {
@@ -294,6 +300,20 @@ mod file_tests {
             .find(|p| p.id() == PlatformId::Github)
             .expect("the example enables github");
         assert!(github.client_credential().is_some());
+    }
+
+    /// A run that names no file is told that, not that the platforms the
+    /// file would have carried are missing.
+    #[test]
+    fn a_run_that_names_no_file_is_told_so() {
+        let err = Config::merged(
+            Config::command().mut_args(|a| a.env(None::<&str>)),
+            ["libid-server-rs"],
+        )
+        .expect_err("no configuration file");
+        let text = err.to_string();
+        assert!(text.contains("LIBID_CONFIG"), "{text}");
+        assert!(text.contains("--config"), "{text}");
     }
 
     /// A misspelled key is refused rather than ignored.

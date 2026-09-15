@@ -7,11 +7,8 @@
 #
 # Every key can be overridden by the environment variable or flag of the same
 # name: flag, then environment variable, then this file, then the default.
-# An unknown key is refused at startup.
-
-# Bind address and port. "0.0.0.0" in a container.
-host = "127.0.0.1"
-port = 8722
+# An unknown key is refused at startup. The bind address and port are set with
+# HOST and PORT, or --host and --port, and are not keys of this file.
 
 # Application origins admitted to read the public ceremony configuration, each
 # in canonical form: no trailing slash, lowercase host, no default port.

@@ -28,11 +28,12 @@ pub struct Config {
     #[arg(long, env = "LIBID_CONFIG")]
     pub config: Option<std::path::PathBuf>,
 
-    /// Host to bind. Use 0.0.0.0 in containers.
+    /// Host to bind. Use 0.0.0.0 in containers. Flag or environment only:
+    /// where the process listens is not ceremony configuration.
     #[arg(long, env = "HOST", default_value = "127.0.0.1")]
     pub host: String,
 
-    /// Port to bind.
+    /// Port to bind. Flag or environment only.
     #[arg(long, env = "PORT", default_value = "8722")]
     pub port: u16,
 
@@ -59,14 +60,12 @@ pub struct Config {
 ///
 /// Every key is optional and corresponds to the [`Config`] field of the same
 /// name; an unknown key is refused. `allowed_app_origins` is a list, and the
-/// platforms are `[[platforms]]` tables.
+/// platforms are `[[platforms]]` tables. The bind address and port are not
+/// keys: a container image sets them in the environment, which beats a file,
+/// so a file naming them would be read and not applied.
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct FileConfig {
-    /// [`Config::host`].
-    pub host: Option<String>,
-    /// [`Config::port`].
-    pub port: Option<u16>,
     /// [`Config::allowed_app_origins`].
     pub allowed_app_origins: Option<Vec<String>>,
     /// [`Config::ccdp_origin`].
@@ -107,7 +106,17 @@ impl Config {
         I: IntoIterator<Item = T>,
         T: Into<std::ffi::OsString> + Clone,
     {
-        let matches = Config::command().get_matches_from(argv);
+        Config::merged(Config::command(), argv)
+    }
+
+    /// The same, parsing with `command`: which environment variables reach a
+    /// flag is that command's to say.
+    fn merged<I, T>(command: clap::Command, argv: I) -> Result<Config>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        let matches = command.get_matches_from(argv);
         let mut cfg = Config::from_arg_matches(&matches).map_err(|e| Error::Config {
             detail: e.to_string(),
         })?;
@@ -123,12 +132,6 @@ impl Config {
         let file: FileConfig =
             toml::from_str(&text).map_err(|e| refuse(e.message().to_owned()))?;
 
-        if defaulted(&matches, "host") {
-            cfg.host = file.host.unwrap_or(cfg.host);
-        }
-        if defaulted(&matches, "port") {
-            cfg.port = file.port.unwrap_or(cfg.port);
-        }
         if defaulted(&matches, "ccdp_origin") {
             cfg.ccdp_origin = file.ccdp_origin.unwrap_or(cfg.ccdp_origin);
         }
@@ -146,7 +149,9 @@ mod file_tests {
     use super::*;
     use crate::deployment::PlatformId;
 
-    /// Write a configuration file and resolve against it.
+    /// Write a configuration file and resolve against it, with no environment
+    /// variable reaching a flag: what the file supplies is what this test
+    /// wrote, whatever the machine running it exports.
     fn resolved(toml: &str, flags: &[&str]) -> Result<Config> {
         let path = std::env::temp_dir().join(format!(
             "libid-config-{}-{:?}.toml",
@@ -154,13 +159,18 @@ mod file_tests {
             std::thread::current().id()
         ));
         std::fs::write(&path, toml).expect("a scratch config file");
+        resolved_file(&path, flags)
+    }
+
+    /// The configuration `path` describes, with `flags` on the command line.
+    fn resolved_file(path: &std::path::Path, flags: &[&str]) -> Result<Config> {
         let mut argv = vec![
             "libid-server-rs".to_owned(),
             "--config".to_owned(),
             path.display().to_string(),
         ];
         argv.extend(flags.iter().map(|f| (*f).to_owned()));
-        Config::resolve_from(argv)
+        Config::merged(Config::command().mut_args(|a| a.env(None::<&str>)), argv)
     }
 
     /// A file supplies what nothing else did, the platform table included.
@@ -168,7 +178,7 @@ mod file_tests {
     fn a_file_supplies_what_no_flag_and_no_variable_named() {
         let cfg = resolved(
             r#"
-            port = 9110
+            ccdp_origin = "https://dist.example"
             allowed_app_origins = ["https://app.example", "https://wallet.example"]
 
             [[platforms]]
@@ -181,7 +191,7 @@ mod file_tests {
         )
         .expect("a file this deployment can read");
 
-        assert_eq!(cfg.port, 9110);
+        assert_eq!(cfg.ccdp_origin, "https://dist.example");
         assert_eq!(
             cfg.allowed_app_origins,
             ["https://app.example", "https://wallet.example"]
@@ -238,15 +248,19 @@ mod file_tests {
     /// A flag beats the file.
     #[test]
     fn the_command_line_beats_the_file() {
-        let cfg = resolved("port = 9110\n", &["--port", "9999"])
-            .expect("a file this deployment can read");
-        assert_eq!(cfg.port, 9999);
+        let cfg = resolved(
+            "ccdp_origin = \"https://dist.example\"\n",
+            &["--ccdp-origin", "https://other.example"],
+        )
+        .expect("a file this deployment can read");
+        assert_eq!(cfg.ccdp_origin, "https://other.example");
     }
 
     /// Where neither says anything, the default stands.
     #[test]
     fn a_silent_file_changes_nothing() {
-        let cfg = resolved("port = 9110\n", &[]).expect("readable");
+        let cfg = resolved("allowed_app_origins = [\"https://app.example\"]\n", &[])
+            .expect("readable");
         assert_eq!(cfg.ccdp_origin, "https://lib.id");
     }
 
@@ -254,7 +268,8 @@ mod file_tests {
     /// platform check refuses by name.
     #[test]
     fn no_platform_table_means_no_platform() {
-        let cfg = resolved("port = 9110\n", &[]).expect("readable");
+        let cfg = resolved("allowed_app_origins = [\"https://app.example\"]\n", &[])
+            .expect("readable");
         assert!(cfg.platforms.is_empty());
         let err = crate::deployment::platforms(cfg.platforms).expect_err("no platform");
         assert!(err.to_string().contains("[[platforms]]"), "{err}");
@@ -264,10 +279,10 @@ mod file_tests {
     #[test]
     fn the_example_file_is_one_this_bridge_accepts() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/bridge.toml.example");
-        let cfg = Config::resolve_from(["libid-server-rs", "--config", path])
+        let cfg = resolved_file(std::path::Path::new(path), &[])
             .expect("the example beside this code");
 
-        assert_eq!(cfg.port, 8722);
+        assert_eq!(cfg.ccdp_origin, "https://lib.id");
         assert_eq!(
             cfg.allowed_app_origins,
             ["https://app.example", "https://wallet.example"]
@@ -288,12 +303,14 @@ mod file_tests {
         assert!(err.to_string().contains("prot"), "{err}");
     }
 
-    /// `public_origin`, `notary_wire_port` and `gh_oauth_client_secret` are
-    /// not settings: a file naming any of them is refused like any other
-    /// unknown key.
+    /// The bind address and port, and the keys of the exchange this bridge
+    /// does not perform, are not settings of this file: one naming any of
+    /// them is refused like any other unknown key.
     #[test]
     fn a_key_this_bridge_does_not_read_is_refused() {
         for unread in [
+            "host = \"0.0.0.0\"\n",
+            "port = 8722\n",
             "public_origin = \"https://bridge.example\"\n",
             "notary_wire_port = 7047\n",
             "gh_oauth_client_secret = \"s\"\n",

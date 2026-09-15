@@ -22,7 +22,8 @@ RUN apt-get update \
 
 COPY --from=builder /build/target/release/libid-server-rs /usr/local/bin/libid-server-rs
 
-# Bind on all interfaces inside the container.
+# Where the process listens inside the container. The mounted configuration
+# file carries no bind address: HOST and PORT are the only way to set one.
 ENV HOST=0.0.0.0 \
     PORT=8722
 

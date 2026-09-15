@@ -167,7 +167,9 @@ versions                  = [1]
 client_credential = "…"
 ```
 
-An unknown key is refused at startup. The platforms are set only in the file,
+An unknown key is refused at startup, `host` and `port` among them: where the
+process listens is set with `HOST`/`PORT` or `--host`/`--port`. The platforms
+are set only in the file,
 one `[[platforms]]` table per enabled platform: its `id` (`github`, `google` or
 `x`), its public `client_id`, the ceremony `versions` it advertises and, for
 `github`, the App's client secret as `client_credential`, which the
@@ -176,8 +178,8 @@ the credential.
 
 | Key | Environment | Default | Meaning |
 |---|---|---|---|
-| `host` | `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` in the container image). |
-| `port` | `PORT` | `8722` | Bind port. |
+| — | `HOST`, `--host` | `127.0.0.1` | Bind address (`0.0.0.0` in the container image). Not a file key: the image sets it in the environment, which beats a file. |
+| — | `PORT`, `--port` | `8722` | Bind port. Not a file key, for the same reason. |
 | `allowed_app_origins` | `ALLOWED_APP_ORIGINS`, comma-separated | *(required)* | Application origins. Exact origins, no patterns; HTTPS, or HTTP on `localhost` or `127.0.0.1`. Each must already be canonical — a trailing slash, an uppercase host or a default port is refused with the canonical spelling named, not folded — and a duplicate is refused. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once. It is the one admission rule: the configuration route admits exactly one `Origin` from it, and the callback document is told the same set. A same-origin read carries no `Origin` and is admitted on `Sec-Fetch-Site: same-origin` alone. |
 | `ccdp_origin` | `CCDP_ORIGIN` | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/callback.html` and everything the browser runs after it, HTTPS, or HTTP on `localhost` or `127.0.0.1`. Published in the configuration and inserted into the callback document. Omitting it selects the canonical libID Distribution. |
 | `platforms` | — | *(required)* | The enabled platforms, as `[[platforms]]` tables: `id`, `client_id`, `versions`, and for `github` its `client_credential`. File only. |
@@ -202,8 +204,9 @@ docker run --rm -p 8722:8722 \
 ```
 
 Images are published on every GitHub release as
-`ghcr.io/libid-org/libid-server-rs:<version>` and `:latest`. The image
-listens on `0.0.0.0:8722` and carries a `/health` healthcheck.
+`ghcr.io/libid-org/libid-server-rs:<version>` and `:latest`. The image sets
+`HOST=0.0.0.0` and `PORT=8722` and carries a `/health` healthcheck on that
+port; `-e PORT=` moves both.
 
 ## Building from source
 

@@ -32,8 +32,7 @@ fn config_file(platforms: &str) -> std::path::PathBuf {
     std::fs::write(
         &path,
         format!(
-            "host = \"127.0.0.1\"\nport = 0\n\
-             allowed_app_origins = [\"https://app.example\"]\n\
+            "allowed_app_origins = [\"https://app.example\"]\n\
              ccdp_origin = \"{}\"\n{platforms}",
             Distribution::shared().origin(),
         ),
@@ -42,14 +41,18 @@ fn config_file(platforms: &str) -> std::path::PathBuf {
     path
 }
 
-/// The binary, started on `config` with nothing but the configuration path
-/// and the log filter in its environment, and its output captured.
+/// The binary, started on `config` with nothing but the configuration path,
+/// the loopback port to bind and the log filter in its environment, and its
+/// output captured.
 fn binary(config: &std::path::Path) -> Child {
     Command::new(env!("CARGO_BIN_EXE_libid-server-rs"))
         .env_clear()
         // The coverage profile path, when this test runs under one.
         .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|v| ("LLVM_PROFILE_FILE", v)))
         .env("LIBID_CONFIG", config)
+        // Where a test's bridge listens is not a key of its file.
+        .env("HOST", "127.0.0.1")
+        .env("PORT", "0")
         .env("RUST_LOG", "info")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

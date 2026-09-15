@@ -132,9 +132,7 @@ impl Published {
             })?
             .ok_or_else(|| Error::ArtifactUnavailable {
                 url: url.clone(),
-                detail:
-                    "answered 304 Not Modified to a request carrying no If-None-Match"
-                        .into(),
+                detail: upstream::FetchError::UnaskedNotModified.to_string(),
             })?;
         published.log(&url, "retrieved the callback artifact");
         Ok(published)

@@ -39,14 +39,13 @@ use state::AppState;
 /// the callback artifact is retrieved from the Distribution before this
 /// returns; it returns `Err` when it cannot.
 pub async fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
-    let allowed_app_origins = allowed_app_origins(&cfg.allowed_app_origins)?;
     let ccdp_origin = Origin::parse("CCDP_ORIGIN", &cfg.ccdp_origin)?;
     // The effective set `allowedAppOrigins ∪ {ccdpOrigin}`: the one admission
     // rule of the configuration route, and what the callback document is
     // told. The resolved CCDP origin joins once; an overridden `CCDP_ORIGIN`
     // does not keep `https://lib.id` admitted unless it is listed.
     let allowed_origins: Arc<[Origin]> = {
-        let mut set = allowed_app_origins.clone();
+        let mut set = allowed_app_origins(&cfg.allowed_app_origins)?;
         if !set.contains(&ccdp_origin) {
             set.push(ccdp_origin.clone());
         }

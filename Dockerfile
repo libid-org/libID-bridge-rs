@@ -22,6 +22,10 @@ RUN apt-get update \
 
 COPY --from=builder /build/target/release/libid-server-rs /usr/local/bin/libid-server-rs
 
+# The bridge writes no file and binds no privileged port.
+RUN useradd --system --no-create-home --shell /usr/sbin/nologin libid
+USER libid
+
 # Where the process listens inside the container. The mounted configuration
 # file carries no bind address: HOST and PORT are the only way to set one.
 ENV HOST=0.0.0.0 \

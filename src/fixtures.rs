@@ -211,6 +211,34 @@ impl Distribution {
     }
 }
 
+/// A file for the duration of a test, removed when the test lets go of it.
+pub struct ScratchFile(std::path::PathBuf);
+
+impl ScratchFile {
+    /// `contents`, in a file of this process's own.
+    pub fn holding(contents: &str) -> ScratchFile {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "libid-{}-{}.toml",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::write(&path, contents).expect("a scratch configuration file");
+        ScratchFile(path)
+    }
+
+    /// Where it is.
+    pub fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// The client id every fixture deployment enables GitHub with.
 pub const CLIENT_ID: &str = "Iv1.0123456789abcdef";
 

@@ -20,25 +20,17 @@ use std::{
 use libid_server_rs::fixtures::{
     self,
     Distribution,
+    ScratchFile,
 };
 
 /// A configuration file for the binary, pointed at the shared Distribution.
-fn config_file(platforms: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "libid-startup-{}-{:?}.toml",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    std::fs::write(
-        &path,
-        format!(
-            "allowed_app_origins = [\"https://app.example\"]\n\
+/// It is removed when the test lets go of it.
+fn config_file(platforms: &str) -> ScratchFile {
+    ScratchFile::holding(&format!(
+        "allowed_app_origins = [\"https://app.example\"]\n\
              ccdp_origin = \"{}\"\n{platforms}",
-            Distribution::shared().origin(),
-        ),
-    )
-    .expect("a scratch configuration file");
-    path
+        Distribution::shared().origin(),
+    ))
 }
 
 /// The binary, started on `config` with nothing but the configuration path,
@@ -66,6 +58,15 @@ struct Started {
     stdout: BufReader<ChildStdout>,
     /// The address it listens on.
     address: String,
+}
+
+/// A test that ends before `interrupted` -- a failed assertion -- leaves no
+/// bridge running.
+impl Drop for Started {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 impl Started {
@@ -122,6 +123,7 @@ impl Started {
     }
 
     /// SIGINT the binary: its exit status and what it said after the signal.
+    /// `Drop` finds a process already reaped and says nothing.
     fn interrupted(mut self) -> (ExitStatus, String) {
         let interrupted = Command::new("kill")
             .args(["-INT", &self.child.id().to_string()])
@@ -144,7 +146,7 @@ fn the_binary_serves_until_interrupted() {
         fixtures::CLIENT_ID,
         fixtures::CLIENT_CREDENTIAL
     ));
-    let bridge = Started::on(&config);
+    let bridge = Started::on(config.path());
 
     let (status, body) = bridge.request("GET", "/health", &[], "");
     assert_eq!(status, 200, "{body}");
@@ -163,7 +165,7 @@ fn an_x_only_deployment_starts_and_serves_no_token_route() {
         "[[platforms]]\nid = \"x\"\nclient_id = \"WHRlc3RjbGllbnQ6MTpjaQ\"\n\
          versions = [1]\n",
     );
-    let bridge = Started::on(&config);
+    let bridge = Started::on(config.path());
 
     let (status, body) = bridge.request(
         "GET",
@@ -203,7 +205,7 @@ fn an_x_only_deployment_starts_and_serves_no_token_route() {
 #[test]
 fn a_configuration_the_binary_cannot_serve_stops_it() {
     let config = config_file("");
-    let output = binary(&config).wait_with_output().unwrap();
+    let output = binary(config.path()).wait_with_output().unwrap();
     assert!(!output.status.success(), "{}", output.status);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("[[platforms]]"), "{stderr}");

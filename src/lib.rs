@@ -112,7 +112,9 @@ fn ccdp_origin(spelling: &str) -> Result<Origin> {
 }
 
 /// The application origins admitted to read the configuration, each as
-/// written: one that is not already canonical is refused, not folded.
+/// written: one that is not already canonical is refused, not folded. The
+/// surrounding whitespace of a comma-separated spelling is not part of a
+/// member and is dropped before the member is read.
 fn allowed_app_origins(list: &[String]) -> Result<Vec<Origin>> {
     let mut out = Vec::new();
     // The index is the member's own, so a refusal names the entry the

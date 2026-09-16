@@ -59,8 +59,9 @@ out; origin checks and a closed input surface cannot constrain its owner.
 | `GET` | `/auth/callback` | The registered OAuth callback document: the CCDP Distribution's artifact with this deployment's data inserted, identical for every request. |
 
 `/health` is not one of the contract's two routes. The published image's
-`HEALTHCHECK` targets it; it reads nothing from the request, answers two bytes,
-and is the one route that accepts a query.
+`HEALTHCHECK` targets it; it reads nothing from the request and answers two
+bytes. The configuration route is the one that refuses a query; the callback
+takes the provider's and ignores it.
 
 Any other path, `POST /api/v1/ceremony/github-token` included, is answered
 `404` with no CORS header.

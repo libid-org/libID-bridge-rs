@@ -62,7 +62,7 @@ pub(crate) const ON_EVERY_RESPONSE: [(HeaderName, HeaderValue); 2] = [
 ];
 
 /// Liveness probe: `OK`. Not one of the contract's routes; the published
-/// image's `HEALTHCHECK` targets it. It is the one route that accepts a query.
+/// image's `HEALTHCHECK` targets it. It reads nothing from the request.
 async fn health() -> impl axum::response::IntoResponse {
     (ON_EVERY_RESPONSE, "OK")
 }

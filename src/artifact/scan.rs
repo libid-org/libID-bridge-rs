@@ -56,11 +56,17 @@ pub(crate) struct Layout {
 }
 
 impl Layout {
-    /// Read an artifact, or refuse it.
+    /// Read a retrieved artifact, or refuse it.
     pub(crate) fn scan(html: &str) -> Result<Layout, ArtifactError> {
         if html.len() > MAX_ARTIFACT_BYTES {
             return Err(ArtifactError::TooLarge(html.len()));
         }
+        Layout::read(html)
+    }
+
+    /// The same without the size bound, which the retrieved bytes carry: the
+    /// composed document is longer by what the slot holds.
+    pub(crate) fn read(html: &str) -> Result<Layout, ArtifactError> {
         refuse_hostile_bytes(html)?;
 
         let bytes = html.as_bytes();
@@ -628,6 +634,29 @@ mod tests {
         assert!(matches!(
             Layout::scan(&two_mounts),
             Err(ArtifactError::MountPoint)
+        ));
+    }
+
+    /// The bound is the retrieved artifact's; the composed document is longer
+    /// by what the slot holds and is read without it.
+    #[test]
+    fn the_composed_document_is_read_without_the_bound() {
+        let filler = "x".repeat(MAX_ARTIFACT_BYTES - doc("").len() - 64);
+        let html = doc(&format!(
+            "<p>{filler}</p><script type=\"module\">let x = 1;</script>"
+        ));
+        assert!(html.len() <= MAX_ARTIFACT_BYTES);
+        assert!(Layout::scan(&html).is_ok());
+
+        let composed = format!("{html}{}", "y".repeat(128));
+        assert!(composed.len() > MAX_ARTIFACT_BYTES);
+        assert!(
+            Layout::read(&composed).is_ok(),
+            "the composed document is not bounded a second time"
+        );
+        assert!(matches!(
+            Layout::scan(&composed),
+            Err(ArtifactError::TooLarge(_))
         ));
     }
 

@@ -75,7 +75,7 @@ impl CallbackDocument {
 
         // Substitution changes no executable byte: the scripts hash the same
         // before and after.
-        let after = Layout::scan(&body)?;
+        let after = Layout::read(&body)?;
         let before: Vec<String> = layout
             .executables
             .iter()

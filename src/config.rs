@@ -159,13 +159,8 @@ mod file_tests {
     /// variable reaching a flag: what the file supplies is what this test
     /// wrote, whatever the machine running it exports.
     fn resolved(toml: &str, flags: &[&str]) -> Result<Config> {
-        let path = std::env::temp_dir().join(format!(
-            "libid-config-{}-{:?}.toml",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::write(&path, toml).expect("a scratch config file");
-        resolved_file(&path, flags)
+        let file = crate::fixtures::ScratchFile::holding(toml);
+        resolved_file(file.path(), flags)
     }
 
     /// The configuration `path` describes, with `flags` on the command line.

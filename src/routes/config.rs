@@ -1,7 +1,8 @@
 //! The public ceremony configuration: `{ ccdpOrigin, platforms }`, one record
 //! built at startup and served to every admitted origin, and to a same-origin
 //! read. It carries no secret, no admitted origin, no asset URL and no notary
-//! setting.
+//! setting. A browser that must preflight its `GET` is answered here too, by
+//! the same admission rule.
 
 use std::sync::Arc;
 
@@ -35,6 +36,14 @@ const VARY_ON: &str = "origin, sec-fetch-site";
 /// The fetch metadata header saying where a browser request came from,
 /// relative to its target.
 const SEC_FETCH_SITE: HeaderName = HeaderName::from_static("sec-fetch-site");
+
+/// What `Vary` names on a preflight: the origin admitted and the headers the
+/// answer grants.
+const PREFLIGHT_VARY_ON: &str = "origin, access-control-request-headers";
+
+/// How long a browser may reuse one preflight answer. The admission set and
+/// the method granted are fixed at startup.
+const PREFLIGHT_MAX_AGE: &str = "600";
 
 /// How a request is admitted to read the configuration.
 enum Admission {
@@ -74,6 +83,56 @@ fn admission(state: &AppState, headers: &HeaderMap) -> Option<Admission> {
             }
         }
     }
+}
+
+/// `OPTIONS /api/v1/ceremony/config`: the preflight a browser sends before a
+/// `GET` carrying a header a simple request may not.
+///
+/// It admits what the `GET` admits: exactly one `Origin`, in the effective
+/// set. A preflight carries one by definition, so the same-origin case is not
+/// one and is refused like any other. The answer grants `GET`, the headers the
+/// request asked for, and no credentials.
+pub(crate) async fn preflight(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(Admission::Listed(origin)) = admission(&state, &headers) else {
+        return preflight_refusal();
+    };
+
+    let mut out = HeaderMap::new();
+    out.insert(header::VARY, HeaderValue::from_static(PREFLIGHT_VARY_ON));
+    out.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    out.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET"),
+    );
+    out.insert(
+        header::ACCESS_CONTROL_MAX_AGE,
+        HeaderValue::from_static(PREFLIGHT_MAX_AGE),
+    );
+    // The record is public and read without credentials, so the headers a
+    // caller wants to send are granted as asked rather than from a list this
+    // service would have to keep.
+    if let Some(asked) = headers.get(header::ACCESS_CONTROL_REQUEST_HEADERS) {
+        out.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, asked.clone());
+    }
+    for (name, value) in ON_EVERY_RESPONSE {
+        out.insert(name, value);
+    }
+
+    (StatusCode::NO_CONTENT, out).into_response()
+}
+
+/// A preflight this service does not answer: no allow-origin, so the browser
+/// blocks the request it was for. The body is one a browser never reads.
+fn preflight_refusal() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [(header::VARY, PREFLIGHT_VARY_ON)],
+        ON_EVERY_RESPONSE,
+    )
+        .into_response()
 }
 
 /// `GET /api/v1/ceremony/config`.

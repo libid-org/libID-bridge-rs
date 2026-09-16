@@ -55,7 +55,7 @@ out; origin checks and a closed input surface cannot constrain its owner.
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/health` | Liveness probe. Returns `OK`. Not one of the contract's routes — see below. |
-| `GET` | `/api/v1/ceremony/config` | The public ceremony configuration: `{ ccdpOrigin, platforms }`. Readable from an admitted origin, or by a same-origin `GET` without `Origin` on `Sec-Fetch-Site: same-origin`. `403` for any other origin, `400` for a query. |
+| `GET`, `OPTIONS` | `/api/v1/ceremony/config` | The public ceremony configuration: `{ ccdpOrigin, platforms }`. Readable from an admitted origin, or by a same-origin `GET` without `Origin` on `Sec-Fetch-Site: same-origin`. `403` for any other origin, `400` for a query. `OPTIONS` answers the preflight a caller sending its own header needs, by the same admission rule: `GET`, the headers asked for, no credentials. |
 | `GET` | `/auth/callback` | The registered OAuth callback document: the CCDP Distribution's artifact with this deployment's data inserted, identical for every request. |
 
 `/health` is not one of the contract's two routes. The published image's

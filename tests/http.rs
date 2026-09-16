@@ -316,6 +316,97 @@ async fn config_publishes_an_x_entry_of_exactly_client_id_and_versions() {
     assert_eq!(body["platforms"]["github"]["clientId"], fixtures::CLIENT_ID);
 }
 
+/// A caller that must preflight its read is answered by the same admission
+/// rule as the read: one admitted `Origin`, `GET`, the headers it asked for,
+/// no credentials.
+#[tokio::test]
+async fn config_answers_the_preflight_of_an_admitted_origin() {
+    async fn preflight(
+        state: Arc<AppState>,
+        headers: &[(&str, &str)],
+    ) -> axum::response::Response {
+        let mut req = Request::builder()
+            .method("OPTIONS")
+            .uri("/api/v1/ceremony/config");
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        app(state)
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    let resp = preflight(
+        test_state().await,
+        &[
+            ("origin", APP_ORIGIN),
+            ("access-control-request-method", "GET"),
+            ("access-control-request-headers", "x-request-id"),
+        ],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let h = resp.headers();
+    assert_eq!(h["access-control-allow-origin"], APP_ORIGIN);
+    assert_eq!(h["access-control-allow-methods"], "GET");
+    assert_eq!(h["access-control-allow-headers"], "x-request-id");
+    assert_eq!(h["vary"], "origin, access-control-request-headers");
+    assert!(
+        h.get("access-control-allow-credentials").is_none(),
+        "the record is read without credentials"
+    );
+    assert_eq!(h["cache-control"], "no-store");
+
+    // A preflight asking for no header is granted none.
+    let resp = preflight(
+        test_state().await,
+        &[
+            ("origin", ccdp_origin()),
+            ("access-control-request-method", "GET"),
+        ],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(resp.headers()["access-control-allow-origin"], ccdp_origin());
+    assert!(resp.headers().get("access-control-allow-headers").is_none());
+}
+
+/// A preflight is judged as the read is: an unlisted origin, two origins, or
+/// none at all is answered without a grant, whatever the fetch metadata says.
+#[tokio::test]
+async fn config_refuses_the_preflight_of_an_origin_it_would_refuse() {
+    for headers in [
+        vec![
+            ("origin", "https://evil.example"),
+            ("access-control-request-method", "GET"),
+        ],
+        vec![
+            ("origin", APP_ORIGIN),
+            ("origin", ccdp_origin()),
+            ("access-control-request-method", "GET"),
+        ],
+        vec![
+            ("access-control-request-method", "GET"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+    ] {
+        let mut req = Request::builder()
+            .method("OPTIONS")
+            .uri("/api/v1/ceremony/config");
+        for (name, value) in &headers {
+            req = req.header(*name, *value);
+        }
+        let resp = app(test_state().await)
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{headers:?}");
+        assert!(resp.headers().get("access-control-allow-origin").is_none());
+        assert!(resp.headers().get("access-control-allow-methods").is_none());
+    }
+}
+
 /// This bridge's own origin, sent as an `Origin`, is admitted exactly when
 /// it is listed as an application origin, like any other: the bridge does
 /// not know its own origin.

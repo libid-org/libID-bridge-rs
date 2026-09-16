@@ -1,13 +1,14 @@
 //! The OAuth Bridge's route table:
 //!
 //! - `GET  /health`
-//! - `GET  /api/v1/ceremony/config`
+//! - `GET`, `OPTIONS` `/api/v1/ceremony/config`
 //! - `GET  /auth/callback`
 //!
 //! Everything the browser runs is served by the CCDP Distribution at the
 //! configured `ccdpOrigin`. The configuration route admits exactly one
-//! `Origin`, in the effective set `allowedAppOrigins ∪ {ccdpOrigin}`, and
-//! echoes it as the one origin allowed. The callback carries no CORS: it is a
+//! `Origin`, in the effective set `allowedAppOrigins ∪ {ccdpOrigin}`, echoes
+//! it as the one origin allowed, and answers on `OPTIONS` the preflight a
+//! caller sending its own header needs. The callback carries no CORS: it is a
 //! top-level navigation. No other path is served, and no route performs a
 //! token exchange or opens a notary connection.
 
@@ -78,7 +79,7 @@ pub(crate) const CONFIG_PATH: &str = "/api/v1/ceremony/config";
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route(HEALTH_PATH, get(health))
-        .route(CONFIG_PATH, get(config::config))
+        .route(CONFIG_PATH, get(config::config).options(config::preflight))
         .route(CALLBACK_PATH, get(callback::callback))
         .with_state(state)
 }

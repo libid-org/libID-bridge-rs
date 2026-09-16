@@ -82,6 +82,12 @@ impl Origin {
         Ok(origin)
     }
 
+    /// Whether the host is an IPv6 literal. A canonical origin brackets one
+    /// and carries a bracket nowhere else.
+    pub(crate) fn is_ipv6_literal(&self) -> bool {
+        self.0.contains('[')
+    }
+
     /// The canonical spelling.
     pub(crate) fn as_str(&self) -> &str {
         &self.0

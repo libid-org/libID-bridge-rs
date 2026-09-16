@@ -39,7 +39,7 @@ use state::AppState;
 /// the callback artifact is retrieved from the Distribution before this
 /// returns; it returns `Err` when it cannot.
 pub async fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
-    let ccdp_origin = Origin::parse("CCDP_ORIGIN", &cfg.ccdp_origin)?;
+    let ccdp_origin = ccdp_origin(&cfg.ccdp_origin)?;
     // The effective set `allowedAppOrigins ∪ {ccdpOrigin}`: the one admission
     // rule of the configuration route, and what the callback document is
     // told. The resolved CCDP origin joins once; an overridden `CCDP_ORIGIN`
@@ -91,6 +91,25 @@ pub async fn serve(
 /// returns only when the process ends.
 pub async fn refresh_callback(state: Arc<AppState>) {
     artifact::upstream::refresh(state, artifact::upstream::Schedule::DEPLOYED).await
+}
+
+/// The CCDP Distribution this deployment selects, in canonical form. An IPv6
+/// literal is refused: the callback document's policy names this origin as a
+/// `frame-src` source, and a Content-Security-Policy source expression has no
+/// form for one, so a browser discards the source and the document frames
+/// nothing.
+fn ccdp_origin(spelling: &str) -> Result<Origin> {
+    let origin = Origin::parse("CCDP_ORIGIN", spelling)?;
+    if origin.is_ipv6_literal() {
+        return Err(Error::Config {
+            detail: format!(
+                "CCDP_ORIGIN {spelling} names an IPv6 literal, which the \
+                 callback document's Content-Security-Policy cannot carry as a \
+                 source; name the Distribution by host"
+            ),
+        });
+    }
+    Ok(origin)
 }
 
 /// The application origins admitted to read the configuration, each as
@@ -212,6 +231,11 @@ mod tests {
             (
                 "a CCDP origin whose host carries a CSP directive separator",
                 vec!["--ccdp-origin", "https://a;b.example"],
+            ),
+            (
+                "a CCDP origin written as an IPv6 literal, which its policy \
+                 could not name",
+                vec!["--ccdp-origin", "https://[::1]:8787"],
             ),
             (
                 "an admitted origin whose host carries a CSP keyword quote",

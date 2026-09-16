@@ -394,8 +394,8 @@ pub(crate) async fn refresh(state: Arc<AppState>, schedule: Schedule) {
     }
 }
 
-/// One revalidation: `true` replaced the document, `false` was a `304`, and
-/// an error left everything as it was.
+/// One revalidation: `true` replaced the document, `false` found nothing to
+/// replace it with, and an error left everything as it was.
 async fn revalidate(
     state: &Arc<AppState>,
     upstream: &Upstream,
@@ -408,6 +408,16 @@ async fn revalidate(
     else {
         return Ok(false);
     };
+    // A Distribution that sends no validator answers every refresh with the
+    // whole document. The same document under the same validator is what is
+    // already served, so nothing is published and nothing is logged.
+    let served = {
+        let current = state.callback.borrow();
+        current.etag == published.etag && current.document.body == published.document.body
+    };
+    if served {
+        return Ok(false);
+    }
     // The document and its policy replace the old pair together.
     state.callback_tx.send_replace(Arc::new(published));
     Ok(true)
@@ -629,6 +639,42 @@ mod tests {
         // Both queued answers were given before the replacement was reached.
         assert_eq!(distribution.still_queued(), 0);
         assert!(distribution.requests().len() >= 4);
+    }
+
+    /// A Distribution that sends no validator answers every refresh with the
+    /// document itself; the same bytes are not a replacement, so nothing is
+    /// published and the served value is the one startup published.
+    #[tokio::test]
+    async fn the_same_document_under_no_validator_is_not_republished() {
+        let distribution = Distribution::healthy().await;
+        distribution.now_serves(Reply {
+            etag: None,
+            ..Reply::artifact()
+        });
+        let state = bridge(&distribution).await;
+        let before = state.callback.borrow().clone();
+        assert_eq!(before.etag, None, "the Distribution sent no validator");
+
+        for _ in 0..3 {
+            assert!(
+                !revalidate(&state, &upstream(&distribution))
+                    .await
+                    .expect("a refresh that reaches the Distribution"),
+                "the same document is not a replacement"
+            );
+        }
+        assert!(Arc::ptr_eq(&before, &state.callback.borrow()));
+
+        // A document that did change is published, validator or not.
+        distribution.now_serves(Reply {
+            etag: None,
+            body: crate::fixtures::ARTIFACT.replace("Nothing was sent.", "Nothing came."),
+            ..Reply::artifact()
+        });
+        assert!(revalidate(&state, &upstream(&distribution))
+            .await
+            .expect("a refresh that reaches the Distribution"));
+        assert!(!Arc::ptr_eq(&before, &state.callback.borrow()));
     }
 
     /// A `3xx` is refused, not followed.

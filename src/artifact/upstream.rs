@@ -678,7 +678,8 @@ mod tests {
         // A document that did change is published, validator or not.
         distribution.now_serves(Reply {
             etag: None,
-            body: crate::fixtures::ARTIFACT.replace("Nothing was sent.", "Nothing came."),
+            // Outside the modules, so the hashes its policy names still hold.
+            body: crate::fixtures::ARTIFACT.replace("<title>libID", "<title>libID "),
             ..Reply::artifact()
         });
         assert!(revalidate(&state, &upstream(&distribution))

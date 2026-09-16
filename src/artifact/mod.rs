@@ -1,13 +1,22 @@
 //! The callback document this bridge serves: the CCDP Distribution's artifact
 //! with one unversioned list substituted into its one non-executable slot,
 //! under a Content-Security-Policy composed here from this deployment's own
-//! sources and the script hashes the artifact arrived with.
+//! sources and the script hashes the artifact arrived with, checked against
+//! the code they cover.
 
 pub(crate) mod scan;
 pub(crate) mod upstream;
 
 use axum::http::HeaderValue;
+use base64::{
+    engine::general_purpose::STANDARD,
+    Engine,
+};
 use bytes::Bytes;
+use sha2::{
+    Digest,
+    Sha256,
+};
 
 use scan::ArtifactError;
 use upstream::Upstream;
@@ -45,29 +54,44 @@ impl CallbackDocument {
     /// one constructor, where the deployment's data goes in and the policy is
     /// written.
     ///
-    /// `hashes` are the script sources the artifact's own policy named. The
-    /// slot is not executable and is the only thing substitution touches, so
-    /// every byte those hashes cover is served unchanged.
+    /// `hashes` are the script sources the artifact's own policy named. They
+    /// must be the hashes of the modules the document carries: a Distribution
+    /// that ships a stale one is refused here rather than serving a document
+    /// whose code the browser blocks. The slot is not executable and is the
+    /// only thing substitution touches, so every byte those hashes cover is
+    /// served unchanged.
     pub(crate) fn compose(
         html: &str,
         hashes: &[String],
         inputs: &DeploymentInputs<'_>,
     ) -> Result<CallbackDocument, ArtifactError> {
-        let slot = scan::slot(html)?;
+        let layout = scan::scan(html)?;
         // The slot holds exactly the marker, and the marker occurs nowhere
         // else.
-        if html[slot.clone()].trim() != scan::MARKER
+        if html[layout.slot.clone()].trim() != scan::MARKER
             || html.matches(scan::MARKER).nth(1).is_some()
         {
             return Err(ArtifactError::Marker);
+        }
+        // What the artifact's policy names is what its code hashes to.
+        let mut declared: Vec<&str> = hashes.iter().map(String::as_str).collect();
+        let mut carried: Vec<String> = layout
+            .modules
+            .iter()
+            .map(|r| hash_source(&html[r.clone()]))
+            .collect();
+        declared.sort_unstable();
+        carried.sort_unstable();
+        if declared != carried {
+            return Err(ArtifactError::Hashes);
         }
 
         // One unversioned list: `[allowedOrigins, ccdpOrigin]`.
         let record = serde_json::json!([inputs.allowed_origins, inputs.ccdp_origin]);
         let mut body = String::with_capacity(html.len());
-        body.push_str(&html[..slot.start]);
+        body.push_str(&html[..layout.slot.start]);
         body.push_str(&json(&record));
-        body.push_str(&html[slot.end..]);
+        body.push_str(&html[layout.slot.end..]);
         // The composed document carries the same one slot and mount point.
         scan::read(&body)?;
 
@@ -148,6 +172,14 @@ fn policy(hashes: &[String], ccdp_origin: &str) -> String {
         "connect-src 'none'".to_owned(),
     ]
     .join("; ")
+}
+
+/// The CSP source for an inline script: the base64 SHA-256 of its exact text.
+fn hash_source(script: &str) -> String {
+    format!(
+        "'sha256-{}'",
+        STANDARD.encode(Sha256::digest(script.as_bytes()))
+    )
 }
 
 /// A JSON island, escaped so it cannot end the script element that carries
@@ -297,6 +329,27 @@ mod tests {
         let hostile = json(&serde_json::json!(["https://a.example/</script><script>x"]));
         assert!(!hostile.contains("</script>"), "{hostile}");
         assert!(!hostile.contains("<script"), "{hostile}");
+    }
+
+    /// A policy naming a hash that is not the code's is refused: the browser
+    /// would block that code, and the deployment would serve a blank page.
+    #[test]
+    fn an_artifact_whose_declared_hash_is_not_its_codes_is_refused() {
+        let stale = vec!["'sha256-ZnJvbSBhbiBvbGRlciBidWlsZA=='".to_owned()];
+        assert!(matches!(
+            CallbackDocument::compose(
+                FIXTURE,
+                &stale,
+                &DeploymentInputs {
+                    ccdp_origin: &origin("https://ccdp.example"),
+                    allowed_origins: &origins(),
+                },
+            ),
+            Err(scan::ArtifactError::Hashes)
+        ));
+
+        // The same artifact under the hashes it was built with composes.
+        assert!(composed(FIXTURE, &origins()).csp.to_str().is_ok());
     }
 
     /// A slot holding anything but the marker, or a marker occurring twice, is

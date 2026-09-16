@@ -1,9 +1,10 @@
 //! Reading a Callback artifact well enough to serve it: the one data slot
-//! this bridge substitutes into, and the mount point the artifact contract
-//! requires. What the browser executes is named by the artifact's own
-//! hash-only `script-src`, which this bridge carries into the policy it
-//! composes; the data slot is not executable, so substituting into it leaves
-//! every hashed byte where it was.
+//! this bridge substitutes into, the mount point the artifact contract
+//! requires, and the modules the browser executes. The artifact arrives with
+//! the hashes of those modules in its own `script-src`; this bridge checks
+//! them against the code and carries them into the policy it composes. The
+//! data slot is not executable, so substituting into it leaves every hashed
+//! byte where it was.
 
 use std::ops::Range;
 
@@ -11,6 +12,8 @@ use std::ops::Range;
 /// carries it. Both are fixed by the artifact contract.
 pub(crate) const MARKER: &str = "__LIBID_CALLBACK_CONFIG__";
 const SLOT_OPEN: &str = "<script id=\"libid-callback-config\" type=\"application/json\">";
+const MODULE_OPEN: &str = "<script type=\"module\">";
+const SCRIPT_OPEN: &str = "<script";
 const SCRIPT_CLOSE: &str = "</script>";
 
 /// The element the Callback renders into, which the artifact carries once.
@@ -30,6 +33,12 @@ pub(crate) enum ArtifactError {
     TooLarge(usize),
     #[error("the document carries {0} configuration slots, and must carry one")]
     Slots(usize),
+    #[error("a script at byte {0} is neither the configuration slot nor a plain module")]
+    UnreadableScript(usize),
+    #[error("the document carries {0} modules, and must carry 1 to {MAX_HASHES}")]
+    Modules(usize),
+    #[error("the artifact's policy names hashes that are not its code's")]
+    Hashes,
     #[error("the configuration slot does not hold exactly the marker")]
     Marker,
     #[error("the document does not carry exactly one empty `<main id=\"libid-root\">`")]
@@ -40,12 +49,18 @@ pub(crate) enum ArtifactError {
     Policy(String),
 }
 
-/// The byte range the deployment data replaces: what the one data slot holds.
-///
-/// The document carries that slot once and the mount point once. Everything
-/// else about the artifact is the Distribution's to get right: this bridge
-/// substitutes into one non-executable element and changes nothing else.
-pub(crate) fn slot(html: &str) -> Result<Range<usize>, ArtifactError> {
+/// What the document carries: the slot the deployment data replaces, and the
+/// modules the browser executes.
+#[derive(Debug)]
+pub(crate) struct Layout {
+    /// The byte range of what the one data slot holds.
+    pub(crate) slot: Range<usize>,
+    /// The text of each module, in document order: the span a CSP hash covers.
+    pub(crate) modules: Vec<Range<usize>>,
+}
+
+/// Read a retrieved artifact, or refuse it.
+pub(crate) fn scan(html: &str) -> Result<Layout, ArtifactError> {
     if html.len() > MAX_ARTIFACT_BYTES {
         return Err(ArtifactError::TooLarge(html.len()));
     }
@@ -54,29 +69,58 @@ pub(crate) fn slot(html: &str) -> Result<Range<usize>, ArtifactError> {
 
 /// The same without the size bound, which the retrieved bytes carry: the
 /// composed document is longer by what the slot holds.
-pub(crate) fn read(html: &str) -> Result<Range<usize>, ArtifactError> {
-    let opens = html.matches(SLOT_OPEN).count();
-    if opens != 1 {
-        return Err(ArtifactError::Slots(opens));
+///
+/// Every script element is the data slot or a plain module, and the text of
+/// each is taken between its tags. A document writing `<script` anywhere a
+/// script element may not begin is refused rather than read: the artifact is
+/// one page this bridge and the Distribution both know the shape of.
+pub(crate) fn read(html: &str) -> Result<Layout, ArtifactError> {
+    let mut slot = None;
+    let mut modules = Vec::new();
+    let mut at = 0;
+    while let Some(k) = html[at..].find(SCRIPT_OPEN) {
+        let open = at + k;
+        let rest = &html[open..];
+        let text = if rest.starts_with(SLOT_OPEN) {
+            open + SLOT_OPEN.len()
+        } else if rest.starts_with(MODULE_OPEN) {
+            open + MODULE_OPEN.len()
+        } else {
+            return Err(ArtifactError::UnreadableScript(open));
+        };
+        let end = html[text..]
+            .find(SCRIPT_CLOSE)
+            .map(|k| text + k)
+            .ok_or(ArtifactError::UnreadableScript(open))?;
+        if rest.starts_with(SLOT_OPEN) {
+            if slot.is_some() {
+                return Err(ArtifactError::Slots(2));
+            }
+            slot = Some(text..end);
+        } else {
+            modules.push(text..end);
+        }
+        at = end + SCRIPT_CLOSE.len();
     }
-    let text = html.find(SLOT_OPEN).expect("one slot element") + SLOT_OPEN.len();
-    let end = html[text..]
-        .find(SCRIPT_CLOSE)
-        .map(|k| text + k)
-        .ok_or(ArtifactError::Slots(0))?;
 
+    let Some(slot) = slot else {
+        return Err(ArtifactError::Slots(0));
+    };
+    if modules.is_empty() || modules.len() > MAX_HASHES {
+        return Err(ArtifactError::Modules(modules.len()));
+    }
     if html.matches(MOUNT_POINT).count() != 1 {
         return Err(ArtifactError::MountPoint);
     }
-    Ok(text..end)
+    Ok(Layout { slot, modules })
 }
 
 /// The script hashes an artifact's own policy names.
 ///
-/// The artifact is served with the hashes of the code it carries, and this
-/// bridge carries them into the policy it composes rather than recomputing
-/// them: a `script-src` naming anything but hashes is refused, so no source
-/// this bridge did not write can reach the composed policy.
+/// The artifact is served with the hashes of the code it carries. A
+/// `script-src` naming anything but hashes is refused here, and
+/// [`CallbackDocument::compose`](super::CallbackDocument::compose) checks
+/// what it names against the code before either reaches a browser.
 pub(crate) fn script_hashes(policy: &str) -> Result<Vec<String>, ArtifactError> {
     let refuse = |why: String| Err(ArtifactError::UpstreamPolicy(why));
 
@@ -141,21 +185,39 @@ mod tests {
         )
     }
 
-    /// The slot is the bytes between the slot element's tags, and nothing
-    /// else moves.
+    fn module(code: &str) -> String {
+        doc(&format!("<script type=\"module\">{code}</script>"))
+    }
+
+    /// The slot is what its element holds, and the module is its text
+    /// exactly: the span a CSP hash covers.
     #[test]
-    fn the_slot_is_what_the_element_holds() {
-        let html = doc("<script type=\"module\">let x = 1;</script>");
-        let slot = slot(&html).expect("a document this bridge reads");
-        assert_eq!(html[slot].trim(), MARKER);
+    fn the_slot_and_the_modules_are_what_their_elements_hold() {
+        let html = module("let x = 1;");
+        let layout = read(&html).expect("a document this bridge reads");
+        assert_eq!(html[layout.slot].trim(), MARKER);
+        assert_eq!(layout.modules.len(), 1);
+        assert_eq!(&html[layout.modules[0].clone()], "let x = 1;");
+    }
+
+    /// A document may carry more than one module, and the order is the
+    /// document's.
+    #[test]
+    fn every_module_is_read_in_document_order() {
+        let html = doc("<script type=\"module\">first;</script>\
+             <p>between</p><script type=\"module\">second;</script>");
+        let layout = read(&html).expect("two modules");
+        let text: Vec<&str> = layout.modules.iter().map(|r| &html[r.clone()]).collect();
+        assert_eq!(text, ["first;", "second;"]);
     }
 
     /// The fixture the tests serve is one this bridge reads.
     #[test]
     fn the_fixture_is_readable() {
         let html = crate::fixtures::ARTIFACT;
-        let slot = slot(html).expect("the fixture artifact");
-        assert_eq!(html[slot].trim(), MARKER);
+        let layout = scan(html).expect("the fixture artifact");
+        assert_eq!(html[layout.slot].trim(), MARKER);
+        assert_eq!(layout.modules.len(), 1);
     }
 
     /// Each of these is refused.
@@ -163,34 +225,34 @@ mod tests {
     fn a_document_this_bridge_cannot_serve_is_refused() {
         let slot_element = format!(
             "<script id=\"libid-callback-config\" type=\"application/json\">\
-                     {MARKER}</script>"
+             {MARKER}</script>"
         );
+        let code = "<script type=\"module\">let x = 1;</script>";
         for (why, html) in [
             (
                 "no slot",
-                "<body><main id=\"libid-root\"></main></body>".to_owned(),
+                format!("<body><main id=\"libid-root\"></main>{code}</body>"),
             ),
-            (
-                "two slots",
-                doc(&slot_element),
-            ),
+            ("two slots", doc(&format!("{slot_element}{code}"))),
             (
                 "no mount point",
-                format!("<body>{slot_element}</body>"),
+                format!("<body>{slot_element}{code}</body>"),
             ),
             (
                 "two mount points",
-                doc("<main id=\"libid-root\"></main>"),
+                doc(&format!("<main id=\"libid-root\"></main>{code}")),
+            ),
+            ("no module", doc("<p>nothing to run</p>")),
+            (
+                "a script that is neither",
+                doc("<script src=\"/app.js\"></script>"),
             ),
             (
-                "a slot element that never closes",
-                format!(
-                    "<body><main id=\"libid-root\"></main>\
-                     <script id=\"libid-callback-config\" type=\"application/json\">{MARKER}"
-                ),
+                "a module that never closes",
+                doc("<script type=\"module\">let x = 1;"),
             ),
         ] {
-            assert!(slot(&html).is_err(), "{why} must be refused");
+            assert!(read(&html).is_err(), "{why} must be refused");
         }
     }
 
@@ -198,10 +260,10 @@ mod tests {
     /// by what the slot holds and is read without it.
     #[test]
     fn the_composed_document_is_read_without_the_bound() {
-        let filler = "x".repeat(MAX_ARTIFACT_BYTES - doc("").len() - 64);
-        let html = doc(&format!("<p>{filler}</p>"));
+        let filler = "x".repeat(MAX_ARTIFACT_BYTES - module("").len() - 64);
+        let html = module(&format!("let x = '{filler}';"));
         assert!(html.len() <= MAX_ARTIFACT_BYTES);
-        assert!(slot(&html).is_ok());
+        assert!(scan(&html).is_ok());
 
         let composed = format!("{html}{}", "y".repeat(128));
         assert!(composed.len() > MAX_ARTIFACT_BYTES);
@@ -209,7 +271,7 @@ mod tests {
             read(&composed).is_ok(),
             "the composed document is not bounded a second time"
         );
-        assert!(matches!(slot(&composed), Err(ArtifactError::TooLarge(_))));
+        assert!(matches!(scan(&composed), Err(ArtifactError::TooLarge(_))));
     }
 
     /// The hashes are read out of the artifact's own `script-src`, whatever

@@ -16,10 +16,9 @@ futures-util = { version = "0.3", optional = true }
 axum = "0.8"
 
 # ── everything else ─────────────────────────────────────────────────────
-# The fixture Distribution serves the artifact under the hash its own code
-# would be served with; nothing outside the tests hashes anything.
-base64 = { version = "0.22", optional = true }
-sha2 = { version = "0.10", optional = true }
+# The hashes an artifact's policy names are checked against its code.
+base64 = "0.22"
+sha2 = "0.10"
 # The artifact retrieval is a `client`/`http1` connection of this crate's own.
 bytes = "1"
 http-body-util = "0.1"
@@ -58,7 +57,7 @@ url = "2"
 
 [features]
 # The test fixtures (`libid_server_rs::fixtures`), for the integration tests.
-fixtures = ["dep:futures-util", "dep:base64", "dep:sha2"]
+fixtures = ["dep:futures-util"]
 
 [dev-dependencies]
 libid-server-rs = { path = ".", features = ["fixtures"] }

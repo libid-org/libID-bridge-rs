@@ -117,12 +117,13 @@ version, and holds no version list: a compatible Callback change needs no
 bridge rebuild.
 
 The policy's `script-src` carries **only the hashes the artifact was served
-with**. The Distribution publishes the hashes of the code it ships, and this
-bridge checks that its `script-src` names hashes and nothing else before
-carrying them into the policy it writes: no source this bridge did not write
-reaches a browser. An artifact whose policy names anything else is refused.
-Substitution cannot invalidate a hash, because the slot is a
-non-executable data block and the only thing substitution touches.
+with**. The Distribution publishes the hashes of the code it ships; this bridge
+checks that its `script-src` names hashes and nothing else, and that those are
+the hashes of the modules the document carries. A Distribution shipping a stale
+hash is refused at startup rather than serving a document whose code the browser
+blocks, and no source this bridge did not write reaches a browser. Substitution
+cannot invalidate a hash, because the slot is a non-executable data block and
+the only thing substitution touches.
 
 The document is composed once at startup and never varies: no request field —
 `Origin`, `Referer`, query, fragment — changes a byte of it or its policy. The

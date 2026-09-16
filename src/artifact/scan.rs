@@ -150,21 +150,6 @@ fn refuse_hostile_bytes(html: &str) -> Result<(), ArtifactError> {
     if let Some(i) = html.find("<!--") {
         return Err(ArtifactError::Forbidden("an HTML comment", i));
     }
-    // In foreign content `<script>` is parsed as markup rather than raw text.
-    // `<svg` and `<math` are stepped over by `foreign_subtree` and refused
-    // only if one holds a `<script`.
-    if let Some(i) = html.find("<?") {
-        return Err(ArtifactError::Forbidden("a processing instruction", i));
-    }
-    // `<![` needs no case folding; the word after it does.
-    let mut from = 0;
-    while let Some(k) = html[from..].find("<![") {
-        let i = from + k;
-        if starts_with_ci(&html.as_bytes()[i + 3..], b"cdata[") {
-            return Err(ArtifactError::Forbidden("a CDATA section", i));
-        }
-        from = i + 3;
-    }
     // Control bytes are not markup and not text a document needs.
     if let Some(i) = html
         .bytes()
@@ -175,27 +160,32 @@ fn refuse_hostile_bytes(html: &str) -> Result<(), ArtifactError> {
     Ok(())
 }
 
+/// Whether the tag at `tag`, which begins at a `<`, opens the element
+/// `name`. The name ends where it ends: `<math-field>` is a custom element,
+/// not `<math>`.
+fn opens(tag: &[u8], name: &str) -> bool {
+    tag.get(1..=name.len())
+        .is_some_and(|t| t.eq_ignore_ascii_case(name.as_bytes()))
+        && tag
+            .get(1 + name.len())
+            .is_none_or(|b| b.is_ascii_whitespace() || *b == b'>' || *b == b'/')
+}
+
+/// The same for `</name`.
+fn closes(tag: &[u8], name: &str) -> bool {
+    tag.get(1) == Some(&b'/') && opens(&tag[1..], name)
+}
+
 /// Skip an `<svg>` or `<math>` subtree, refusing one that contains a
 /// `<script` (inside foreign content `<script>` is parsed as markup), or
 /// return `None` if this tag opens neither.
 fn foreign_subtree(html: &str, open: usize) -> Result<Option<usize>, ArtifactError> {
-    let rest = &html[open..];
-    let name = ["svg", "math"]
-        .into_iter()
-        // Compared as bytes: slicing `&str` at a fixed byte index panics inside
-        // a multi-byte character.
-        .find(|n| {
-            rest.as_bytes()
-                .get(1..=n.len())
-                .is_some_and(|t| t.eq_ignore_ascii_case(n.as_bytes()))
-                // The name ends there: `<math-field>` is a custom element, not
-                // foreign content.
-                && rest
-                    .as_bytes()
-                    .get(1 + n.len())
-                    .is_none_or(|b| b.is_ascii_whitespace() || *b == b'>' || *b == b'/')
-        });
-    let Some(name) = name else { return Ok(None) };
+    // Compared as bytes: slicing `&str` at a fixed byte index panics inside a
+    // multi-byte character.
+    let rest = html.as_bytes().get(open..).unwrap_or_default();
+    let Some(name) = ["svg", "math"].into_iter().find(|n| opens(rest, n)) else {
+        return Ok(None);
+    };
 
     // One open tag, which may close itself.
     let tag_end = end_of_tag(html, open, open + 1 + name.len())?;
@@ -203,36 +193,39 @@ fn foreign_subtree(html: &str, open: usize) -> Result<Option<usize>, ArtifactErr
         return Ok(Some(tag_end));
     }
 
-    // Otherwise walk to the matching close, counting nesting. Every tag of
-    // the subtree begins with `<`, so one forward pass over the bytes reaches
-    // the match: the position never moves back, whatever the nesting.
-    let tail = &html.as_bytes()[tag_end..];
-    let (o, c) = (format!("<{name}"), format!("</{name}"));
-    let (o, c) = (o.as_bytes(), c.as_bytes());
-    let (mut depth, mut i) = (1usize, 0usize);
+    // Otherwise walk to the matching close, one tag at a time: `end_of_tag`
+    // steps over a quoted value whole, so a name written inside one is text.
+    let (mut depth, mut i) = (1usize, tag_end);
     while depth > 0 {
-        let Some(k) = tail[i..].iter().position(|b| *b == b'<') else {
+        let Some(k) = html[i..].find('<') else {
             return Err(ArtifactError::Malformed(open));
         };
         let at = i + k;
-        if starts_with_ci(&tail[at..], c) {
+        let tag = &html.as_bytes()[at..];
+        if closes(tag, name) {
             depth -= 1;
-            i = at + c.len();
-        } else if starts_with_ci(&tail[at..], o) {
-            depth += 1;
-            i = at + o.len();
+            i = end_of_tag(html, open, at + 2 + name.len())?;
+        } else if opens(tag, name) {
+            let end = end_of_tag(html, open, at + 1 + name.len())?;
+            // A nested `<svg/>` opens and closes at once.
+            if !html[at..end].ends_with("/>") {
+                depth += 1;
+            }
+            i = end;
+        } else if starts_with_ci(tag, b"<script") {
+            return Err(ArtifactError::Forbidden(
+                "a script inside foreign content",
+                at,
+            ));
+        } else if starts_with_ci(tag, b"<![cdata[") {
+            // Foreign content is the one place a CDATA section parses, and it
+            // ends at `]]>` rather than at the `>` this reader walks to.
+            return Err(ArtifactError::Forbidden("a CDATA section", at));
         } else {
-            i = at + 1;
+            i = end_of_tag(html, open, at + 1)?;
         }
     }
-    let end = end_of_tag(html, open, tag_end + i)?;
-    if find_ci(&tail[..i], b"<script").is_some() {
-        return Err(ArtifactError::Forbidden(
-            "a script inside foreign content",
-            open,
-        ));
-    }
-    Ok(Some(end))
+    Ok(Some(i))
 }
 
 /// The end of a script element's text, requiring the exact `</script>`
@@ -262,9 +255,18 @@ fn ordinary_tag(html: &str, open: usize) -> Result<usize, ArtifactError> {
     if i >= bytes.len() {
         return Err(ArtifactError::Malformed(open));
     }
+    // A processing instruction and a CDATA section are markup this reader does
+    // not read; in script text, where neither is markup, they are ordinary
+    // bytes and never reach here.
+    if bytes[i] == b'?' {
+        return Err(ArtifactError::Forbidden("a processing instruction", open));
+    }
     // `<!doctype html>` is the one `<!` this reader admits; `<!--` was already
     // refused above.
     if bytes[i] == b'!' {
+        if starts_with_ci(&bytes[i + 1..], b"[cdata[") {
+            return Err(ArtifactError::Forbidden("a CDATA section", open));
+        }
         if !starts_with_ci(&bytes[open..], b"<!doctype ") {
             return Err(ArtifactError::Malformed(open));
         }
@@ -312,26 +314,73 @@ mod tests {
     /// no CDATA section.
     #[test]
     fn a_cdata_section_is_refused_however_it_is_spelled() {
-        for body in ["<![CDATA[x]]>", "<![cdata[x]]>", "<![CdAtA[x]]>"] {
-            assert!(
-                matches!(
-                    refuse_hostile_bytes(body),
-                    Err(ArtifactError::Forbidden("a CDATA section", _))
-                ),
-                "{body} must be refused as CDATA"
-            );
+        for section in ["<![CDATA[x]]>", "<![cdata[x]]>", "<![CdAtA[x]]>"] {
+            for body in [section.to_owned(), format!("<svg>{section}</svg>")] {
+                assert!(
+                    matches!(
+                        Layout::scan(&doc(&body)),
+                        Err(ArtifactError::Forbidden("a CDATA section", _))
+                    ),
+                    "{body} must be refused as CDATA"
+                );
+            }
+        }
+    }
+
+    /// In script text neither a processing instruction nor a CDATA section is
+    /// markup, so a bundle carrying one in a string is read like any other.
+    #[test]
+    fn markup_this_reader_refuses_is_ordinary_text_inside_a_script() {
+        for literal in ["<?xml version=\"1.0\"?>", "<![CDATA[x]]>", "<!doctype x>"] {
+            let code = format!("const d = '{literal}';");
+            let layout = Layout::scan(&module(&code))
+                .unwrap_or_else(|e| panic!("refused {literal}: {e}"));
+            assert_eq!(layout.executables.len(), 1);
         }
     }
 
     /// A `<![` the scan steps over rather than stopping on, and one that
     /// follows it -- the loop must keep looking after a near miss.
     #[test]
-    fn a_bracket_that_opens_no_cdata_does_not_stop_the_scan() {
-        assert!(refuse_hostile_bytes("<![notcdata[x").is_ok());
+    fn a_bracket_that_opens_no_cdata_is_refused_as_the_tag_it_is_not() {
         assert!(matches!(
-            refuse_hostile_bytes("<![nope[ then <![CDATA[x"),
+            Layout::scan(&doc("<![notcdata[x]]>")),
+            Err(ArtifactError::Malformed(_))
+        ));
+        assert!(matches!(
+            Layout::scan(&doc("<![CDATA[x]]>")),
             Err(ArtifactError::Forbidden("a CDATA section", _))
         ));
+    }
+
+    /// The subtree walk reads tags, not bytes: a name written inside a quoted
+    /// value is text, a nested foreign tag may close itself, and an element
+    /// whose name merely starts with `svg` is not one.
+    #[test]
+    fn a_subtree_ends_at_its_own_close_and_nowhere_else() {
+        assert!(
+            matches!(
+                Layout::scan(&doc(
+                    "<svg><a title=\"</svg>\"><script type=\"module\">x</script></a></svg>"
+                )),
+                Err(ArtifactError::Forbidden("a script inside foreign content", _))
+            ),
+            "a close inside a quoted value does not end the subtree"
+        );
+
+        for logo in [
+            "<svg><svg width=\"8\"/></svg>",
+            "<svg><svg-icon/></svg>",
+            "<svg><svg-icon></svg-icon></svg>",
+            "<svg><linearGradient id=\"g\"></linearGradient></svg>",
+        ] {
+            let html = doc(&format!(
+                "{logo}<script type=\"module\">let x = 1;</script>"
+            ));
+            let layout =
+                Layout::scan(&html).unwrap_or_else(|e| panic!("refused {logo}: {e}"));
+            assert_eq!(&html[layout.executables[0].clone()], "let x = 1;");
+        }
     }
 
     /// A localised artifact scans: neither a panic nor a refusal.

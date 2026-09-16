@@ -1,6 +1,11 @@
 //! Reading a Callback artifact well enough to serve it: the one data slot
 //! this bridge substitutes into, the mount point the artifact contract
-//! requires, and the modules the browser executes. The artifact arrives with
+//! requires, and the modules the browser executes.
+//!
+//! The artifact carries the semantic equivalent of the contract's example, so
+//! a script element is read by its attributes rather than their spelling. The
+//! elements are found by their bytes and not by the element that encloses
+//! them: a document burying them in an inert one is read as carrying them. The artifact arrives with
 //! the hashes of those modules in its own `script-src`; this bridge checks
 //! them against the code and carries them into the policy it composes. The
 //! data slot is not executable, so substituting into it leaves every hashed
@@ -11,8 +16,9 @@ use std::ops::Range;
 /// The marker the build leaves for deployment data, and the element that
 /// carries it. Both are fixed by the artifact contract.
 pub(crate) const MARKER: &str = "__LIBID_CALLBACK_CONFIG__";
-const SLOT_OPEN: &str = "<script id=\"libid-callback-config\" type=\"application/json\">";
-const MODULE_OPEN: &str = "<script type=\"module\">";
+const SLOT_ID: &str = "libid-callback-config";
+const SLOT_TYPE: &str = "application/json";
+const MODULE_TYPE: &str = "module";
 const SCRIPT_OPEN: &str = "<script";
 const SCRIPT_CLOSE: &str = "</script>";
 
@@ -58,6 +64,15 @@ pub(crate) struct Layout {
     pub(crate) modules: Vec<Range<usize>>,
 }
 
+/// What a script element is, by what its attributes say.
+enum Script {
+    /// The data slot: the deployment's data goes between its tags.
+    Slot,
+    /// A module: its text is what the browser executes, and what a hash
+    /// covers.
+    Module,
+}
+
 /// Read an artifact, or refuse it.
 ///
 /// Every script element is the data slot or a plain module, and the text of
@@ -70,25 +85,15 @@ pub(crate) fn read(html: &str) -> Result<Layout, ArtifactError> {
     let mut at = 0;
     while let Some(k) = html[at..].find(SCRIPT_OPEN) {
         let open = at + k;
-        let rest = &html[open..];
-        let text = if rest.starts_with(SLOT_OPEN) {
-            open + SLOT_OPEN.len()
-        } else if rest.starts_with(MODULE_OPEN) {
-            open + MODULE_OPEN.len()
-        } else {
-            return Err(ArtifactError::UnreadableScript(open));
-        };
-        let end = html[text..]
+        let (kind, tag_end) = script(html, open)?;
+        let end = html[tag_end..]
             .find(SCRIPT_CLOSE)
-            .map(|k| text + k)
+            .map(|k| tag_end + k)
             .ok_or(ArtifactError::UnreadableScript(open))?;
-        if rest.starts_with(SLOT_OPEN) {
-            if slot.is_some() {
-                return Err(ArtifactError::Slots(2));
-            }
-            slot = Some(text..end);
-        } else {
-            modules.push(text..end);
+        match kind {
+            Script::Slot if slot.is_some() => return Err(ArtifactError::Slots(2)),
+            Script::Slot => slot = Some(tag_end..end),
+            Script::Module => modules.push(tag_end..end),
         }
         at = end + SCRIPT_CLOSE.len();
     }
@@ -103,6 +108,105 @@ pub(crate) fn read(html: &str) -> Result<Layout, ArtifactError> {
         return Err(ArtifactError::MountPoint);
     }
     Ok(Layout { slot, modules })
+}
+
+/// What the script element opening at `open` is, and where its tag ends.
+///
+/// The attributes are read in whatever order and quoting the build wrote
+/// them. A script this bridge cannot hash or substitute into -- one carrying
+/// a `src`, or a type it does not read -- is refused.
+fn script(html: &str, open: usize) -> Result<(Script, usize), ArtifactError> {
+    let refuse = || ArtifactError::UnreadableScript(open);
+    let (attributes, tag_end) = attributes(html, open + SCRIPT_OPEN.len())?;
+    let value = |wanted: &str| {
+        attributes
+            .iter()
+            .find(|(name, _)| name == wanted)
+            .map(|(_, value)| value.as_str())
+    };
+    if value("src").is_some() {
+        return Err(refuse());
+    }
+    let kind = match value("type").ok_or_else(refuse)? {
+        t if t.eq_ignore_ascii_case(SLOT_TYPE) && value("id") == Some(SLOT_ID) => {
+            Script::Slot
+        }
+        t if t.eq_ignore_ascii_case(MODULE_TYPE) => Script::Module,
+        _ => return Err(refuse()),
+    };
+    Ok((kind, tag_end))
+}
+
+/// The attributes of a tag whose name ends at `from`, lowercased by name, and
+/// the byte after its `>`.
+fn attributes(
+    html: &str,
+    from: usize,
+) -> Result<(Vec<(String, String)>, usize), ArtifactError> {
+    let refuse = || ArtifactError::UnreadableScript(from);
+    let bytes = html.as_bytes();
+    let mut attributes = Vec::new();
+    let mut i = from;
+    loop {
+        while bytes.get(i).is_some_and(|b| b.is_ascii_whitespace()) {
+            i += 1;
+        }
+        match bytes.get(i) {
+            Some(b'>') => return Ok((attributes, i + 1)),
+            Some(_) => {}
+            None => return Err(refuse()),
+        }
+        let name_start = i;
+        while bytes
+            .get(i)
+            .is_some_and(|b| !b.is_ascii_whitespace() && !b"=>/".contains(b))
+        {
+            i += 1;
+        }
+        if i == name_start {
+            return Err(refuse());
+        }
+        let name = html[name_start..i].to_ascii_lowercase();
+        while bytes.get(i).is_some_and(|b| b.is_ascii_whitespace()) {
+            i += 1;
+        }
+        if bytes.get(i) != Some(&b'=') {
+            attributes.push((name, String::new()));
+            continue;
+        }
+        i += 1;
+        while bytes.get(i).is_some_and(|b| b.is_ascii_whitespace()) {
+            i += 1;
+        }
+        let value = match bytes.get(i) {
+            Some(quote @ (b'"' | b'\'')) => {
+                let quote = *quote;
+                i += 1;
+                let start = i;
+                while bytes.get(i).is_some_and(|b| *b != quote) {
+                    i += 1;
+                }
+                if bytes.get(i).is_none() {
+                    return Err(refuse());
+                }
+                let value = &html[start..i];
+                i += 1;
+                value
+            }
+            Some(_) => {
+                let start = i;
+                while bytes
+                    .get(i)
+                    .is_some_and(|b| !b.is_ascii_whitespace() && *b != b'>')
+                {
+                    i += 1;
+                }
+                &html[start..i]
+            }
+            None => return Err(refuse()),
+        };
+        attributes.push((name, value.to_owned()));
+    }
 }
 
 /// The script hashes an artifact's own policy names.
@@ -199,6 +303,50 @@ mod tests {
         let layout = read(&html).expect("two modules");
         let text: Vec<&str> = layout.modules.iter().map(|r| &html[r.clone()]).collect();
         assert_eq!(text, ["first;", "second;"]);
+    }
+
+    /// The artifact carries the semantic equivalent of the contract's
+    /// example, so the order, the quoting and the case of a script element's
+    /// attributes are the build's to choose.
+    #[test]
+    fn a_script_element_is_read_by_its_attributes() {
+        for spelling in [
+            "<script type=\"application/json\" id=\"libid-callback-config\">",
+            "<script id='libid-callback-config' type='application/json'>",
+            "<script  id=libid-callback-config  TYPE=application/json >",
+            "<script\nid=\"libid-callback-config\"\ntype=\"APPLICATION/JSON\">",
+        ] {
+            let html = format!(
+                "<!doctype html><body><main id=\"libid-root\"></main>\
+                 {spelling}{MARKER}</script>\
+                 <script type='module'>let x = 1;</script></body>"
+            );
+            let layout =
+                read(&html).unwrap_or_else(|e| panic!("refused {spelling}: {e}"));
+            assert_eq!(html[layout.slot].trim(), MARKER);
+            assert_eq!(&html[layout.modules[0].clone()], "let x = 1;");
+        }
+    }
+
+    /// A script this bridge can neither hash nor substitute into is refused.
+    #[test]
+    fn a_script_this_bridge_does_not_read_is_refused() {
+        for script in [
+            "<script src=\"/app.js\" type=\"module\"></script>",
+            "<script>let x = 1;</script>",
+            "<script type=\"text/javascript\">let x = 1;</script>",
+            "<script type=\"application/json\">{}</script>",
+            "<script id=\"other\" type=\"application/json\">{}</script>",
+            "<script type=\"module\"",
+        ] {
+            let html = format!(
+                "<!doctype html><body><main id=\"libid-root\"></main>\
+                 <script id=\"libid-callback-config\" type=\"application/json\">\
+                 {MARKER}</script>\
+                 <script type=\"module\">let x = 1;</script>{script}</body>"
+            );
+            assert!(read(&html).is_err(), "{script} must be refused");
+        }
     }
 
     /// The fixture the tests serve is one this bridge reads.

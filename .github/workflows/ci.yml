@@ -1,7 +1,7 @@
 name: CI
 
 # Two jobs: rust (fmt/clippy/test) and dco. Conventions and action SHA pins
-# copied from libid-contracts/libid-rs.
+# copied from libID-contracts/libID-rs.
 #
 # Every third-party action is pinned by commit SHA, with the tag in a
 # comment, so a moved tag cannot change what executes.

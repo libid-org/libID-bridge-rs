@@ -1,4 +1,4 @@
-# libid-server-rs
+# libID-server-rs
 
 The OAuth Bridge of a libID ceremony.
 

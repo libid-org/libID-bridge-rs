@@ -65,7 +65,7 @@ impl CallbackDocument {
         hashes: &[String],
         inputs: &DeploymentInputs<'_>,
     ) -> Result<CallbackDocument, ArtifactError> {
-        let layout = scan::scan(html)?;
+        let layout = scan::read(html)?;
         // The slot holds exactly the marker, and the marker occurs nowhere
         // else.
         if html[layout.slot.clone()].trim() != scan::MARKER

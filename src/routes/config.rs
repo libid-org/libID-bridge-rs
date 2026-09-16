@@ -97,7 +97,10 @@ pub(crate) async fn preflight(
     headers: HeaderMap,
 ) -> Response {
     let Some(Admission::Listed(origin)) = admission(&state, &headers) else {
-        return preflight_refusal();
+        return refuse(
+            StatusCode::FORBIDDEN,
+            "this configuration is readable only from an admitted origin",
+        );
     };
 
     let mut out = HeaderMap::new();
@@ -122,17 +125,6 @@ pub(crate) async fn preflight(
     }
 
     (StatusCode::NO_CONTENT, out).into_response()
-}
-
-/// A preflight this service does not answer: no allow-origin, so the browser
-/// blocks the request it was for. The body is one a browser never reads.
-fn preflight_refusal() -> Response {
-    (
-        StatusCode::FORBIDDEN,
-        [(header::VARY, PREFLIGHT_VARY_ON)],
-        ON_EVERY_RESPONSE,
-    )
-        .into_response()
 }
 
 /// `GET /api/v1/ceremony/config`.
@@ -174,7 +166,8 @@ pub(crate) async fn config(
 }
 
 /// A refusal carries no configuration and no allow-origin header, so a caller
-/// that is not admitted cannot read the record out of an error.
+/// that is not admitted cannot read the record out of an error, and a
+/// preflight it answers grants nothing. A browser reads neither body.
 fn refuse(status: StatusCode, message: &str) -> Response {
     (
         status,

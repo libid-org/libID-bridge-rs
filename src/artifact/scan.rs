@@ -19,7 +19,8 @@ const SCRIPT_CLOSE: &str = "</script>";
 /// The element the Callback renders into, which the artifact carries once.
 const MOUNT_POINT: &str = "<main id=\"libid-root\"></main>";
 
-/// The largest artifact this bridge will read.
+/// The largest artifact this bridge will read. The retrieval stops at it,
+/// which is the one place the bytes arrive.
 pub(crate) const MAX_ARTIFACT_BYTES: usize = 4 * 1024 * 1024;
 
 /// The most script hashes an artifact's policy may name.
@@ -29,8 +30,6 @@ const MAX_HASHES: usize = 8;
 /// repair.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum ArtifactError {
-    #[error("the artifact is {0} bytes, over the {MAX_ARTIFACT_BYTES}-byte bound")]
-    TooLarge(usize),
     #[error("the document carries {0} configuration slots, and must carry one")]
     Slots(usize),
     #[error("a script at byte {0} is neither the configuration slot nor a plain module")]
@@ -59,16 +58,7 @@ pub(crate) struct Layout {
     pub(crate) modules: Vec<Range<usize>>,
 }
 
-/// Read a retrieved artifact, or refuse it.
-pub(crate) fn scan(html: &str) -> Result<Layout, ArtifactError> {
-    if html.len() > MAX_ARTIFACT_BYTES {
-        return Err(ArtifactError::TooLarge(html.len()));
-    }
-    read(html)
-}
-
-/// The same without the size bound, which the retrieved bytes carry: the
-/// composed document is longer by what the slot holds.
+/// Read an artifact, or refuse it.
 ///
 /// Every script element is the data slot or a plain module, and the text of
 /// each is taken between its tags. A document writing `<script` anywhere a
@@ -215,7 +205,7 @@ mod tests {
     #[test]
     fn the_fixture_is_readable() {
         let html = crate::fixtures::ARTIFACT;
-        let layout = scan(html).expect("the fixture artifact");
+        let layout = read(html).expect("the fixture artifact");
         assert_eq!(html[layout.slot].trim(), MARKER);
         assert_eq!(layout.modules.len(), 1);
     }
@@ -254,24 +244,6 @@ mod tests {
         ] {
             assert!(read(&html).is_err(), "{why} must be refused");
         }
-    }
-
-    /// The bound is the retrieved artifact's; the composed document is longer
-    /// by what the slot holds and is read without it.
-    #[test]
-    fn the_composed_document_is_read_without_the_bound() {
-        let filler = "x".repeat(MAX_ARTIFACT_BYTES - module("").len() - 64);
-        let html = module(&format!("let x = '{filler}';"));
-        assert!(html.len() <= MAX_ARTIFACT_BYTES);
-        assert!(scan(&html).is_ok());
-
-        let composed = format!("{html}{}", "y".repeat(128));
-        assert!(composed.len() > MAX_ARTIFACT_BYTES);
-        assert!(
-            read(&composed).is_ok(),
-            "the composed document is not bounded a second time"
-        );
-        assert!(matches!(scan(&composed), Err(ArtifactError::TooLarge(_))));
     }
 
     /// The hashes are read out of the artifact's own `script-src`, whatever

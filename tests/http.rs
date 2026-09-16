@@ -441,49 +441,49 @@ async fn config_refuses_a_query_but_reads_the_origin_first() {
     );
 }
 
-/// `/api/v1/ceremony/github-token` is not served: a `POST` and a preflight
-/// there are answered `404` with no CORS header, GitHub enabled or not.
-/// Nothing is exchanged and no notary is dialled.
+/// A path this bridge does not serve is a `404` with no CORS header, whatever
+/// the request carries: no preflight is answered there, no origin is granted
+/// a relationship, and `/api/v1/ceremony/github-token` performs no exchange
+/// and dials no notary, GitHub enabled or not.
 #[tokio::test]
-async fn the_github_token_path_is_not_served() {
-    const PATH: &str = "/api/v1/ceremony/github-token";
-    const BODY: &str = r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"iMSTNh6gQkRnBGlY1c0MUOsD7MCO4G8C7ph1_gIZs5I","notaryAddress":"https://127.0.0.1:7048"}"#;
+async fn a_path_this_bridge_does_not_serve_answers_nothing() {
+    const TOKEN_BODY: &str = r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"iMSTNh6gQkRnBGlY1c0MUOsD7MCO4G8C7ph1_gIZs5I","notaryAddress":"https://127.0.0.1:7048"}"#;
     let x_only = deployment(&[
         "--platforms",
         r#"[{"id":"x","client_id":"abc","versions":[1]}]"#,
     ])
     .await;
 
-    for state in [test_state().await, x_only] {
-        let resp = app(state.clone())
-            .oneshot(
-                Request::post(PATH)
+    for path in ["/api/v1/ceremony/github-token", "/does-not-exist"] {
+        for state in [test_state().await, x_only.clone()] {
+            let sent = [
+                Request::post(path)
                     .header("origin", ccdp_origin())
                     .header("content-type", "application/json")
-                    .body(Body::from(BODY))
+                    .body(Body::from(TOKEN_BODY))
                     .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-        assert!(resp.headers().get("access-control-allow-origin").is_none());
-
-        let resp = app(state)
-            .oneshot(
                 Request::builder()
                     .method("OPTIONS")
-                    .uri(PATH)
+                    .uri(path)
                     .header("origin", ccdp_origin())
                     .header("access-control-request-method", "POST")
                     .header("access-control-request-headers", "content-type")
                     .body(Body::empty())
                     .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-        assert!(resp.headers().get("access-control-allow-origin").is_none());
-        assert!(resp.headers().get("access-control-allow-methods").is_none());
+                Request::get(path)
+                    .header("origin", ccdp_origin())
+                    .body(Body::empty())
+                    .unwrap(),
+            ];
+            for request in sent {
+                let method = request.method().clone();
+                let resp = app(state.clone()).oneshot(request).await.unwrap();
+                assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{method} {path}");
+                let h = resp.headers();
+                assert!(h.get("access-control-allow-origin").is_none());
+                assert!(h.get("access-control-allow-methods").is_none());
+            }
+        }
     }
 }
 
@@ -637,43 +637,4 @@ async fn the_bridge_serves_no_ccdp_document_and_no_alias() {
         let resp = get_callback(path, &[]).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{path}");
     }
-}
-
-/// An unserved path answers no preflight and carries no allow-origin header.
-#[tokio::test]
-async fn no_cors_reaches_a_path_this_bridge_does_not_serve() {
-    let resp = app(test_state().await)
-        .oneshot(
-            Request::builder()
-                .method("OPTIONS")
-                .uri("/does-not-exist")
-                .header("origin", ccdp_origin())
-                .header("access-control-request-method", "POST")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::NOT_FOUND,
-        "a preflight for a path that does not exist is a 404, not an advertisement"
-    );
-    assert!(resp.headers().get("access-control-allow-methods").is_none());
-    assert!(resp.headers().get("access-control-allow-origin").is_none());
-
-    let resp = app(test_state().await)
-        .oneshot(
-            Request::get("/does-not-exist")
-                .header("origin", ccdp_origin())
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    assert!(
-        resp.headers().get("access-control-allow-origin").is_none(),
-        "a 404 grants the CCDP origin no CORS relationship"
-    );
 }

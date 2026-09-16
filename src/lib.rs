@@ -55,7 +55,7 @@ pub async fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
 
     let upstream = artifact::upstream::Upstream::new(&ccdp_origin);
     let published = artifact::Published::retrieved(&upstream, &allowed_origins).await?;
-    let (callback_tx, callback) = tokio::sync::watch::channel(Arc::new(published));
+    let (callback, _) = tokio::sync::watch::channel(Arc::new(published));
 
     Ok(Arc::new(AppState {
         ceremony_config: deployment::CeremonyConfig {
@@ -64,7 +64,6 @@ pub async fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
         }
         .serialized(),
         callback,
-        callback_tx,
         upstream,
         allowed_origins,
     }))

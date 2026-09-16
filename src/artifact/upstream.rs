@@ -419,7 +419,7 @@ async fn revalidate(
         return Ok(false);
     }
     // The document and its policy replace the old pair together.
-    state.callback_tx.send_replace(Arc::new(published));
+    state.callback.send_replace(Arc::new(published));
     Ok(true)
 }
 
@@ -626,7 +626,7 @@ mod tests {
         distribution.answers_next(Reply::artifact());
         distribution.now_serves(Reply::replacement());
 
-        let mut published = state.callback.clone();
+        let mut published = state.callback.subscribe();
         let loop_task = tokio::spawn(refresh(state.clone(), BRISK));
         // Resolves on the first send, so nothing before it published.
         published.changed().await.expect("the loop publishes");

@@ -138,10 +138,14 @@ impl FetchError {
 enum Fetched {
     /// `304`: the document in hand is still the current one.
     Unchanged,
-    /// `200`: a body, and the validator to revalidate it with next time.
+    /// `200`: a body, the script hashes its own policy named, and the
+    /// validator to revalidate it with next time.
     Fresh {
         /// The artifact, decoded.
         html: String,
+        /// The hash sources of its `script-src`, carried into the policy this
+        /// bridge composes.
+        hashes: Vec<String>,
         /// Its `ETag`, when it sent one; without one every refresh is an
         /// unconditional GET.
         etag: Option<String>,
@@ -207,9 +211,10 @@ impl Upstream {
     ) -> Result<Option<Published>, FetchError> {
         match self.fetch(etag).await? {
             Fetched::Unchanged => Ok(None),
-            Fetched::Fresh { html, etag } => {
+            Fetched::Fresh { html, hashes, etag } => {
                 let document = CallbackDocument::compose(
                     &html,
+                    &hashes,
                     &DeploymentInputs {
                         ccdp_origin: &self.origin,
                         allowed_origins,
@@ -336,6 +341,11 @@ impl Fetched {
             return Err(FetchError::Encoded(encoding.to_owned()));
         }
         let etag = header(header::ETAG).map(str::to_owned);
+        // The artifact is served with the hashes of the code it carries; this
+        // bridge carries them into its own policy and computes none.
+        let hashes = scan::script_hashes(
+            header(header::CONTENT_SECURITY_POLICY).unwrap_or_default(),
+        )?;
 
         // Bounded while it is read, whatever `content-length` declares.
         let body = Limited::new(body, scan::MAX_ARTIFACT_BYTES)
@@ -349,7 +359,7 @@ impl Fetched {
             )?;
         let html = String::from_utf8(Vec::from(body.to_bytes()))
             .map_err(|_| FetchError::NotUtf8)?;
-        Ok(Fetched::Fresh { html, etag })
+        Ok(Fetched::Fresh { html, hashes, etag })
     }
 }
 
@@ -675,6 +685,44 @@ mod tests {
             .await
             .expect("a refresh that reaches the Distribution"));
         assert!(!Arc::ptr_eq(&before, &state.callback.borrow()));
+    }
+
+    /// An artifact served without a hash-only `script-src` is refused: the
+    /// hashes of the code it carries are what the composed policy names, and
+    /// this bridge computes none of its own.
+    #[tokio::test]
+    async fn an_artifact_whose_policy_is_not_hash_only_is_refused() {
+        let distribution = Distribution::healthy().await;
+        let state = bridge(&distribution).await;
+
+        for policy in [
+            None,
+            Some("default-src 'none'".to_owned()),
+            Some("script-src 'unsafe-inline'".to_owned()),
+            Some("script-src https://cdn.example".to_owned()),
+        ] {
+            distribution.now_serves(Reply {
+                etag: Some("W/\"the-replacement\""),
+                policy,
+                ..Reply::artifact()
+            });
+            let refusal = revalidate(&state, &upstream(&distribution))
+                .await
+                .expect_err("an artifact this bridge cannot write a policy for");
+            assert!(
+                matches!(
+                    refusal,
+                    FetchError::Artifact(scan::ArtifactError::UpstreamPolicy(_))
+                ),
+                "{refusal}"
+            );
+        }
+
+        // What the deployment published at startup is still what it serves.
+        assert_eq!(
+            state.callback.borrow().etag.as_deref(),
+            Some("W/\"the-artifact\"")
+        );
     }
 
     /// A `3xx` is refused, not followed.

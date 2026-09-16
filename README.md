@@ -116,9 +116,13 @@ serve, and publishes the pair. It parses no OAuth `state`, selects no CCDP
 version, and holds no version list: a compatible Callback change needs no
 bridge rebuild.
 
-The policy's `script-src` carries **only hashes, computed here over the served
-bytes**, never copied from an upstream header. The artifact bundles its
-dependencies, so no external script source appears.
+The policy's `script-src` carries **only the hashes the artifact was served
+with**. The Distribution publishes the hashes of the code it ships, and this
+bridge checks that its `script-src` names hashes and nothing else before
+carrying them into the policy it writes: no source this bridge did not write
+reaches a browser. An artifact whose policy names anything else is refused.
+Substitution cannot invalidate a hash, because the slot is a
+non-executable data block and the only thing substitution touches.
 
 The document is composed once at startup and never varies: no request field —
 `Origin`, `Referer`, query, fragment — changes a byte of it or its policy. The

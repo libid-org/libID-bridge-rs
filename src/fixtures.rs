@@ -51,6 +51,32 @@ pub fn runtime() -> &'static tokio::runtime::Runtime {
     &RUNTIME
 }
 
+/// The script hashes the fixture artifact is served with: what a Distribution
+/// computes over the code it ships, and what the bridge carries into the
+/// policy it composes.
+pub fn artifact_hashes() -> Vec<String> {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+
+    const OPEN: &str = "<script type=\"module\">";
+    let start = ARTIFACT.find(OPEN).expect("the fixture carries one module") + OPEN.len();
+    let end = start + ARTIFACT[start..].find("</script>").expect("it closes");
+    let digest = sha2::Sha256::digest(&ARTIFACT.as_bytes()[start..end]);
+    vec![format!(
+        "'sha256-{}'",
+        base64::engine::general_purpose::STANDARD.encode(digest)
+    )]
+}
+
+/// The `Content-Security-Policy` a Distribution serves the fixture artifact
+/// under: hash-only, as the artifact contract requires.
+pub fn artifact_policy() -> String {
+    format!(
+        "default-src 'none'; script-src {}; style-src 'unsafe-inline'",
+        artifact_hashes().join(" ")
+    )
+}
+
 /// What the fixture Distribution answers with next.
 #[derive(Clone)]
 pub struct Reply {
@@ -67,6 +93,9 @@ pub struct Reply {
     pub encoding: Option<&'static str>,
     /// Send the body with no `content-length`, as a chunked answer does.
     pub chunked: bool,
+    /// The `Content-Security-Policy` it is served under, which names the
+    /// hashes of the code it carries. `None` sends none.
+    pub policy: Option<String>,
 }
 
 impl Reply {
@@ -79,6 +108,7 @@ impl Reply {
             body: ARTIFACT.to_owned(),
             encoding: None,
             chunked: false,
+            policy: Some(artifact_policy()),
         }
     }
 
@@ -184,6 +214,9 @@ async fn answer(
     }
     if let Some(encoding) = reply.encoding {
         response = response.header(header::CONTENT_ENCODING, encoding);
+    }
+    if let Some(policy) = &reply.policy {
+        response = response.header(header::CONTENT_SECURITY_POLICY, policy);
     }
     let body = if reply.chunked {
         axum::body::Body::from_stream(futures_util::stream::iter([Ok::<_, String>(

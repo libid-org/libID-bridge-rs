@@ -1,25 +1,15 @@
 //! The callback document this bridge serves: the CCDP Distribution's artifact
 //! with one unversioned list substituted into its one non-executable slot,
-//! and a Content-Security-Policy computed here over the bytes served.
+//! under a Content-Security-Policy composed here from this deployment's own
+//! sources and the script hashes the artifact arrived with.
 
 pub(crate) mod scan;
 pub(crate) mod upstream;
 
 use axum::http::HeaderValue;
-use base64::{
-    engine::general_purpose::STANDARD,
-    Engine,
-};
 use bytes::Bytes;
-use sha2::{
-    Digest,
-    Sha256,
-};
 
-use scan::{
-    ArtifactError,
-    Layout,
-};
+use scan::ArtifactError;
 use upstream::Upstream;
 
 use crate::{
@@ -45,22 +35,28 @@ pub(crate) struct DeploymentInputs<'a> {
 pub(crate) struct CallbackDocument {
     /// The document, composed once.
     pub(crate) body: Bytes,
-    /// Its `Content-Security-Policy`, naming a hash for every script the body
-    /// carries.
+    /// Its `Content-Security-Policy`, naming the script hashes the artifact
+    /// arrived with.
     pub(crate) csp: HeaderValue,
 }
 
 impl CallbackDocument {
     /// Configure one artifact and compose the response it is served as: the
-    /// one constructor, where the policy is computed over the composed bytes.
+    /// one constructor, where the deployment's data goes in and the policy is
+    /// written.
+    ///
+    /// `hashes` are the script sources the artifact's own policy named. The
+    /// slot is not executable and is the only thing substitution touches, so
+    /// every byte those hashes cover is served unchanged.
     pub(crate) fn compose(
         html: &str,
+        hashes: &[String],
         inputs: &DeploymentInputs<'_>,
     ) -> Result<CallbackDocument, ArtifactError> {
-        let layout = Layout::scan(html)?;
+        let slot = scan::slot(html)?;
         // The slot holds exactly the marker, and the marker occurs nowhere
         // else.
-        if html[layout.slot.clone()].trim() != scan::MARKER
+        if html[slot.clone()].trim() != scan::MARKER
             || html.matches(scan::MARKER).nth(1).is_some()
         {
             return Err(ArtifactError::Marker);
@@ -69,28 +65,13 @@ impl CallbackDocument {
         // One unversioned list: `[allowedOrigins, ccdpOrigin]`.
         let record = serde_json::json!([inputs.allowed_origins, inputs.ccdp_origin]);
         let mut body = String::with_capacity(html.len());
-        body.push_str(&html[..layout.slot.start]);
+        body.push_str(&html[..slot.start]);
         body.push_str(&json(&record));
-        body.push_str(&html[layout.slot.end..]);
+        body.push_str(&html[slot.end..]);
+        // The composed document carries the same one slot and mount point.
+        scan::read(&body)?;
 
-        // Substitution changes no executable byte: the scripts hash the same
-        // before and after.
-        let after = Layout::read(&body)?;
-        let before: Vec<String> = layout
-            .executables
-            .iter()
-            .map(|r| hash_source(&html[r.clone()]))
-            .collect();
-        let hashes: Vec<String> = after
-            .executables
-            .iter()
-            .map(|r| hash_source(&body[r.clone()]))
-            .collect();
-        if before != hashes {
-            return Err(ArtifactError::SubstitutionMovedExecutableBytes);
-        }
-
-        let csp = policy(&hashes, inputs.ccdp_origin.as_str());
+        let csp = policy(hashes, inputs.ccdp_origin.as_str());
         let csp = HeaderValue::from_str(&csp)
             .map_err(|e| ArtifactError::Policy(format!("{csp:?}: {e}")))?;
         Ok(CallbackDocument {
@@ -149,8 +130,8 @@ impl Published {
     }
 }
 
-/// The response policy, from the hashes of the scripts this document carries
-/// and the one origin the deployment selects.
+/// The response policy: this deployment's own sources, and the script hashes
+/// the artifact arrived with.
 fn policy(hashes: &[String], ccdp_origin: &str) -> String {
     [
         "default-src 'none'".to_owned(),
@@ -167,14 +148,6 @@ fn policy(hashes: &[String], ccdp_origin: &str) -> String {
         "connect-src 'none'".to_owned(),
     ]
     .join("; ")
-}
-
-/// The CSP source for an inline script: the base64 SHA-256 of its exact text.
-fn hash_source(script: &str) -> String {
-    format!(
-        "'sha256-{}'",
-        STANDARD.encode(Sha256::digest(script.as_bytes()))
-    )
 }
 
 /// A JSON island, escaped so it cannot end the script element that carries
@@ -219,9 +192,15 @@ mod tests {
         ]
     }
 
+    /// The hashes a Distribution serves the fixture with.
+    fn hashes() -> Vec<String> {
+        crate::fixtures::artifact_hashes()
+    }
+
     fn composed(html: &str, origins: &[Origin]) -> CallbackDocument {
         CallbackDocument::compose(
             html,
+            &hashes(),
             &DeploymentInputs {
                 ccdp_origin: &origin("https://ccdp.example"),
                 allowed_origins: origins,
@@ -241,20 +220,20 @@ mod tests {
         assert!(text(&doc).contains("https://app.example"));
     }
 
-    /// The policy names the hash of the script the composed body carries.
+    /// The policy names the hashes the artifact arrived with, and no other
+    /// script source.
     #[test]
-    fn the_policy_names_the_hash_of_the_script_the_body_carries() {
+    fn the_policy_names_the_hashes_the_artifact_declared() {
         let doc = composed(FIXTURE, &origins());
-        let html = text(&doc);
         let csp = doc.csp.to_str().unwrap();
-
-        let open = "<script type=\"module\">";
-        assert_eq!(html.matches(open).count(), 1);
-        let start = html.find(open).unwrap() + open.len();
-        let end = start + html[start..].find("</script>").unwrap();
-        assert!(
-            csp.contains(&hash_source(&html[start..end])),
-            "the policy must name the hash of the served script"
+        let script_src = csp
+            .split("; ")
+            .find(|d| d.starts_with("script-src "))
+            .expect("a script-src");
+        assert_eq!(
+            script_src,
+            format!("script-src {}", hashes().join(" ")),
+            "the policy carries the artifact's hashes and nothing else"
         );
     }
 
@@ -328,6 +307,7 @@ mod tests {
         assert!(matches!(
             CallbackDocument::compose(
                 &filled,
+                &hashes(),
                 &DeploymentInputs {
                     ccdp_origin: &origin("https://ccdp.example"),
                     allowed_origins: &origins(),
@@ -343,6 +323,7 @@ mod tests {
         assert!(matches!(
             CallbackDocument::compose(
                 &twice,
+                &hashes(),
                 &DeploymentInputs {
                     ccdp_origin: &origin("https://ccdp.example"),
                     allowed_origins: &origins(),

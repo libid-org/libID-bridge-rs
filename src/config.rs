@@ -38,8 +38,16 @@ pub struct Config {
     pub port: u16,
 
     /// Comma-separated application origins admitted to read the public
-    /// ceremony configuration. Nonempty, each in canonical form.
-    #[arg(long, env = "ALLOWED_APP_ORIGINS", value_delimiter = ',')]
+    /// ceremony configuration. Nonempty, each in canonical form. The
+    /// whitespace around a comma belongs to the separator rather than to a
+    /// member, and is dropped here; a member of the configuration file is
+    /// read as written.
+    #[arg(
+        long,
+        env = "ALLOWED_APP_ORIGINS",
+        value_delimiter = ',',
+        value_parser = separated
+    )]
     pub allowed_app_origins: Vec<String>,
 
     /// The CCDP Distribution this bridge selects: the canonical origin serving
@@ -80,6 +88,12 @@ pub struct FileConfig {
     /// client_credential = "..."
     /// ```
     pub platforms: Option<Vec<PlatformProfile>>,
+}
+
+/// One member of a comma-separated value, without the whitespace that
+/// surrounds the separator.
+fn separated(value: &str) -> std::result::Result<String, std::convert::Infallible> {
+    Ok(value.trim().to_owned())
 }
 
 /// Whether clap supplied `id` from its default rather than from the command

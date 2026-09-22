@@ -237,19 +237,19 @@ fn ccdp_origin(spelling: &str) -> Result<Origin> {
 }
 
 /// The application origins admitted to read the configuration, each as
-/// written: one that is not already canonical is refused, not folded. The
-/// surrounding whitespace of a comma-separated spelling is not part of a
-/// member and is dropped before the member is read.
+/// written: one that is not already canonical is refused rather than folded,
+/// and a blank one is a member the operator did not mean to write.
 fn allowed_app_origins(list: &[String]) -> Result<Vec<Origin>> {
     let mut out = Vec::new();
     // The index is the member's own, so a refusal names the entry the
-    // operator wrote even where a blank one precedes it.
+    // operator wrote.
     for (i, spelling) in list.iter().enumerate() {
-        let spelling = spelling.trim();
-        if spelling.is_empty() {
-            continue;
-        }
         let field = format!("ALLOWED_APP_ORIGINS[{i}]");
+        if spelling.is_empty() {
+            return Err(Error::Config {
+                detail: format!("{field} is blank"),
+            });
+        }
         let origin = Origin::listed(&field, spelling)?;
         // A duplicate is refused, not folded.
         if out.contains(&origin) {

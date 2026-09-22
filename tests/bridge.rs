@@ -72,12 +72,38 @@ mod root {
     async fn a_refused_application_origin_carries_its_own_index() {
         let err = Bridge::start(&common::config(&[
             "--allowed-app-origins",
-            ",https://app.example,https://APP.example",
+            "https://app.example,https://APP.example",
         ]))
         .err()
-        .expect("the third member is not canonical");
+        .expect("the second member is not canonical");
         let text = err.to_string();
-        assert!(text.contains("ALLOWED_APP_ORIGINS[2]"), "{text}");
+        assert!(text.contains("ALLOWED_APP_ORIGINS[1]"), "{text}");
+    }
+
+    /// A member the operator did not mean to write is refused rather than
+    /// skipped, and the whitespace around a comma belongs to the separator.
+    #[tokio::test]
+    async fn a_blank_member_is_refused_and_a_separator_is_not_one() {
+        let err = Bridge::start(&common::config(&[
+            "--allowed-app-origins",
+            ",https://app.example",
+        ]))
+        .err()
+        .expect("the first member is blank");
+        assert!(
+            err.to_string().contains("ALLOWED_APP_ORIGINS[0] is blank"),
+            "{err}"
+        );
+
+        // The same list written with the spacing a person would use.
+        let state = crate::common::state(&[
+            "--allowed-app-origins",
+            "https://app.example, https://wallet.example",
+        ])
+        .await;
+        let admitted: Vec<&str> =
+            state.allowed_origins.iter().map(|o| o.as_str()).collect();
+        assert!(admitted.contains(&"https://wallet.example"), "{admitted:?}");
     }
 
     /// Each of these is refused at startup.

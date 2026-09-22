@@ -43,10 +43,10 @@ mod deployment {
     fn a_well_formed_set_parses() {
         let p = checked(ONE).unwrap();
         assert_eq!(p.len(), 1);
-        assert_eq!(p[0].id(), PlatformId::Github);
-        assert_eq!(p[0].client_id(), "Iv1.0");
-        assert_eq!(p[0].versions(), [1]);
-        assert_eq!(p[0].client_credential(), Some("c0ffee"));
+        assert_eq!(p[0].id, PlatformId::Github);
+        assert_eq!(p[0].client_id, "Iv1.0");
+        assert_eq!(p[0].versions, [1]);
+        assert_eq!(p[0].client_credential.as_deref(), Some("c0ffee"));
     }
 
     /// The record carries a github entry's credential as
@@ -302,9 +302,9 @@ mod config {
         let platforms = libid_server_rs::deployment::platforms(cfg.platforms)
             .expect("the records the table describes");
         assert_eq!(platforms.len(), 1);
-        assert_eq!(platforms[0].client_id(), "Iv1.0123456789abcdef");
+        assert_eq!(platforms[0].client_id, "Iv1.0123456789abcdef");
         assert_eq!(
-            platforms[0].client_credential(),
+            platforms[0].client_credential.as_deref(),
             Some("c0ffee_from_the_file")
         );
     }
@@ -312,8 +312,10 @@ mod config {
     /// A `github` table without its credential is refused, with the missing
     /// key named.
     #[test]
-    fn a_github_table_without_its_credential_is_refused() {
-        let err = resolved(
+    fn a_credential_belongs_to_the_ceremonies_that_send_one() {
+        // The table parses either way: whether a platform carries one is a
+        // rule about the deployment, not a shape the file has to take.
+        let without = resolved(
             r#"
             [[platforms]]
             id = "github"
@@ -321,8 +323,24 @@ mod config {
             versions = [1]
             "#,
         )
-        .expect_err("no credential");
+        .expect("a table with no credential is still a table");
+        let err = libid_server_rs::deployment::platforms(without.platforms)
+            .expect_err("github's ceremony sends one");
         assert!(err.to_string().contains("client_credential"), "{err}");
+
+        let spurious = resolved(
+            r#"
+            [[platforms]]
+            id = "x"
+            client_id = "XXXXXXXXXXXXXXXXXXXXXXXXXX"
+            versions = [1]
+            client_credential = "c0ffee"
+            "#,
+        )
+        .expect("a table carrying one is still a table");
+        let err = libid_server_rs::deployment::platforms(spurious.platforms)
+            .expect_err("x's ceremony sends none");
+        assert!(err.to_string().contains("sends none"), "{err}");
     }
 
     /// An `x` table carries a client id and versions and no credential.
@@ -340,10 +358,10 @@ mod config {
         let platforms = libid_server_rs::deployment::platforms(cfg.platforms)
             .expect("the records the table describes");
         assert_eq!(platforms.len(), 1);
-        assert_eq!(platforms[0].id(), PlatformId::X);
-        assert_eq!(platforms[0].client_id(), "WHRlc3RjbGllbnQ6MTpjaQ");
-        assert_eq!(platforms[0].versions(), [1]);
-        assert!(platforms[0].client_credential().is_none());
+        assert_eq!(platforms[0].id, PlatformId::X);
+        assert_eq!(platforms[0].client_id, "WHRlc3RjbGllbnQ6MTpjaQ");
+        assert_eq!(platforms[0].versions, [1]);
+        assert!(platforms[0].client_credential.as_deref().is_none());
     }
 
     /// A flag beats the file.
@@ -409,9 +427,9 @@ mod config {
             .expect("the example's platform table");
         let github = platforms
             .iter()
-            .find(|p| p.id() == PlatformId::Github)
+            .find(|p| p.id == PlatformId::Github)
             .expect("the example enables github");
-        assert!(github.client_credential().is_some());
+        assert!(github.client_credential.as_deref().is_some());
     }
 
     /// A run that names no file is told that, not that the platforms the

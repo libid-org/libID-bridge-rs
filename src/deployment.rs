@@ -71,7 +71,8 @@ impl Deployment {
 
 /// The platforms a ceremony can run against. A name outside this catalog is
 /// refused while parsing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum PlatformId {
     /// Keyed `google`.
     Google,
@@ -82,6 +83,13 @@ pub enum PlatformId {
 }
 
 impl PlatformId {
+    /// Whether this platform's ceremony sends a client credential in its
+    /// token request. GitHub's does, and requires one whether or not the
+    /// client is public; no other does.
+    pub fn sends_a_credential(self) -> bool {
+        matches!(self, PlatformId::Github)
+    }
+
     /// The wire spelling: the key in the public configuration.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -92,81 +100,33 @@ impl PlatformId {
     }
 }
 
-/// One enabled platform, with the fields its ceremony takes. In the
-/// configuration file, one `[[platforms]]` table keyed by `id`.
+/// One enabled platform, as one `[[platforms]]` table.
+///
+/// Every platform carries the same three things. Whether it also carries a
+/// credential is not a different shape, it is a rule, and [`platforms`]
+/// applies it: GitHub's ceremony sends one as `client_secret` and no other
+/// ceremony sends one at all.
 #[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "id", rename_all = "lowercase", deny_unknown_fields)]
-pub enum PlatformProfile {
-    /// A public client.
-    Google {
-        /// The public OAuth client identifier.
-        client_id: String,
-        /// Platform ceremony versions, nonempty and duplicate-free.
-        versions: Vec<u16>,
-    },
-    /// A public client.
-    X {
-        /// The public OAuth client identifier.
-        client_id: String,
-        /// Platform ceremony versions, nonempty and duplicate-free.
-        versions: Vec<u16>,
-    },
-    /// A confidential client whose credential is public: the browser's
-    /// token request sends it as `client_secret`.
-    Github {
-        /// The public OAuth client identifier.
-        client_id: String,
-        /// Platform ceremony versions, nonempty and duplicate-free.
-        versions: Vec<u16>,
-        /// The OAuth App's client secret, published as
-        /// `clientCredential`: public application configuration,
-        /// nonempty printable ASCII without whitespace.
-        client_credential: String,
-    },
-}
-
-impl PlatformProfile {
+#[serde(deny_unknown_fields)]
+pub struct PlatformProfile {
     /// Which platform.
-    pub fn id(&self) -> PlatformId {
-        match self {
-            Self::Google { .. } => PlatformId::Google,
-            Self::X { .. } => PlatformId::X,
-            Self::Github { .. } => PlatformId::Github,
-        }
-    }
-
+    pub id: PlatformId,
     /// The public OAuth client identifier.
-    pub fn client_id(&self) -> &str {
-        match self {
-            Self::Google { client_id, .. }
-            | Self::X { client_id, .. }
-            | Self::Github { client_id, .. } => client_id,
-        }
-    }
-
-    /// The ceremony versions advertised. List order has no meaning.
-    pub fn versions(&self) -> &[u16] {
-        match self {
-            Self::Google { versions, .. }
-            | Self::X { versions, .. }
-            | Self::Github { versions, .. } => versions,
-        }
-    }
-
-    /// The public client credential the entry carries: GitHub's.
-    pub fn client_credential(&self) -> Option<&str> {
-        match self {
-            Self::Github {
-                client_credential, ..
-            } => Some(client_credential),
-            Self::Google { .. } | Self::X { .. } => None,
-        }
-    }
+    pub client_id: String,
+    /// Platform ceremony versions, nonempty and duplicate-free. List order
+    /// has no meaning.
+    pub versions: Vec<u16>,
+    /// The OAuth App's client secret, published as `clientCredential`:
+    /// public application configuration, nonempty printable ASCII without
+    /// whitespace.
+    #[serde(default)]
+    pub client_credential: Option<String>,
 }
 
 /// Check the enabled set: nonempty, each platform once, each with a client id,
-/// a nonempty, duplicate-free version list and, where its ceremony takes one,
-/// a client credential of nonempty printable ASCII without whitespace.
+/// a nonempty, duplicate-free version list, and a client credential on
+/// exactly the platforms whose ceremony sends one, of nonempty printable
+/// ASCII without whitespace.
 pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>> {
     let refuse = |detail: String| Error::Config {
         detail: format!("platforms: {detail}"),
@@ -180,44 +140,53 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>>
     }
 
     for p in &profiles {
-        let id = p.id().as_str();
-        if profiles
-            .iter()
-            .filter(|q| q.id() == p.id())
-            .nth(1)
-            .is_some()
-        {
+        let id = p.id.as_str();
+        if profiles.iter().filter(|q| q.id == p.id).nth(1).is_some() {
             return Err(refuse(format!("{id} appears more than once")));
         }
-        if p.client_id().is_empty() {
+        if p.client_id.is_empty() {
             return Err(refuse(format!("{id} carries no client_id")));
         }
         // A client id the platform could never issue is a typo the
         // deployment publishes and every ceremony then fails on.
-        if !printable_without_whitespace(p.client_id()) {
+        if !printable_without_whitespace(&p.client_id) {
             return Err(refuse(format!(
                 "{id}'s client_id is not printable ASCII without whitespace"
             )));
         }
-        if p.versions().is_empty() {
+        if p.versions.is_empty() {
             return Err(refuse(format!("{id} advertises no version")));
         }
-        for v in p.versions() {
-            if p.versions().iter().filter(|w| *w == v).nth(1).is_some() {
+        for v in &p.versions {
+            if p.versions.iter().filter(|w| w == &v).nth(1).is_some() {
                 return Err(refuse(format!(
                     "{id} advertises version {v} more than once"
                 )));
             }
         }
-        if let Some(credential) = p.client_credential() {
-            if credential.is_empty() {
-                return Err(refuse(format!("{id} carries an empty client_credential")));
-            }
-            if !printable_without_whitespace(credential) {
+        // A credential belongs to exactly the ceremonies that send one.
+        match (p.id.sends_a_credential(), p.client_credential.as_deref()) {
+            (false, Some(_)) => {
                 return Err(refuse(format!(
-                    "{id}'s client_credential is not printable ASCII \
+                    "{id} carries a client_credential, and its ceremony sends none"
+                )))
+            }
+            (true, None) => {
+                return Err(refuse(format!("{id} carries no client_credential")))
+            }
+            (_, None) => {}
+            (_, Some(credential)) => {
+                if credential.is_empty() {
+                    return Err(refuse(format!(
+                        "{id} carries an empty client_credential"
+                    )));
+                }
+                if !printable_without_whitespace(credential) {
+                    return Err(refuse(format!(
+                        "{id}'s client_credential is not printable ASCII \
                      without whitespace"
-                )));
+                    )));
+                }
             }
         }
     }
@@ -298,13 +267,13 @@ impl CeremonyConfig<'_> {
         let mut by_id = Map::new();
         for p in self.platforms {
             let mut entry = json!({
-                "clientId": p.client_id(),
-                "ceremonyVersions": p.versions(),
+                "clientId": p.client_id,
+                "ceremonyVersions": p.versions,
             });
-            if let Some(credential) = p.client_credential() {
+            if let Some(credential) = p.client_credential.as_deref() {
                 entry["clientCredential"] = Value::from(credential);
             }
-            by_id.insert(p.id().as_str().to_owned(), entry);
+            by_id.insert(p.id.as_str().to_owned(), entry);
         }
         json!({
             "ccdpOrigin": self.ccdp_origin,

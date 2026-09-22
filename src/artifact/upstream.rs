@@ -53,10 +53,13 @@ pub struct Schedule {
 }
 
 impl Schedule {
-    /// What a deployment runs on.
+    /// What a deployment runs on: five minutes between retrievals that
+    /// produced a document, and a second after one that did not, doubling to
+    /// the same five minutes. A Distribution that is briefly unreachable
+    /// costs a ceremony a second rather than half a minute.
     pub const DEPLOYED: Schedule = Schedule {
         interval: Duration::from_secs(300),
-        floor: Duration::from_secs(30),
+        floor: Duration::from_secs(1),
     };
 }
 

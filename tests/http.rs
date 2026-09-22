@@ -677,7 +677,7 @@ async fn a_deployment_without_its_distribution_serves_everything_else() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(resp.headers()[axum::http::header::RETRY_AFTER], "30");
+    assert_eq!(resp.headers()[axum::http::header::RETRY_AFTER], "5");
     let html = String::from_utf8(
         resp.into_body()
             .collect()

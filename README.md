@@ -146,7 +146,7 @@ derived from a callback request.
 without it, binds, and serves the configuration, the liveness probe and the
 metrics. Until a retrieval produces a document the callback path answers `503`
 with an inert page naming the last failure, and a failed retry backs off from
-thirty seconds to five minutes. Once a document is published it keeps being
+one second to five minutes, doubling. Once a document is published it keeps being
 served through any later failure. A development stack serves its own
 Distribution over HTTP on `localhost` or `127.0.0.1`, the one plaintext
 exception the origin rules make.

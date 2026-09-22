@@ -54,8 +54,10 @@ fn escaped(text: &str) -> String {
 /// The policy of the inert page: everything denied.
 const NO_DOCUMENT_POLICY: &str = "default-src 'none'; style-src 'unsafe-inline'";
 
-/// How long a caller is asked to wait before the ceremony is retried.
-const RETRY_AFTER: &str = "30";
+/// How long a caller is asked to wait before the ceremony is retried. The
+/// retrieval that would end this answer is already in its own backoff, which
+/// starts a second after a failure.
+const RETRY_AFTER: &str = "5";
 
 /// `GET {callback path}`.
 pub async fn callback(State(state): State<Arc<AppState>>) -> Response {

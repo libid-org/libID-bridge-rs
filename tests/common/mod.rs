@@ -25,10 +25,11 @@ use hyper::{
     StatusCode,
 };
 
-use crate::{
+use libid_server_rs::{
     artifact::upstream::ARTIFACT_PATH,
     config,
     state::AppState,
+    Bridge,
 };
 
 /// The artifact a live Distribution serves.
@@ -290,50 +291,48 @@ pub const CLIENT_ID: &str = "Iv1.0123456789abcdef";
 /// for GitHub.
 pub const CLIENT_CREDENTIAL: &str = "d3b07384d113edec49eaa6238ad5ff00c1f2e3a4";
 
-impl config::Config {
-    /// A configuration that starts, with `args` replacing any default it
-    /// names.
-    ///
-    /// Every flag that reads an environment variable is listed, so the
-    /// process environment reaches nothing. `--platforms` is this fixture's
-    /// own: the JSON records go to `Config::platforms`, which the binary
-    /// fills from the configuration file. The CCDP origin is the shared
-    /// Distribution's unless `args` names another.
-    pub fn fixture(args: &[&str]) -> config::Config {
-        let platforms = format!(
-            r#"[{{"id":"github","client_id":"{CLIENT_ID}","versions":[1],"client_credential":"{CLIENT_CREDENTIAL}"}}]"#
-        );
-        let mut flags: Vec<(&str, &str)> = vec![
-            ("--host", "127.0.0.1"),
-            ("--port", "8722"),
-            ("--allowed-app-origins", "https://app.example"),
-            ("--ccdp-origin", Distribution::shared().origin()),
-            ("--platforms", &platforms),
-        ];
-        for pair in args.chunks(2) {
-            let [flag, value] = pair else {
-                panic!("test flags come in pairs, got {pair:?}")
-            };
-            match flags.iter_mut().find(|(f, _)| f == flag) {
-                Some(slot) => slot.1 = value,
-                None => flags.push((flag, value)),
-            }
+/// A configuration that starts, with `args` replacing any default it
+/// names.
+///
+/// Every flag that reads an environment variable is listed, so the
+/// process environment reaches nothing. `--platforms` is this fixture's
+/// own: the JSON records go to `Config::platforms`, which the binary
+/// fills from the configuration file. The CCDP origin is the shared
+/// Distribution's unless `args` names another.
+pub fn config(args: &[&str]) -> config::Config {
+    let platforms = format!(
+        r#"[{{"id":"github","client_id":"{CLIENT_ID}","versions":[1],"client_credential":"{CLIENT_CREDENTIAL}"}}]"#
+    );
+    let mut flags: Vec<(&str, &str)> = vec![
+        ("--host", "127.0.0.1"),
+        ("--port", "8722"),
+        ("--allowed-app-origins", "https://app.example"),
+        ("--ccdp-origin", Distribution::shared().origin()),
+        ("--platforms", &platforms),
+    ];
+    for pair in args.chunks(2) {
+        let [flag, value] = pair else {
+            panic!("test flags come in pairs, got {pair:?}")
+        };
+        match flags.iter_mut().find(|(f, _)| f == flag) {
+            Some(slot) => slot.1 = value,
+            None => flags.push((flag, value)),
         }
-        let platforms = flags
-            .iter()
-            .position(|(f, _)| *f == "--platforms")
-            .map(|i| flags.remove(i).1)
-            .expect("the fixture lists --platforms");
-        let mut argv = vec!["libid-server-rs"];
-        for (flag, value) in &flags {
-            argv.push(flag);
-            argv.push(value);
-        }
-        let mut cfg = <config::Config as clap::Parser>::parse_from(argv);
-        cfg.platforms =
-            serde_json::from_str(platforms).expect("the fixture's platform records");
-        cfg
     }
+    let platforms = flags
+        .iter()
+        .position(|(f, _)| *f == "--platforms")
+        .map(|i| flags.remove(i).1)
+        .expect("the fixture lists --platforms");
+    let mut argv = vec!["libid-server-rs"];
+    for (flag, value) in &flags {
+        argv.push(flag);
+        argv.push(value);
+    }
+    let mut cfg = <config::Config as clap::Parser>::parse_from(argv);
+    cfg.platforms =
+        serde_json::from_str(platforms).expect("the fixture's platform records");
+    cfg
 }
 
 /// An origin nothing answers on: a Distribution this deployment cannot reach.
@@ -344,30 +343,28 @@ pub async fn unreachable_origin() -> String {
     origin
 }
 
-impl crate::Bridge {
-    /// A deployment started from [`config::Config::fixture`], the way the
-    /// binary starts one, with nothing retrieved yet.
-    pub fn fixture(args: &[&str]) -> crate::Bridge {
-        crate::Bridge::start(&config::Config::fixture(args))
-            .expect("a deployment the fixtures can serve")
-    }
-
-    /// One retrieval, as the refresher performs it: `Ok(true)` published a
-    /// document, and an error left whatever is published in place.
-    pub async fn retrieve_once(&self) -> Result<bool, String> {
-        self.refresher.revalidate().await.map_err(|e| e.to_string())
-    }
+/// A deployment started from [`config`], the way the binary starts one, with
+/// nothing retrieved yet.
+pub fn bridge(args: &[&str]) -> Bridge {
+    Bridge::start(&config(args)).expect("a deployment the fixtures can serve")
 }
 
-impl AppState {
-    /// The state of a deployment started from [`config::Config::fixture`],
-    /// with the artifact its Distribution answered with already published.
-    pub async fn fixture(args: &[&str]) -> Arc<AppState> {
-        let bridge = crate::Bridge::fixture(args);
-        bridge
-            .retrieve_once()
-            .await
-            .expect("the fixture Distribution answers the artifact");
-        bridge.state
-    }
+/// One retrieval, as the refresher performs it: `Ok(true)` published a
+/// document, and an error left whatever is published in place.
+pub async fn retrieve_once(bridge: &Bridge) -> Result<bool, String> {
+    bridge
+        .refresher
+        .revalidate()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The state of a deployment started from [`config`], with the artifact its
+/// Distribution answered with already published.
+pub async fn state(args: &[&str]) -> Arc<AppState> {
+    let bridge = bridge(args);
+    retrieve_once(&bridge)
+        .await
+        .expect("the fixture Distribution answers the artifact");
+    bridge.state
 }

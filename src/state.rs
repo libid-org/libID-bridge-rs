@@ -17,18 +17,18 @@ pub struct AppState {
     /// the refresher. `None` until the first retrieval produces one, which is
     /// the refresher's and not startup's. A test that waits for a replacement
     /// clones the receiver and awaits a change.
-    pub(crate) callback: watch::Receiver<Option<Arc<crate::artifact::Published>>>,
+    pub callback: watch::Receiver<Option<Arc<crate::artifact::Published>>>,
     /// The effective admission set `allowedAppOrigins ∪ {ccdpOrigin}`: the one
     /// rule the configuration route applies, and what the callback document
     /// is told.
-    pub(crate) allowed_origins: Arc<[crate::origin::Origin]>,
+    pub allowed_origins: Arc<[crate::origin::Origin]>,
     /// The public ceremony configuration, serialized once: the exact bytes
     /// every admitted caller receives.
-    pub(crate) ceremony_config: bytes::Bytes,
+    pub ceremony_config: bytes::Bytes,
     /// Why the last retrieval produced no document, cleared by one that does.
     /// It is what the callback route reports while it has nothing to serve,
     /// and names only this deployment's own Distribution URL.
-    pub(crate) failure: watch::Receiver<Option<String>>,
+    pub failure: watch::Receiver<Option<String>>,
     /// What this deployment counts.
-    pub(crate) metrics: Arc<crate::metrics::Metrics>,
+    pub metrics: Arc<crate::metrics::Metrics>,
 }

@@ -13,14 +13,6 @@ publish = false
 axum = "0.8"
 
 # ── everything else ─────────────────────────────────────────────────────
-# A fixture Distribution answering with a chunked body.
-futures-util = { version = "0.3", optional = true }
-
-# The fixture Distribution computes the hashes of the code it serves, the way
-# a Distribution's build does.
-base64 = { version = "0.22", optional = true }
-sha2 = { version = "0.10", optional = true }
-
 # The artifact retrieval: one pooled `client`/`http1` connection, over TLS
 # whose trust anchors are compiled in.
 bytes = "1"
@@ -56,13 +48,21 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 
-[features]
-# The test fixtures (`libid_server_rs::fixtures`), for the integration tests.
-fixtures = ["dep:base64", "dep:futures-util", "dep:sha2"]
-
 [dev-dependencies]
-libid-server-rs = { path = ".", features = ["fixtures"] }
 tower = { version = "0.5", features = ["util"] }
+# The fixture Distribution hashes the code it serves, the way a Distribution's
+# build does, and answers one body in chunks.
+base64 = "0.22"
+sha2 = "0.10"
+futures-util = "0.3"
+# The fixture builds a configuration the way the binary parses one.
+clap = { version = "4", features = ["derive", "env"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+axum = "0.8"
+hyper = { version = "1", features = ["client", "http1"] }
+bytes = "1"
+
 # A self-signed certificate for a fixture Distribution that speaks TLS.
 rcgen = "0.13"
 tokio-rustls = { version = "0.26.5", default-features = false, features = ["ring", "tls12", "logging"] }

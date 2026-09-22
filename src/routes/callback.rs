@@ -58,7 +58,7 @@ const NO_DOCUMENT_POLICY: &str = "default-src 'none'; style-src 'unsafe-inline'"
 const RETRY_AFTER: &str = "30";
 
 /// `GET {callback path}`.
-pub(crate) async fn callback(State(state): State<Arc<AppState>>) -> Response {
+pub async fn callback(State(state): State<Arc<AppState>>) -> Response {
     // The borrow guard is released before the response is built.
     let published = state.callback.borrow().clone();
     let Some(published) = published else {

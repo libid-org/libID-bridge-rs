@@ -7,8 +7,8 @@
 //! carried, and the policy admits those hashes and no other script source, so
 //! what the Distribution ships is what the Distribution is answerable for.
 
-pub(crate) mod policy;
-pub(crate) mod upstream;
+pub mod policy;
+pub mod upstream;
 
 use axum::http::HeaderValue;
 use bytes::Bytes;
@@ -17,27 +17,24 @@ use policy::ArtifactError;
 
 use crate::origin::Origin;
 
-#[cfg(test)]
-pub(crate) use crate::fixtures::ARTIFACT as FIXTURE;
-
 /// What the deployment contributes to the document and its policy.
-pub(crate) struct DeploymentInputs<'a> {
+pub struct DeploymentInputs<'a> {
     /// The CCDP Distribution this bridge selects: in the inserted list, and
     /// the one origin the policy admits a frame from.
-    pub(crate) ccdp_origin: &'a Origin,
+    pub ccdp_origin: &'a Origin,
     /// The effective admission set, which the Callback authenticates an
     /// application against. It contains the CCDP origin.
-    pub(crate) allowed_origins: &'a [Origin],
+    pub allowed_origins: &'a [Origin],
 }
 
 /// The finished document: the exact bytes, and the policy they are served
 /// under.
-pub(crate) struct CallbackDocument {
+pub struct CallbackDocument {
     /// The document, composed once.
-    pub(crate) body: Bytes,
+    pub body: Bytes,
     /// Its `Content-Security-Policy`, naming the script hashes the artifact
     /// arrived with.
-    pub(crate) csp: HeaderValue,
+    pub csp: HeaderValue,
 }
 
 impl CallbackDocument {
@@ -49,7 +46,7 @@ impl CallbackDocument {
     /// become the only script sources the composed policy admits. The marker
     /// occurs once and is replaced by escaped data, so no byte those hashes
     /// cover moves and nothing inserted can be read as markup.
-    pub(crate) fn compose(
+    pub fn compose(
         html: &str,
         hashes: &[String],
         inputs: &DeploymentInputs<'_>,
@@ -83,16 +80,16 @@ impl CallbackDocument {
 /// nothing, so the next revalidation cannot send `If-None-Match` for a document
 /// that was never served -- which would turn one bad artifact into a permanent
 /// `304` for a document nobody has.
-pub(crate) struct Published {
+pub struct Published {
     /// The document, and the policy it is served under.
-    pub(crate) document: CallbackDocument,
+    pub document: CallbackDocument,
     /// The `ETag` the document arrived with, sent back as `If-None-Match`.
-    pub(crate) etag: Option<String>,
+    pub etag: Option<String>,
 }
 
 /// The response policy: this deployment's own sources, and the script hashes
 /// the artifact arrived with.
-fn policy(hashes: &[String], ccdp_origin: &str) -> String {
+pub fn policy(hashes: &[String], ccdp_origin: &str) -> String {
     [
         "default-src 'none'".to_owned(),
         "object-src 'none'".to_owned(),
@@ -113,7 +110,7 @@ fn policy(hashes: &[String], ccdp_origin: &str) -> String {
 /// A JSON island, escaped so it cannot end the script element that carries
 /// it: `<`, `>`, `&`, the line separators and every non-ASCII character leave
 /// as `\uXXXX` escapes, so the inserted data is ASCII.
-fn json(value: &serde_json::Value) -> String {
+pub fn json(value: &serde_json::Value) -> String {
     use std::fmt::Write as _;
 
     let rendered = value.to_string();
@@ -133,109 +130,4 @@ fn json(value: &serde_json::Value) -> String {
         }
     }
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn origin(spelling: &str) -> Origin {
-        Origin::parse("T", spelling).unwrap()
-    }
-
-    fn origins() -> Vec<Origin> {
-        vec![
-            origin("https://app.example"),
-            origin("https://ccdp.example"),
-        ]
-    }
-
-    fn compose(html: &str) -> Result<CallbackDocument, ArtifactError> {
-        CallbackDocument::compose(
-            html,
-            &crate::fixtures::artifact_hashes(),
-            &DeploymentInputs {
-                ccdp_origin: &origin("https://ccdp.example"),
-                allowed_origins: &origins(),
-            },
-        )
-    }
-
-    fn text(doc: &CallbackDocument) -> String {
-        String::from_utf8(doc.body.to_vec()).unwrap()
-    }
-
-    /// The artifact a live Distribution serves composes, and what is served
-    /// carries the deployment's data where the marker was.
-    #[test]
-    fn the_artifact_of_a_live_distribution_composes() {
-        let served = text(&compose(FIXTURE).unwrap());
-        assert!(!served.contains(policy::MARKER));
-        assert!(served.contains(
-            r#"[["https://app.example","https://ccdp.example"],"https://ccdp.example"]"#
-        ));
-    }
-
-    /// Only the marker changes: every other byte of the artifact is served as
-    /// it arrived, so no byte a declared hash covers moves.
-    #[test]
-    fn substitution_touches_only_the_marker() {
-        let served = text(&compose(FIXTURE).unwrap());
-        let at = FIXTURE.find(policy::MARKER).unwrap();
-        assert_eq!(&served[..at], &FIXTURE[..at]);
-        let after = at + policy::MARKER.len();
-        assert_eq!(
-            &served[served.len() - (FIXTURE.len() - after)..],
-            &FIXTURE[after..]
-        );
-    }
-
-    /// A document with no marker, or with more than one, is refused rather
-    /// than filled in twice.
-    #[test]
-    fn a_document_without_exactly_one_marker_is_refused() {
-        for (html, count) in [
-            ("<html><body>nothing to fill</body></html>", 0),
-            (
-                "<html>__LIBID_CALLBACK_CONFIG__ __LIBID_CALLBACK_CONFIG__</html>",
-                2,
-            ),
-        ] {
-            assert_eq!(
-                compose(html).map(|_| ()).unwrap_err(),
-                ArtifactError::Markers(count)
-            );
-        }
-    }
-
-    /// The policy names the hashes the artifact arrived with, admits a frame
-    /// only from the configured Distribution, and admits no connection.
-    #[test]
-    fn the_policy_carries_the_hashes_and_this_deployments_sources() {
-        let doc = compose(FIXTURE).unwrap();
-        let csp = doc.csp.to_str().unwrap();
-        assert!(csp.starts_with(
-            "default-src 'none'; object-src 'none'; base-uri 'none'; \
-             form-action 'none'; frame-ancestors 'none'"
-        ));
-        for source in crate::fixtures::artifact_hashes() {
-            assert!(csp.contains(&source), "{csp}");
-        }
-        assert!(csp.contains("frame-src https://ccdp.example"));
-        assert!(csp.contains("connect-src 'none'"));
-        assert!(!csp.contains("'unsafe-eval'"));
-        assert!(!csp.contains("'unsafe-inline'; script"), "{csp}");
-    }
-
-    /// Inserted data leaves as ASCII with no character a parser reads as
-    /// markup, whatever the deployment is called.
-    #[test]
-    fn inserted_data_cannot_be_read_as_markup() {
-        let rendered = json(&serde_json::json!(["</script><script>", "\u{2028}\u{e9}"]));
-        assert!(rendered.is_ascii());
-        for forbidden in ['<', '>', '&'] {
-            assert!(!rendered.contains(forbidden), "{rendered}");
-        }
-        assert!(rendered.contains("\\u003c"));
-    }
 }

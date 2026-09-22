@@ -23,22 +23,22 @@ use crate::{
 };
 
 /// The checked inputs of one deployment.
-pub(crate) struct Deployment {
+pub struct Deployment {
     /// The CCDP Distribution this deployment selects.
-    pub(crate) ccdp_origin: Origin,
+    pub ccdp_origin: Origin,
     /// The effective admission set `allowedAppOrigins ∪ {ccdpOrigin}`: the one
     /// rule the configuration route applies, and what the callback document
     /// is told.
-    pub(crate) allowed_origins: Arc<[Origin]>,
+    pub allowed_origins: Arc<[Origin]>,
     /// The enabled platforms.
-    pub(crate) platforms: Vec<PlatformProfile>,
+    pub platforms: Vec<PlatformProfile>,
 }
 
 impl Deployment {
     /// Every rule a deployment must satisfy before it serves a request,
     /// applied to the resolved configuration; the first rule broken is the
     /// error.
-    pub(crate) fn checked(cfg: &Config) -> Result<Deployment> {
+    pub fn checked(cfg: &Config) -> Result<Deployment> {
         let ccdp_origin = ccdp_origin(&cfg.ccdp_origin)?;
         // The resolved CCDP origin joins the admitted set once; an overridden
         // `CCDP_ORIGIN` does not keep `https://lib.id` admitted unless it is
@@ -60,7 +60,7 @@ impl Deployment {
 
     /// The public ceremony configuration, as the bytes every admitted caller
     /// receives.
-    pub(crate) fn ceremony_config(&self) -> Bytes {
+    pub fn ceremony_config(&self) -> Bytes {
         CeremonyConfig {
             ccdp_origin: &self.ccdp_origin,
             platforms: &self.platforms,
@@ -302,131 +302,5 @@ impl CeremonyConfig<'_> {
             serde_json::to_vec(&self.record())
                 .expect("a Value of string keys serializes into memory"),
         )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const ONE: &str = r#"[{"id":"github","client_id":"Iv1.0","versions":[1],"client_credential":"c0ffee"}]"#;
-
-    /// Parse records as the configuration file would, then check them.
-    fn checked(json: &str) -> Result<Vec<PlatformProfile>> {
-        let records: Vec<PlatformProfile> =
-            serde_json::from_str(json).map_err(|e| Error::Config {
-                detail: e.to_string(),
-            })?;
-        platforms(records)
-    }
-
-    /// One github entry whose `client_credential` is `credential`.
-    fn github_with(credential: impl Into<Value>) -> String {
-        json!([{
-            "id": "github",
-            "client_id": "a",
-            "versions": [1],
-            "client_credential": credential.into(),
-        }])
-        .to_string()
-    }
-
-    #[test]
-    fn a_well_formed_set_parses() {
-        let p = checked(ONE).unwrap();
-        assert_eq!(p.len(), 1);
-        assert_eq!(p[0].id(), PlatformId::Github);
-        assert_eq!(p[0].client_id(), "Iv1.0");
-        assert_eq!(p[0].versions(), [1]);
-        assert_eq!(p[0].client_credential(), Some("c0ffee"));
-    }
-
-    /// The record carries a github entry's credential as
-    /// `clientCredential`, and an entry that has none carries no such
-    /// key.
-    #[test]
-    fn the_record_publishes_the_credential_where_there_is_one() {
-        let platforms = checked(
-            r#"[{"id":"github","client_id":"Iv1.0","versions":[1],"client_credential":"c0ffee"},{"id":"x","client_id":"xc","versions":[2]}]"#,
-        )
-        .unwrap();
-        let ccdp_origin =
-            crate::origin::Origin::parse("CCDP_ORIGIN", "https://lib.id").unwrap();
-        let record: Value = serde_json::from_slice(
-            &CeremonyConfig {
-                ccdp_origin: &ccdp_origin,
-                platforms: &platforms,
-            }
-            .serialized(),
-        )
-        .unwrap();
-
-        let github = record["platforms"]["github"].as_object().unwrap();
-        let mut keys: Vec<&str> = github.keys().map(String::as_str).collect();
-        keys.sort_unstable();
-        assert_eq!(keys, ["ceremonyVersions", "clientCredential", "clientId"]);
-        assert_eq!(github["clientCredential"], "c0ffee");
-
-        let x = record["platforms"]["x"].as_object().unwrap();
-        let mut keys: Vec<&str> = x.keys().map(String::as_str).collect();
-        keys.sort_unstable();
-        assert_eq!(keys, ["ceremonyVersions", "clientId"]);
-    }
-
-    /// Each of these is refused at startup.
-    #[test]
-    fn a_set_this_service_cannot_serve_stops_the_process() {
-        let around = |byte: u8| format!("c0f{}fee", char::from(byte));
-        for (why, json) in [
-            ("empty", "[]".to_owned()),
-            (
-                "unknown platform",
-                r#"[{"id":"twitter","client_id":"a","versions":[1]}]"#.to_owned(),
-            ),
-            (
-                "duplicate platform",
-                r#"[{"id":"x","client_id":"a","versions":[1]},{"id":"x","client_id":"b","versions":[1]}]"#.to_owned(),
-            ),
-            (
-                "no versions",
-                r#"[{"id":"x","client_id":"a","versions":[]}]"#.to_owned(),
-            ),
-            (
-                "duplicate version",
-                r#"[{"id":"x","client_id":"a","versions":[1,1]}]"#.to_owned(),
-            ),
-            (
-                "additional member",
-                r#"[{"id":"x","client_id":"a","label":"X","versions":[1]}]"#.to_owned(),
-            ),
-            (
-                "a github entry with no credential",
-                r#"[{"id":"github","client_id":"a","versions":[1]}]"#.to_owned(),
-            ),
-            ("a null credential", github_with(Value::Null)),
-            ("a credential that is not a string", github_with(1)),
-            ("an empty credential", github_with("")),
-            ("a credential carrying a space", github_with(around(b' '))),
-            ("a credential carrying a tab", github_with(around(b'\t'))),
-            ("a credential carrying a control byte", github_with(around(7))),
-            ("a credential carrying DEL", github_with(around(0x7F))),
-            ("a credential outside ASCII", github_with(around(0xE9))),
-            (
-                "a credential on a platform that has none",
-                r#"[{"id":"x","client_id":"a","versions":[1],"client_credential":"c0ffee"}]"#.to_owned(),
-            ),
-        ] {
-            assert!(checked(&json).is_err(), "{why} must be refused");
-        }
-    }
-
-    /// A refusal names the field, never the value.
-    #[test]
-    fn a_refused_credential_is_named_and_not_quoted() {
-        let err =
-            checked(&github_with("zzMarkerzz fee")).expect_err("a space is refused");
-        let text = err.to_string();
-        assert!(text.contains("client_credential"), "{text}");
-        assert!(!text.contains("zzMarkerzz"), "{text}");
     }
 }

@@ -91,7 +91,7 @@ fn admission(state: &AppState, headers: &HeaderMap) -> Option<Admission> {
 /// set. A preflight carries one by definition, so the same-origin case is not
 /// one and is refused like any other. The answer grants `GET`, the headers the
 /// request asked for, and no credentials.
-pub(crate) async fn preflight(
+pub async fn preflight(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Response {
@@ -124,7 +124,7 @@ pub(crate) async fn preflight(
 }
 
 /// `GET /api/v1/ceremony/config`.
-pub(crate) async fn config(
+pub async fn config(
     State(state): State<Arc<AppState>>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,

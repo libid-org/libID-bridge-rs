@@ -21,21 +21,21 @@ use prometheus_client::{
 
 /// How one retrieval ended.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub(crate) struct Retrieval {
+pub struct Retrieval {
     /// `published`, `unchanged` or `failed`.
     outcome: &'static str,
 }
 
 /// Why a retrieval produced no document.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub(crate) struct Failure {
+pub struct Failure {
     /// The short name of the refusal.
     kind: &'static str,
 }
 
 /// What the callback route answered.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub(crate) struct Callback {
+pub struct Callback {
     /// `document` or `unavailable`.
     outcome: &'static str,
 }
@@ -111,25 +111,25 @@ impl Metrics {
     }
 
     /// A retrieval published a document, replacing whatever was served.
-    pub(crate) fn published(&self) {
+    pub fn published(&self) {
         self.count(&self.retrievals, "published");
         self.available.set(1);
         self.published_at.set(unix_seconds());
     }
 
     /// A retrieval found the served document to be current.
-    pub(crate) fn unchanged(&self) {
+    pub fn unchanged(&self) {
         self.count(&self.retrievals, "unchanged")
     }
 
     /// A retrieval produced no document. Whatever was served stays.
-    pub(crate) fn failed(&self, kind: &'static str) {
+    pub fn failed(&self, kind: &'static str) {
         self.count(&self.retrievals, "failed");
         self.failures.get_or_create(&Failure { kind }).inc();
     }
 
     /// The callback route answered with the document.
-    pub(crate) fn callback_served(&self) {
+    pub fn callback_served(&self) {
         self.callbacks
             .get_or_create(&Callback {
                 outcome: "document",
@@ -138,7 +138,7 @@ impl Metrics {
     }
 
     /// The callback route had no document to answer with.
-    pub(crate) fn callback_unavailable(&self) {
+    pub fn callback_unavailable(&self) {
         self.callbacks
             .get_or_create(&Callback {
                 outcome: "unavailable",
@@ -147,7 +147,7 @@ impl Metrics {
     }
 
     /// Every metric in the Prometheus text exposition format.
-    pub(crate) fn rendered(&self) -> String {
+    pub fn rendered(&self) -> String {
         let mut out = String::new();
         // The registry is built here and every metric it holds encodes, so a
         // failure would be this crate's own bug rather than a request's.
@@ -167,55 +167,4 @@ fn unix_seconds() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or_default()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A deployment that has retrieved nothing reports that it is serving
-    /// nothing, and invents no counter it has not reached.
-    #[test]
-    fn a_deployment_that_retrieved_nothing_says_so() {
-        let empty = Metrics::new().rendered();
-        assert!(
-            empty.contains("libid_bridge_callback_document_available 0"),
-            "{empty}"
-        );
-        assert!(empty
-            .contains("libid_bridge_callback_document_published_timestamp_seconds 0"));
-        assert!(
-            !empty.contains("libid_bridge_artifact_retrievals_total"),
-            "{empty}"
-        );
-        assert!(empty.ends_with("# EOF\n"), "{empty}");
-    }
-
-    /// Every outcome is counted under its own name.
-    #[test]
-    fn the_rendering_names_every_metric() {
-        let metrics = Metrics::new();
-
-        metrics.published();
-        metrics.unchanged();
-        metrics.failed("unreachable");
-        metrics.callback_served();
-        metrics.callback_unavailable();
-
-        let text = metrics.rendered();
-        for line in [
-            "libid_bridge_artifact_retrievals_total{outcome=\"published\"} 1",
-            "libid_bridge_artifact_retrievals_total{outcome=\"unchanged\"} 1",
-            "libid_bridge_artifact_retrievals_total{outcome=\"failed\"} 1",
-            "libid_bridge_artifact_retrieval_failures_total{kind=\"unreachable\"} 1",
-            "libid_bridge_callback_requests_total{outcome=\"document\"} 1",
-            "libid_bridge_callback_requests_total{outcome=\"unavailable\"} 1",
-            "libid_bridge_callback_document_available 1",
-        ] {
-            assert!(text.contains(line), "{line} missing from:\n{text}");
-        }
-        assert!(
-            text.contains("libid_bridge_callback_document_published_timestamp_seconds")
-        );
-    }
 }

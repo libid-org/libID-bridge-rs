@@ -13,8 +13,8 @@
 //! top-level navigation. No other path is served, and no route performs a
 //! token exchange or opens a notary connection.
 
-pub(crate) mod callback;
-pub(crate) mod config;
+pub mod callback;
+pub mod config;
 
 use std::sync::Arc;
 
@@ -36,7 +36,7 @@ use crate::state::AppState;
 
 /// How many `Origin` headers a request carried. The configuration route
 /// admits exactly one, matching an admitted origin.
-pub(crate) enum Origins<'a> {
+pub enum Origins<'a> {
     /// No `Origin`.
     Absent,
     /// Exactly one.
@@ -47,7 +47,7 @@ pub(crate) enum Origins<'a> {
 
 impl<'a> Origins<'a> {
     /// The `Origin` headers of `headers`.
-    pub(crate) fn of(headers: &'a axum::http::HeaderMap) -> Self {
+    pub fn of(headers: &'a axum::http::HeaderMap) -> Self {
         let mut seen = headers.get_all(axum::http::header::ORIGIN).iter();
         match (seen.next(), seen.next()) {
             (Some(one), None) => Origins::One(one),
@@ -99,9 +99,9 @@ async fn unrouted() -> Response {
 }
 
 /// The liveness probe.
-pub(crate) const HEALTH_PATH: &str = "/health";
+pub const HEALTH_PATH: &str = "/health";
 /// What this deployment counts.
-pub(crate) const METRICS_PATH: &str = "/metrics";
+pub const METRICS_PATH: &str = "/metrics";
 /// The registered OAuth callback: the callback document.
 pub const CALLBACK_PATH: &str = "/auth/callback";
 /// The public ceremony configuration.

@@ -26,7 +26,6 @@ use axum::{
 };
 use serde_json::json;
 
-use super::ON_EVERY_RESPONSE;
 use crate::state::AppState;
 
 /// What `Vary` names, on every response this route writes: `Origin` and
@@ -92,7 +91,7 @@ fn admission(state: &AppState, headers: &HeaderMap) -> Option<Admission> {
 /// set. A preflight carries one by definition, so the same-origin case is not
 /// one and is refused like any other. The answer grants `GET`, the headers the
 /// request asked for, and no credentials.
-pub(crate) async fn preflight(
+pub async fn preflight(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Response {
@@ -100,6 +99,7 @@ pub(crate) async fn preflight(
         return refuse(
             StatusCode::FORBIDDEN,
             "this configuration is readable only from an admitted origin",
+            None,
         );
     };
 
@@ -120,15 +120,12 @@ pub(crate) async fn preflight(
     if let Some(asked) = headers.get(header::ACCESS_CONTROL_REQUEST_HEADERS) {
         out.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, asked.clone());
     }
-    for (name, value) in ON_EVERY_RESPONSE {
-        out.insert(name, value);
-    }
 
     (StatusCode::NO_CONTENT, out).into_response()
 }
 
 /// `GET /api/v1/ceremony/config`.
-pub(crate) async fn config(
+pub async fn config(
     State(state): State<Arc<AppState>>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
@@ -138,11 +135,20 @@ pub(crate) async fn config(
         return refuse(
             StatusCode::FORBIDDEN,
             "this configuration is readable only from an admitted origin",
+            None,
         );
     };
 
     if query.is_some_and(|q| !q.is_empty()) {
-        return refuse(StatusCode::BAD_REQUEST, "this route takes no query");
+        let admitted = match &admission {
+            Admission::Listed(origin) => Some(origin.clone()),
+            Admission::SameOrigin => None,
+        };
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "this route takes no query",
+            admitted,
+        );
     }
 
     // `insert`, not append: the `Bytes` body would otherwise add its own
@@ -153,9 +159,6 @@ pub(crate) async fn config(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
     );
-    for (name, value) in ON_EVERY_RESPONSE {
-        out.insert(name, value);
-    }
     // The exact origin that asked, never `*`; no credentials. A same-origin
     // read gets no allow-origin.
     if let Admission::Listed(origin) = admission {
@@ -165,15 +168,18 @@ pub(crate) async fn config(
     (StatusCode::OK, out, state.ceremony_config.clone()).into_response()
 }
 
-/// A refusal carries no configuration and no allow-origin header, so a caller
-/// that is not admitted cannot read the record out of an error, and a
-/// preflight it answers grants nothing. A browser reads neither body.
-fn refuse(status: StatusCode, message: &str) -> Response {
-    (
-        status,
-        [(header::VARY, VARY_ON)],
-        ON_EVERY_RESPONSE,
-        Json(json!({ "message": message })),
-    )
-        .into_response()
+/// A refusal carries no configuration, so a caller cannot read the record out
+/// of an error.
+///
+/// `admitted` is the origin the request was admitted from, where it was: a
+/// caller refused for something other than its origin gets the header that
+/// lets its browser surface the status, and one refused for its origin gets
+/// nothing, so it cannot tell an unlisted origin from a malformed request.
+fn refuse(status: StatusCode, message: &str, admitted: Option<HeaderValue>) -> Response {
+    let mut out = HeaderMap::new();
+    out.insert(header::VARY, HeaderValue::from_static(VARY_ON));
+    if let Some(origin) = admitted {
+        out.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    }
+    (status, out, Json(json!({ "message": message }))).into_response()
 }

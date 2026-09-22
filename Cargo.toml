@@ -9,34 +9,27 @@ description = "libID OAuth Bridge: publishes the ceremony configuration and serv
 publish = false
 
 [dependencies]
-# A fixture Distribution answering with a chunked body.
-futures-util = { version = "0.3", optional = true }
-
 # ── HTTP server / client ────────────────────────────────────────────────
 axum = "0.8"
 
 # ── everything else ─────────────────────────────────────────────────────
-# The hashes an artifact's policy names are checked against its code.
-base64 = "0.22"
-sha2 = "0.10"
-# The artifact retrieval is a `client`/`http1` connection of this crate's own.
+# The artifact retrieval: one pooled `client`/`http1` connection, over TLS
+# whose trust anchors are compiled in.
 bytes = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
-# `TokioIo`: a tokio socket as hyper's transport.
-hyper-util = { version = "0.1", features = ["tokio"] }
-
-# ── artifact retrieval over TLS ─────────────────────────────────────────
-# The artifact retrieval's TLS. `ring` is the one crypto provider in the
-# graph (`cargo tree -i aws-lc-rs` is empty), so `ClientConfig::builder()`
-# has exactly one to pick; rustls is reached as `tokio_rustls::rustls`.
-tokio-rustls = { version = "0.26", default-features = false, features = [
+hyper-util = { version = "0.1", features = ["client-legacy", "tokio"] }
+hyper-rustls = { version = "0.27.10", default-features = false, features = [
     "ring",
+    "webpki-tokio",
+    "http1",
+    # A Distribution behind a proxy that has not moved to 1.3; without it the
+    # handshake ends before a certificate is seen.
     "tls12",
-    "logging",
 ] }
-# The trust anchors of the artifact retrieval.
-webpki-root-certs = "1"
+# What this deployment counts, in the Prometheus text exposition format.
+prometheus-client = "0.25"
+
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
@@ -55,12 +48,21 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 
-[features]
-# The test fixtures (`libid_server_rs::fixtures`), for the integration tests.
-fixtures = ["dep:futures-util"]
-
 [dev-dependencies]
-libid-server-rs = { path = ".", features = ["fixtures"] }
 tower = { version = "0.5", features = ["util"] }
+# The fixture Distribution hashes the code it serves, the way a Distribution's
+# build does, and answers one body in chunks.
+base64 = "0.22"
+sha2 = "0.10"
+futures-util = "0.3"
+# The fixture builds a configuration the way the binary parses one.
+clap = { version = "4", features = ["derive", "env"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+axum = "0.8"
+hyper = { version = "1", features = ["client", "http1"] }
+bytes = "1"
+
 # A self-signed certificate for a fixture Distribution that speaks TLS.
 rcgen = "0.13"
+tokio-rustls = { version = "0.26.5", default-features = false, features = ["ring", "tls12", "logging"] }

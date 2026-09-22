@@ -23,22 +23,22 @@ use crate::{
 };
 
 /// The checked inputs of one deployment.
-pub(crate) struct Deployment {
+pub struct Deployment {
     /// The CCDP Distribution this deployment selects.
-    pub(crate) ccdp_origin: Origin,
+    pub ccdp_origin: Origin,
     /// The effective admission set `allowedAppOrigins ∪ {ccdpOrigin}`: the one
     /// rule the configuration route applies, and what the callback document
     /// is told.
-    pub(crate) allowed_origins: Arc<[Origin]>,
+    pub allowed_origins: Arc<[Origin]>,
     /// The enabled platforms.
-    pub(crate) platforms: Vec<PlatformProfile>,
+    pub platforms: Vec<PlatformProfile>,
 }
 
 impl Deployment {
     /// Every rule a deployment must satisfy before it serves a request,
     /// applied to the resolved configuration; the first rule broken is the
     /// error.
-    pub(crate) fn checked(cfg: &Config) -> Result<Deployment> {
+    pub fn checked(cfg: &Config) -> Result<Deployment> {
         let ccdp_origin = ccdp_origin(&cfg.ccdp_origin)?;
         // The resolved CCDP origin joins the admitted set once; an overridden
         // `CCDP_ORIGIN` does not keep `https://lib.id` admitted unless it is
@@ -60,7 +60,7 @@ impl Deployment {
 
     /// The public ceremony configuration, as the bytes every admitted caller
     /// receives.
-    pub(crate) fn ceremony_config(&self) -> Bytes {
+    pub fn ceremony_config(&self) -> Bytes {
         CeremonyConfig {
             ccdp_origin: &self.ccdp_origin,
             platforms: &self.platforms,
@@ -192,6 +192,13 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>>
         if p.client_id().is_empty() {
             return Err(refuse(format!("{id} carries no client_id")));
         }
+        // A client id the platform could never issue is a typo the
+        // deployment publishes and every ceremony then fails on.
+        if !printable_without_whitespace(p.client_id()) {
+            return Err(refuse(format!(
+                "{id}'s client_id is not printable ASCII without whitespace"
+            )));
+        }
         if p.versions().is_empty() {
             return Err(refuse(format!("{id} advertises no version")));
         }
@@ -206,7 +213,7 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>>
             if credential.is_empty() {
                 return Err(refuse(format!("{id} carries an empty client_credential")));
             }
-            if !credential.bytes().all(|b| (0x21..=0x7E).contains(&b)) {
+            if !printable_without_whitespace(credential) {
                 return Err(refuse(format!(
                     "{id}'s client_credential is not printable ASCII \
                      without whitespace"
@@ -217,19 +224,28 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>>
     Ok(profiles)
 }
 
-/// The CCDP Distribution this deployment selects, in canonical form. An IPv6
-/// literal is refused: the callback document's policy names this origin as a
-/// `frame-src` source, and a Content-Security-Policy source expression has no
-/// form for one, so a browser discards the source and the document frames
-/// nothing.
+/// Whether every byte of `value` is printable ASCII carrying no whitespace,
+/// which is what a public client identifier and a public client credential
+/// are made of.
+fn printable_without_whitespace(value: &str) -> bool {
+    value.bytes().all(|b| (0x21..=0x7E).contains(&b))
+}
+
+/// The CCDP Distribution this deployment selects, in canonical form. A host a
+/// policy cannot name is refused: the callback document's policy names this
+/// origin as a `frame-src` source, and a browser discards a source whose
+/// grammar it cannot parse, leaving the document framing nothing. An IPv6
+/// literal and an underscore are both outside that grammar. The admitted
+/// application origins reach the document as escaped data rather than as
+/// policy, so they are not held to this.
 fn ccdp_origin(spelling: &str) -> Result<Origin> {
     let origin = Origin::parse("CCDP_ORIGIN", spelling)?;
-    if origin.is_ipv6_literal() {
+    if !origin.names_a_policy_host() {
         return Err(Error::Config {
             detail: format!(
-                "CCDP_ORIGIN {spelling} names an IPv6 literal, which the \
-                 callback document's Content-Security-Policy cannot carry as a \
-                 source; name the Distribution by host"
+                "CCDP_ORIGIN {spelling} names a host a Content-Security-Policy \
+                 cannot carry as a source, which admits letters, digits, `-` \
+                 and `.`; name the Distribution by a host made of those"
             ),
         });
     }
@@ -237,19 +253,19 @@ fn ccdp_origin(spelling: &str) -> Result<Origin> {
 }
 
 /// The application origins admitted to read the configuration, each as
-/// written: one that is not already canonical is refused, not folded. The
-/// surrounding whitespace of a comma-separated spelling is not part of a
-/// member and is dropped before the member is read.
+/// written: one that is not already canonical is refused rather than folded,
+/// and a blank one is a member the operator did not mean to write.
 fn allowed_app_origins(list: &[String]) -> Result<Vec<Origin>> {
     let mut out = Vec::new();
     // The index is the member's own, so a refusal names the entry the
-    // operator wrote even where a blank one precedes it.
+    // operator wrote.
     for (i, spelling) in list.iter().enumerate() {
-        let spelling = spelling.trim();
-        if spelling.is_empty() {
-            continue;
-        }
         let field = format!("ALLOWED_APP_ORIGINS[{i}]");
+        if spelling.is_empty() {
+            return Err(Error::Config {
+                detail: format!("{field} is blank"),
+            });
+        }
         let origin = Origin::listed(&field, spelling)?;
         // A duplicate is refused, not folded.
         if out.contains(&origin) {
@@ -302,131 +318,5 @@ impl CeremonyConfig<'_> {
             serde_json::to_vec(&self.record())
                 .expect("a Value of string keys serializes into memory"),
         )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const ONE: &str = r#"[{"id":"github","client_id":"Iv1.0","versions":[1],"client_credential":"c0ffee"}]"#;
-
-    /// Parse records as the configuration file would, then check them.
-    fn checked(json: &str) -> Result<Vec<PlatformProfile>> {
-        let records: Vec<PlatformProfile> =
-            serde_json::from_str(json).map_err(|e| Error::Config {
-                detail: e.to_string(),
-            })?;
-        platforms(records)
-    }
-
-    /// One github entry whose `client_credential` is `credential`.
-    fn github_with(credential: impl Into<Value>) -> String {
-        json!([{
-            "id": "github",
-            "client_id": "a",
-            "versions": [1],
-            "client_credential": credential.into(),
-        }])
-        .to_string()
-    }
-
-    #[test]
-    fn a_well_formed_set_parses() {
-        let p = checked(ONE).unwrap();
-        assert_eq!(p.len(), 1);
-        assert_eq!(p[0].id(), PlatformId::Github);
-        assert_eq!(p[0].client_id(), "Iv1.0");
-        assert_eq!(p[0].versions(), [1]);
-        assert_eq!(p[0].client_credential(), Some("c0ffee"));
-    }
-
-    /// The record carries a github entry's credential as
-    /// `clientCredential`, and an entry that has none carries no such
-    /// key.
-    #[test]
-    fn the_record_publishes_the_credential_where_there_is_one() {
-        let platforms = checked(
-            r#"[{"id":"github","client_id":"Iv1.0","versions":[1],"client_credential":"c0ffee"},{"id":"x","client_id":"xc","versions":[2]}]"#,
-        )
-        .unwrap();
-        let ccdp_origin =
-            crate::origin::Origin::parse("CCDP_ORIGIN", "https://lib.id").unwrap();
-        let record: Value = serde_json::from_slice(
-            &CeremonyConfig {
-                ccdp_origin: &ccdp_origin,
-                platforms: &platforms,
-            }
-            .serialized(),
-        )
-        .unwrap();
-
-        let github = record["platforms"]["github"].as_object().unwrap();
-        let mut keys: Vec<&str> = github.keys().map(String::as_str).collect();
-        keys.sort_unstable();
-        assert_eq!(keys, ["ceremonyVersions", "clientCredential", "clientId"]);
-        assert_eq!(github["clientCredential"], "c0ffee");
-
-        let x = record["platforms"]["x"].as_object().unwrap();
-        let mut keys: Vec<&str> = x.keys().map(String::as_str).collect();
-        keys.sort_unstable();
-        assert_eq!(keys, ["ceremonyVersions", "clientId"]);
-    }
-
-    /// Each of these is refused at startup.
-    #[test]
-    fn a_set_this_service_cannot_serve_stops_the_process() {
-        let around = |byte: u8| format!("c0f{}fee", char::from(byte));
-        for (why, json) in [
-            ("empty", "[]".to_owned()),
-            (
-                "unknown platform",
-                r#"[{"id":"twitter","client_id":"a","versions":[1]}]"#.to_owned(),
-            ),
-            (
-                "duplicate platform",
-                r#"[{"id":"x","client_id":"a","versions":[1]},{"id":"x","client_id":"b","versions":[1]}]"#.to_owned(),
-            ),
-            (
-                "no versions",
-                r#"[{"id":"x","client_id":"a","versions":[]}]"#.to_owned(),
-            ),
-            (
-                "duplicate version",
-                r#"[{"id":"x","client_id":"a","versions":[1,1]}]"#.to_owned(),
-            ),
-            (
-                "additional member",
-                r#"[{"id":"x","client_id":"a","label":"X","versions":[1]}]"#.to_owned(),
-            ),
-            (
-                "a github entry with no credential",
-                r#"[{"id":"github","client_id":"a","versions":[1]}]"#.to_owned(),
-            ),
-            ("a null credential", github_with(Value::Null)),
-            ("a credential that is not a string", github_with(1)),
-            ("an empty credential", github_with("")),
-            ("a credential carrying a space", github_with(around(b' '))),
-            ("a credential carrying a tab", github_with(around(b'\t'))),
-            ("a credential carrying a control byte", github_with(around(7))),
-            ("a credential carrying DEL", github_with(around(0x7F))),
-            ("a credential outside ASCII", github_with(around(0xE9))),
-            (
-                "a credential on a platform that has none",
-                r#"[{"id":"x","client_id":"a","versions":[1],"client_credential":"c0ffee"}]"#.to_owned(),
-            ),
-        ] {
-            assert!(checked(&json).is_err(), "{why} must be refused");
-        }
-    }
-
-    /// A refusal names the field, never the value.
-    #[test]
-    fn a_refused_credential_is_named_and_not_quoted() {
-        let err =
-            checked(&github_with("zzMarkerzz fee")).expect_err("a space is refused");
-        let text = err.to_string();
-        assert!(text.contains("client_credential"), "{text}");
-        assert!(!text.contains("zzMarkerzz"), "{text}");
     }
 }

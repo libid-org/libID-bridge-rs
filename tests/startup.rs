@@ -1,6 +1,10 @@
 //! The binary: it starts on a configuration file, answers, and stops on
 //! SIGINT; a configuration it cannot serve stops it before it binds.
 
+// Each suite uses its part of the module.
+#[allow(dead_code)]
+mod common;
+
 use std::{
     io::{
         BufRead,
@@ -17,8 +21,7 @@ use std::{
     },
 };
 
-use libid_server_rs::fixtures::{
-    self,
+use common::{
     Distribution,
     ScratchFile,
 };
@@ -143,8 +146,8 @@ fn the_binary_serves_until_interrupted() {
     let config = config_file(&format!(
         "[[platforms]]\nid = \"github\"\nclient_id = \"{}\"\nversions = [1]\n\
          client_credential = \"{}\"\n",
-        fixtures::CLIENT_ID,
-        fixtures::CLIENT_CREDENTIAL
+        crate::common::CLIENT_ID,
+        crate::common::CLIENT_CREDENTIAL
     ));
     let bridge = Started::on(config.path());
 

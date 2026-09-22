@@ -2,8 +2,13 @@
 //! callback document's invariance and policy, and the absence of any other
 //! route.
 
+// Each suite uses its part of the module.
+#[allow(dead_code)]
+mod common;
+
 use std::sync::Arc;
 
+use crate::common::Distribution;
 use axum::{
     body::Body,
     http::{
@@ -13,10 +18,6 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use libid_server_rs::{
-    fixtures::{
-        self,
-        Distribution,
-    },
     routes,
     state::AppState,
 };
@@ -31,14 +32,14 @@ fn ccdp_origin() -> &'static str {
 }
 
 /// A deployment admitting two applications, with `overrides` replacing any
-/// flag they name.
+/// flag they name, serving the artifact its Distribution answered with.
 async fn deployment(overrides: &[&str]) -> Arc<AppState> {
     let mut args = vec![
         "--allowed-app-origins",
         "https://app.example,https://wallet.example",
     ];
     args.extend_from_slice(overrides);
-    AppState::fixture(&args).await
+    crate::common::state(&args).await
 }
 
 /// The default deployment: GitHub enabled.
@@ -271,9 +272,9 @@ async fn config_carries_the_public_credential_and_no_allowlist() {
     let mut keys: Vec<_> = github.keys().map(String::as_str).collect();
     keys.sort_unstable();
     assert_eq!(keys, ["ceremonyVersions", "clientCredential", "clientId"]);
-    assert_eq!(github["clientId"], fixtures::CLIENT_ID);
+    assert_eq!(github["clientId"], crate::common::CLIENT_ID);
     assert_eq!(github["ceremonyVersions"], serde_json::json!([1]));
-    assert_eq!(github["clientCredential"], fixtures::CLIENT_CREDENTIAL);
+    assert_eq!(github["clientCredential"], crate::common::CLIENT_CREDENTIAL);
 
     let raw = body.to_string();
     assert!(!raw.contains(APP_ORIGIN));
@@ -300,8 +301,8 @@ async fn config_publishes_an_x_entry_of_exactly_client_id_and_versions() {
         "--platforms",
         &format!(
             r#"[{{"id":"github","client_id":"{}","versions":[1],"client_credential":"{}"}},{{"id":"x","client_id":"WHRlc3RjbGllbnQ6MTpjaQ","versions":[1]}}]"#,
-            fixtures::CLIENT_ID,
-            fixtures::CLIENT_CREDENTIAL
+            crate::common::CLIENT_ID,
+            crate::common::CLIENT_CREDENTIAL
         ),
     ])
     .await;
@@ -313,7 +314,10 @@ async fn config_publishes_an_x_entry_of_exactly_client_id_and_versions() {
     assert_eq!(keys, ["ceremonyVersions", "clientId"]);
     assert_eq!(x["clientId"], "WHRlc3RjbGllbnQ6MTpjaQ");
     assert_eq!(x["ceremonyVersions"], serde_json::json!([1]));
-    assert_eq!(body["platforms"]["github"]["clientId"], fixtures::CLIENT_ID);
+    assert_eq!(
+        body["platforms"]["github"]["clientId"],
+        crate::common::CLIENT_ID
+    );
 }
 
 /// A caller that must preflight its read is answered by the same admission
@@ -598,7 +602,7 @@ async fn the_callback_document_carries_the_exact_response_policy() {
     let html = std::str::from_utf8(&body).unwrap();
     assert!(html.contains("<main id=\"libid-root\"></main>"));
     assert!(
-        !html.contains(fixtures::CLIENT_CREDENTIAL),
+        !html.contains(crate::common::CLIENT_CREDENTIAL),
         "the document carries no platform configuration"
     );
 
@@ -637,4 +641,195 @@ async fn the_bridge_serves_no_ccdp_document_and_no_alias() {
         let resp = get_callback(path, &[]).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{path}");
     }
+}
+
+/// A deployment whose Distribution has not answered serves everything else,
+/// and says of the callback that it has no document and why.
+#[tokio::test]
+async fn a_deployment_without_its_distribution_serves_everything_else() {
+    let unreachable = crate::common::unreachable_origin().await;
+    let bridge = crate::common::bridge(&["--ccdp-origin", &unreachable]);
+    // The retrieval the refresher would perform, once, which records why it
+    // produced nothing.
+    crate::common::retrieve_once(&bridge)
+        .await
+        .expect_err("an unreachable Distribution answers nothing");
+    let state = bridge.state;
+
+    for (path, expected) in [
+        ("/health", StatusCode::OK),
+        (routes::CONFIG_PATH, StatusCode::FORBIDDEN),
+        ("/metrics", StatusCode::OK),
+    ] {
+        let resp = app(state.clone())
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), expected, "{path}");
+    }
+
+    let resp = app(state.clone())
+        .oneshot(
+            Request::get(routes::CALLBACK_PATH)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(resp.headers()[axum::http::header::RETRY_AFTER], "5");
+    let html = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!html.contains("<script"), "the page is inert: {html}");
+    assert!(
+        html.contains("ccdp/callback.html"),
+        "it names what could not be retrieved: {html}"
+    );
+}
+
+/// A Distribution that answers later is served from then on, and a retrieval
+/// that fails after that leaves the document already served in place.
+#[tokio::test]
+async fn a_document_survives_a_distribution_that_stops_answering() {
+    let distribution = Distribution::serving(crate::common::Reply::artifact()).await;
+    let bridge = crate::common::bridge(&["--ccdp-origin", distribution.origin()]);
+
+    assert!(crate::common::retrieve_once(&bridge).await.unwrap());
+    let served = callback_body(bridge.state.clone()).await;
+    assert!(served.contains("<script"), "the document is served");
+
+    distribution.now_serves(crate::common::Reply {
+        status: StatusCode::BAD_GATEWAY,
+        ..crate::common::Reply::artifact()
+    });
+    crate::common::retrieve_once(&bridge)
+        .await
+        .expect_err("a 502 produces no document");
+    assert_eq!(
+        callback_body(bridge.state.clone()).await,
+        served,
+        "the document already served stays"
+    );
+}
+
+/// What the deployment counted reaches the metrics route.
+#[tokio::test]
+async fn the_metrics_route_reports_what_happened() {
+    let state = test_state().await;
+    let _ = callback_body(state.clone()).await;
+
+    let resp = app(state)
+        .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let text = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    for line in [
+        "libid_bridge_artifact_retrievals_total{outcome=\"published\"} 1",
+        "libid_bridge_callback_requests_total{outcome=\"document\"} 1",
+        "libid_bridge_callback_document_available 1",
+    ] {
+        assert!(text.contains(line), "{line} missing from:\n{text}");
+    }
+}
+
+/// The body the callback route answers with.
+async fn callback_body(state: Arc<AppState>) -> String {
+    let resp = app(state)
+        .oneshot(
+            Request::get(routes::CALLBACK_PATH)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap()
+}
+
+/// A Distribution whose own policy would let arbitrary script run is refused:
+/// those sources would otherwise become the ones this bridge serves its own
+/// origin's document under.
+#[tokio::test]
+async fn a_distribution_policy_this_bridge_would_not_serve_under_is_refused() {
+    for policy in [
+        "default-src 'none'; script-src 'unsafe-inline'",
+        "default-src 'none'; script-src https://cdn.example",
+        "default-src 'none'; script-src 'nonce-abc'",
+        "default-src 'none'",
+    ] {
+        let distribution = Distribution::serving(crate::common::Reply {
+            policy: Some(policy.to_owned()),
+            ..crate::common::Reply::artifact()
+        })
+        .await;
+        let bridge = crate::common::bridge(&["--ccdp-origin", distribution.origin()]);
+        crate::common::retrieve_once(&bridge)
+            .await
+            .expect_err(policy);
+
+        let resp = app(bridge.state)
+            .oneshot(
+                Request::get(routes::CALLBACK_PATH)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE, "{policy}");
+    }
+}
+
+/// A caller refused for something other than its origin can read the refusal;
+/// one refused for its origin cannot tell that from a malformed request.
+#[tokio::test]
+async fn an_admitted_caller_can_read_why_it_was_refused() {
+    let state = test_state().await;
+    let allow = axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN;
+
+    let queried = app(state.clone())
+        .oneshot(
+            Request::get(format!("{}?t=1", routes::CONFIG_PATH))
+                .header("origin", APP_ORIGIN)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(queried.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(queried.headers()[&allow], APP_ORIGIN);
+
+    let unlisted = app(state)
+        .oneshot(
+            Request::get(routes::CONFIG_PATH)
+                .header("origin", "https://evil.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unlisted.status(), StatusCode::FORBIDDEN);
+    assert!(!unlisted.headers().contains_key(&allow));
 }

@@ -4,10 +4,7 @@
 //! redirect is refused.
 
 use std::{
-    sync::{
-        Arc,
-        LazyLock,
-    },
+    sync::Arc,
     time::Duration,
 };
 
@@ -21,37 +18,22 @@ use hyper::{
     header,
     StatusCode,
 };
-use hyper_util::rt::TokioIo;
-use tokio::{
-    io::{
-        AsyncRead,
-        AsyncWrite,
-    },
-    net::TcpStream,
-    sync::watch,
+use hyper_util::{
+    client::legacy::connect::HttpConnector,
+    rt::TokioExecutor,
 };
-use tokio_rustls::{
-    rustls::{
-        pki_types::ServerName,
-        ClientConfig,
-        RootCertStore,
-    },
-    TlsConnector,
-};
+use tokio::sync::watch;
 
 use super::{
-    scan,
+    policy,
     CallbackDocument,
     DeploymentInputs,
     Published,
 };
-use crate::{
-    error::Error,
-    origin::Origin,
-};
+use crate::origin::Origin;
 
 /// The artifact's path under the CCDP origin.
-pub(crate) const ARTIFACT_PATH: &str = "/ccdp/callback.html";
+pub const ARTIFACT_PATH: &str = "/ccdp/callback.html";
 
 /// How long opening the transport may take: resolution, the connection, and
 /// the TLS handshake over it.
@@ -62,43 +44,37 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// When the refresh loop revalidates. Not configurable.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Schedule {
+pub struct Schedule {
     /// Between revalidations when the last one succeeded, and the ceiling the
     /// backoff climbs to.
-    interval: Duration,
+    pub interval: Duration,
     /// The first retry delay after a failure, doubling up to `interval`.
-    floor: Duration,
+    pub floor: Duration,
 }
 
 impl Schedule {
-    /// What a deployment runs on.
-    pub(crate) const DEPLOYED: Schedule = Schedule {
+    /// What a deployment runs on: five minutes between retrievals that
+    /// produced a document, and a second after one that did not, doubling to
+    /// the same five minutes. A Distribution that is briefly unreachable
+    /// costs a ceremony a second rather than half a minute.
+    pub const DEPLOYED: Schedule = Schedule {
         interval: Duration::from_secs(300),
-        floor: Duration::from_secs(30),
+        floor: Duration::from_secs(1),
     };
 }
 
-/// The TLS configuration every retrieval shares, built once. The anchors are
-/// compiled in from `webpki-root-certs`; no system trust store is read.
-static TLS: LazyLock<Arc<ClientConfig>> = LazyLock::new(|| {
-    let mut roots = RootCertStore::empty();
-    let (added, refused) = roots
-        .add_parsable_certificates(webpki_root_certs::TLS_SERVER_ROOT_CERTS.to_vec());
-    assert!(
-        added > 0 && refused == 0,
-        "the compiled-in trust anchors did not parse: {added} added, {refused} refused"
-    );
-    Arc::new(
-        ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth(),
-    )
-});
+/// The client one deployment retrieves with: one pooled connection over TLS
+/// whose anchors are compiled in from `webpki-roots`. No system trust store
+/// is read.
+type Client = hyper_util::client::legacy::Client<
+    hyper_rustls::HttpsConnector<HttpConnector>,
+    Empty<Bytes>,
+>;
 
 /// Why a retrieval did not produce a document. Every variant is a refusal,
 /// never a repair.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum FetchError {
+pub enum FetchError {
     /// The Distribution could not be reached, or did not finish answering.
     #[error("{0}")]
     Unreachable(String),
@@ -118,20 +94,52 @@ pub(crate) enum FetchError {
     #[error("answered 304 Not Modified to a request carrying no If-None-Match")]
     UnaskedNotModified,
     /// The body ran past the bound before it ended.
-    #[error("the body is over the {}-byte bound", scan::MAX_ARTIFACT_BYTES)]
+    #[error("the body is over the {}-byte bound", policy::MAX_ARTIFACT_BYTES)]
     TooLarge,
     /// The body was not text.
     #[error("the body is not UTF-8")]
     NotUtf8,
     /// The artifact arrived and this bridge will not serve it.
     #[error(transparent)]
-    Artifact(#[from] scan::ArtifactError),
+    Artifact(#[from] policy::ArtifactError),
 }
 
 impl FetchError {
     /// A Distribution that could not be reached, or stopped answering.
     fn unreachable(why: impl std::fmt::Display) -> FetchError {
         FetchError::Unreachable(why.to_string())
+    }
+
+    /// The same, from an error whose own message names only its layer: the
+    /// chain is walked so the reason reaching an operator is the one the
+    /// socket gave.
+    fn from_source(error: impl std::error::Error) -> FetchError {
+        let mut why = error.to_string();
+        let mut source = error.source();
+        while let Some(next) = source {
+            let text = next.to_string();
+            if !why.contains(&text) {
+                why.push_str(": ");
+                why.push_str(&text);
+            }
+            source = next.source();
+        }
+        FetchError::Unreachable(why)
+    }
+
+    /// The short name this failure is counted under.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            FetchError::Unreachable(_) => "unreachable",
+            FetchError::Redirect(_) => "redirect",
+            FetchError::Status(_) => "status",
+            FetchError::Media(_) => "media",
+            FetchError::Encoded(_) => "encoded",
+            FetchError::UnaskedNotModified => "unasked-not-modified",
+            FetchError::TooLarge => "too-large",
+            FetchError::NotUtf8 => "not-utf8",
+            FetchError::Artifact(_) => "artifact",
+        }
     }
 }
 
@@ -155,71 +163,42 @@ enum Fetched {
 
 /// The Distribution this deployment retrieves its artifact from, parsed once
 /// at startup from the canonical CCDP origin.
-pub(crate) struct Upstream {
+pub struct Upstream {
     /// The origin as configured: what `compose` inserts and what the policy
     /// admits a frame from.
     origin: Origin,
-    /// The host to dial and to name in SNI.
-    host: String,
-    /// The `Host` header, which carries the port only when it is not the
-    /// scheme's default.
-    authority: String,
-    /// The port to dial.
-    port: u16,
-    /// Whether to speak TLS; false for a loopback `http` origin.
-    tls: bool,
+    /// The artifact's absolute URL, built once.
+    url: String,
+    /// The connections this deployment retrieves over.
+    client: Client,
 }
 
 impl Upstream {
-    /// A canonical origin as something dialable.
-    pub(crate) fn new(origin: &Origin) -> Upstream {
-        let url = url::Url::parse(origin.as_str()).expect("a canonical origin parses");
-        // The scheme decides the transport and the default port.
-        let tls = url.scheme() == "https";
-        let spelling = url.host_str().expect("a canonical origin names a host");
-        // A `Host` header carries an IPv6 literal in brackets; a socket
-        // address and a TLS server name take it without.
-        let host = match url.host() {
-            Some(url::Host::Ipv6(address)) => address.to_string(),
-            _ => spelling.to_owned(),
-        };
-        // `Url` drops a port that is its scheme's default, so `port()` is the
-        // non-default port `Host` carries.
+    /// A canonical origin as something retrievable.
+    pub fn new(origin: &Origin) -> Upstream {
+        // The connector dials by URL, so `enforce_http` must be off for the
+        // https wrapper to see an `https` one.
+        let mut http = HttpConnector::new();
+        http.set_connect_timeout(Some(CONNECT_TIMEOUT));
+        http.enforce_http(false);
+        // A loopback deployment names its Distribution by `http`, which
+        // `https_or_http` retrieves without a certificate.
+        let https = hyper_rustls::HttpsConnectorBuilder::new()
+            .with_webpki_roots()
+            .https_or_http()
+            .enable_http1()
+            .wrap_connector(http);
         Upstream {
+            url: format!("{origin}{ARTIFACT_PATH}"),
             origin: origin.clone(),
-            host,
-            authority: match url.port() {
-                Some(port) => format!("{spelling}:{port}"),
-                None => spelling.to_owned(),
-            },
-            port: url.port().unwrap_or(if tls { 443 } else { 80 }),
-            tls,
+            client: hyper_util::client::legacy::Client::builder(TokioExecutor::new())
+                .build(https),
         }
     }
 
     /// The URL this bridge retrieves, for a log line or a failure message.
-    pub(crate) fn url(&self) -> String {
-        format!("{}{ARTIFACT_PATH}", self.origin)
-    }
-
-    /// The artifact as a deployment starts on it: retrieved by a request
-    /// carrying no validator and composed for `allowed_origins`. A retrieval
-    /// that fails is an error, and the process does not start.
-    pub(crate) async fn initial(
-        &self,
-        allowed_origins: &[Origin],
-    ) -> Result<Published, Error> {
-        let unavailable = |detail: String| Error::ArtifactUnavailable {
-            url: self.url(),
-            detail,
-        };
-        let published = self
-            .retrieve(allowed_origins, None)
-            .await
-            .map_err(|e| unavailable(e.to_string()))?
-            .ok_or_else(|| unavailable(FetchError::UnaskedNotModified.to_string()))?;
-        self.announce(&published, "retrieved the callback artifact");
-        Ok(published)
+    pub fn url(&self) -> String {
+        self.url.clone()
     }
 
     /// One log line naming a document of this Distribution: its URL,
@@ -236,7 +215,7 @@ impl Upstream {
     /// Retrieve the artifact and compose what would be served from it.
     /// `Ok(None)` is a `304`: the document in hand is current. Startup and the
     /// refresh loop both take this path.
-    pub(crate) async fn retrieve(
+    pub async fn retrieve(
         &self,
         allowed_origins: &[Origin],
         etag: Option<&str>,
@@ -259,50 +238,18 @@ impl Upstream {
 
     /// One conditional GET, under one budget.
     async fn fetch(&self, etag: Option<&str>) -> Result<Fetched, FetchError> {
-        let io = tokio::time::timeout(CONNECT_TIMEOUT, self.connect())
+        tokio::time::timeout(REQUEST_TIMEOUT, self.exchange(etag))
             .await
-            .map_err(|_| FetchError::unreachable("opening the transport timed out"))??;
-        tokio::time::timeout(REQUEST_TIMEOUT, self.exchange(io, etag))
-            .await
-            .map_err(|_| FetchError::unreachable("the exchange timed out"))?
-    }
-
-    /// Open the transport: TCP, and TLS over it unless the origin is loopback
-    /// `http`.
-    async fn connect(&self) -> Result<Box<dyn Transport>, FetchError> {
-        let tcp = TcpStream::connect((self.host.as_str(), self.port))
-            .await
-            .map_err(FetchError::unreachable)?;
-        if !self.tls {
-            return Ok(Box::new(tcp));
-        }
-        let name = ServerName::try_from(self.host.clone())
-            .map_err(|e| FetchError::unreachable(format!("{}: {e}", self.host)))?;
-        let tls = TlsConnector::from(TLS.clone())
-            .connect(name, tcp)
-            .await
-            .map_err(FetchError::unreachable)?;
-        Ok(Box::new(tls))
+            .map_err(|_| FetchError::unreachable("the retrieval timed out"))?
     }
 
     /// Send the request and read the answer.
-    async fn exchange(
-        &self,
-        io: Box<dyn Transport>,
-        etag: Option<&str>,
-    ) -> Result<Fetched, FetchError> {
-        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(io))
+    async fn exchange(&self, etag: Option<&str>) -> Result<Fetched, FetchError> {
+        let response = self
+            .client
+            .request(self.request(etag))
             .await
-            .map_err(FetchError::unreachable)?;
-        // One exchange per connection; it is dropped with the response.
-        tokio::spawn(async move {
-            let _ = conn.await;
-        });
-
-        let response = sender
-            .send_request(self.request(etag))
-            .await
-            .map_err(FetchError::unreachable)?;
+            .map_err(FetchError::from_source)?;
         let status = response.status();
         match status {
             // A `304` is refused unless the request carried a validator.
@@ -322,8 +269,7 @@ impl Upstream {
     fn request(&self, etag: Option<&str>) -> hyper::Request<Empty<Bytes>> {
         let mut request = hyper::Request::builder()
             .method(hyper::Method::GET)
-            .uri(ARTIFACT_PATH)
-            .header(header::HOST, &self.authority)
+            .uri(&self.url)
             .header(header::ACCEPT, "text/html")
             .header(header::ACCEPT_ENCODING, "identity")
             .header(
@@ -341,7 +287,7 @@ impl Upstream {
 
 /// Whether a `Content-Type` names exactly `text/html`, case-insensitively,
 /// with parameters after optional whitespace and a `;`. `text/htmlx` does not.
-fn is_html(media: &str) -> bool {
+pub fn is_html(media: &str) -> bool {
     const HTML: &[u8] = b"text/html";
 
     let named = media.trim_start().as_bytes();
@@ -375,12 +321,12 @@ impl Fetched {
         let etag = header(header::ETAG).map(str::to_owned);
         // The artifact is served with the hashes of the code it carries; this
         // bridge carries them into its own policy and computes none.
-        let hashes = scan::script_hashes(
+        let hashes = policy::script_hashes(
             header(header::CONTENT_SECURITY_POLICY).unwrap_or_default(),
         )?;
 
         // Bounded while it is read, whatever `content-length` declares.
-        let body = Limited::new(body, scan::MAX_ARTIFACT_BYTES)
+        let body = Limited::new(body, policy::MAX_ARTIFACT_BYTES)
             .collect()
             .await
             .map_err(
@@ -395,51 +341,59 @@ impl Fetched {
     }
 }
 
-/// What a retrieval reads and writes: TCP, or TLS over it.
-trait Transport: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
-
-impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Transport for T {}
-
 /// What keeps the callback document current, held apart from what a request
 /// reads: the Distribution, the origins the document is composed for, and
 /// the one sender that publishes a replacement. Replace-only: a refresh
 /// either publishes a valid replacement or leaves the served document as it
 /// is.
-pub(crate) struct Refresher {
+pub struct Refresher {
     upstream: Upstream,
     allowed_origins: Arc<[Origin]>,
-    callback: watch::Sender<Arc<Published>>,
+    callback: watch::Sender<Option<Arc<Published>>>,
+    failure: watch::Sender<Option<String>>,
+    metrics: Arc<crate::metrics::Metrics>,
 }
 
 impl Refresher {
     /// The refresher of `callback`, from `upstream`, for `allowed_origins`.
-    pub(crate) fn new(
+    /// It records why a retrieval produced nothing in `failure`, which the
+    /// callback route reports while it has no document.
+    pub fn new(
         upstream: Upstream,
         allowed_origins: Arc<[Origin]>,
-        callback: watch::Sender<Arc<Published>>,
+        callback: watch::Sender<Option<Arc<Published>>>,
+        failure: watch::Sender<Option<String>>,
+        metrics: Arc<crate::metrics::Metrics>,
     ) -> Refresher {
         Refresher {
             upstream,
             allowed_origins,
             callback,
+            failure,
+            metrics,
         }
     }
 
-    /// Revalidate the artifact on `schedule` for as long as the process runs;
+    /// Retrieve the artifact on `schedule` for as long as the process runs;
     /// it returns only when the process ends.
-    pub(crate) async fn run(self, schedule: Schedule) {
+    pub async fn run(self, schedule: Schedule) {
         let url = self.upstream.url();
-        let mut delay = schedule.interval;
+        // The first retrieval is this loop's, not startup's, so a
+        // Distribution that is unreachable delays the callback document and
+        // stops nothing.
+        let mut delay = Duration::ZERO;
         let mut backoff = schedule.floor;
         loop {
             tokio::time::sleep(delay).await;
             match self.revalidate().await {
                 Ok(replaced) => {
                     if replaced {
-                        self.upstream.announce(
-                            &self.callback.borrow(),
-                            "the callback artifact was replaced",
-                        );
+                        if let Some(published) = self.callback.borrow().as_deref() {
+                            self.upstream.announce(
+                                published,
+                                "the callback artifact was published",
+                            )
+                        }
                     } else {
                         tracing::debug!(url, "the callback artifact is unchanged");
                     }
@@ -450,7 +404,9 @@ impl Refresher {
                     tracing::warn!(
                         url,
                         detail = %e,
-                        "the callback artifact could not be refreshed; still serving the last valid one"
+                        kind = e.kind(),
+                        serving = self.callback.borrow().is_some(),
+                        "the callback artifact could not be retrieved"
                     );
                     delay = backoff;
                     backoff = (backoff * 2).min(schedule.interval);
@@ -459,11 +415,37 @@ impl Refresher {
         }
     }
 
-    /// One revalidation: `true` replaced the document, `false` found nothing
-    /// to replace it with, and an error left everything as it was.
-    pub(crate) async fn revalidate(&self) -> Result<bool, FetchError> {
+    /// One retrieval, counted and recorded: `true` replaced the document,
+    /// `false` found nothing to replace it with, and an error left everything
+    /// as it was.
+    ///
+    /// Whatever it did is visible afterwards, in the metrics and in the
+    /// reason the callback route gives while it has nothing to serve.
+    pub async fn revalidate(&self) -> Result<bool, FetchError> {
+        match self.published().await {
+            Ok(true) => {
+                self.failure.send_replace(None);
+                self.metrics.published();
+                Ok(true)
+            }
+            Ok(false) => {
+                self.metrics.unchanged();
+                Ok(false)
+            }
+            Err(e) => {
+                self.metrics.failed(e.kind());
+                self.failure
+                    .send_replace(Some(format!("{}: {e}", self.upstream.url())));
+                Err(e)
+            }
+        }
+    }
+
+    /// One retrieval, before anything is counted: `true` replaced what is
+    /// served.
+    async fn published(&self) -> Result<bool, FetchError> {
         // The borrow guard must not survive into the await below.
-        let etag = self.callback.borrow().etag.clone();
+        let etag = self.callback.borrow().as_ref().and_then(|p| p.etag.clone());
         let Some(published) = self
             .upstream
             .retrieve(&self.allowed_origins, etag.as_deref())
@@ -476,531 +458,15 @@ impl Refresher {
         // already served, so nothing is published and nothing is logged.
         let served = {
             let current = self.callback.borrow();
-            current.etag == published.etag
-                && current.document.body == published.document.body
+            current.as_ref().is_some_and(|c| {
+                c.etag == published.etag && c.document.body == published.document.body
+            })
         };
         if served {
             return Ok(false);
         }
         // The document and its policy replace the old pair together.
-        self.callback.send_replace(Arc::new(published));
+        self.callback.send_replace(Some(Arc::new(published)));
         Ok(true)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::fixtures::{
-        Distribution,
-        Reply,
-    };
-
-    fn origin(spelling: &str) -> Origin {
-        Origin::parse("T", spelling).expect("an origin the tests dial")
-    }
-
-    /// A Distribution as a deployment retrieves from it.
-    fn upstream(distribution: &Distribution) -> Upstream {
-        Upstream::new(&origin(distribution.origin()))
-    }
-
-    /// An `https` origin that presents a certificate nothing trusts.
-    async fn untrusted_tls_origin() -> String {
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
-            .expect("a self-signed certificate");
-        let config = tokio_rustls::rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![cert.cert.der().clone()],
-                tokio_rustls::rustls::pki_types::PrivateKeyDer::Pkcs8(
-                    cert.key_pair.serialize_der().into(),
-                ),
-            )
-            .expect("a server configuration");
-        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move {
-            while let Ok((socket, _)) = listener.accept().await {
-                let acceptor = acceptor.clone();
-                tokio::spawn(async move {
-                    let _ = acceptor.accept(socket).await;
-                });
-            }
-        });
-        format!("https://localhost:{port}")
-    }
-
-    /// Retrieve, and answer with the refusal.
-    async fn refused(upstream: Upstream, unless: &str) -> FetchError {
-        match upstream.retrieve(&origins(), None).await {
-            Err(refusal) => refusal,
-            Ok(_) => panic!("{unless}"),
-        }
-    }
-
-    /// The origins a deployment admits.
-    fn origins() -> Vec<Origin> {
-        vec![origin("https://app.example")]
-    }
-
-    /// A deployment pointed at a fixture Distribution, started the way the
-    /// binary starts one.
-    async fn bridge(distribution: &Distribution) -> crate::Bridge {
-        crate::Bridge::start(&config(distribution.origin()))
-            .await
-            .unwrap()
-    }
-
-    /// A healthy Distribution, a deployment pointed at it, and what that
-    /// deployment published at startup.
-    async fn deployed() -> (Distribution, crate::Bridge, Arc<Published>) {
-        let distribution = Distribution::healthy().await;
-        let bridge = bridge(&distribution).await;
-        let before = bridge.state.callback.borrow().clone();
-        (distribution, bridge, before)
-    }
-
-    /// A deployment pointed at this test's own Distribution.
-    fn config(ccdp_origin: &str) -> crate::config::Config {
-        crate::config::Config::fixture(&["--ccdp-origin", ccdp_origin])
-    }
-
-    fn served(bridge: &crate::Bridge) -> String {
-        String::from_utf8(bridge.state.callback.borrow().document.body.to_vec()).unwrap()
-    }
-
-    /// A deployment serves the artifact its Distribution built.
-    #[tokio::test]
-    async fn a_retrieved_artifact_is_what_gets_served() {
-        let distribution = Distribution::healthy().await;
-        let bridge = bridge(&distribution).await;
-
-        let published = bridge.state.callback.borrow().clone();
-        assert_eq!(published.etag.as_deref(), Some("W/\"the-artifact\""));
-        // Composed: the deployment's data is in the document, the marker gone.
-        assert!(served(&bridge).contains("https://app.example"));
-        assert!(!served(&bridge).contains(scan::MARKER));
-        // And the policy names the hash of what is being served.
-        assert!(published
-            .document
-            .csp
-            .to_str()
-            .unwrap()
-            .contains("'sha256-"));
-    }
-
-    /// A deployment that cannot retrieve its artifact does not start, and the
-    /// error names the URL.
-    #[tokio::test]
-    async fn a_deployment_that_cannot_retrieve_does_not_start() {
-        let distribution = Distribution::serving(Reply {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            ..Reply::artifact()
-        })
-        .await;
-        let Err(refusal) = crate::Bridge::start(&config(distribution.origin())).await
-        else {
-            panic!("a deployment with no artifact must not build")
-        };
-        assert!(
-            matches!(refusal, crate::error::Error::ArtifactUnavailable { ref url, .. }
-                if url.ends_with(ARTIFACT_PATH)),
-            "{refusal}"
-        );
-        assert!(
-            format!("{refusal}").contains(distribution.origin()),
-            "{refusal}"
-        );
-    }
-
-    /// A Distribution that has nothing new says so, and nothing is republished.
-    #[tokio::test]
-    async fn an_unchanged_artifact_leaves_the_published_document_alone() {
-        // The Distribution answers the revalidation, so it lives to the end.
-        let (_distribution, bridge, before) = deployed().await;
-
-        let replaced = bridge.refresher.revalidate().await.unwrap();
-        assert!(!replaced, "a 304 replaces nothing");
-        // The same value, not an equal one: nothing was composed again.
-        assert!(Arc::ptr_eq(&before, &bridge.state.callback.borrow()));
-    }
-
-    /// A failed refresh retains the last valid result and its validator.
-    #[tokio::test]
-    async fn an_artifact_that_will_not_scan_retains_the_last_valid_one() {
-        let (distribution, bridge, before) = deployed().await;
-
-        distribution.now_serves(Reply {
-            etag: Some("W/\"the-replacement\""),
-            body: "<!doctype html><body><p>not an artifact".to_owned(),
-            ..Reply::artifact()
-        });
-        let refusal = bridge
-            .refresher
-            .revalidate()
-            .await
-            .expect_err("an artifact with no slot is not serveable");
-        assert!(matches!(refusal, FetchError::Artifact(_)), "{refusal}");
-
-        assert!(Arc::ptr_eq(&before, &bridge.state.callback.borrow()));
-        assert_eq!(
-            bridge.state.callback.borrow().etag.as_deref(),
-            Some("W/\"the-artifact\"")
-        );
-    }
-
-    /// The publish itself: a Distribution with something new produces a new
-    /// document, a new policy and a new validator, all at once.
-    #[tokio::test]
-    async fn a_new_artifact_replaces_the_published_one_whole() {
-        let (distribution, bridge, before) = deployed().await;
-        distribution.now_serves(Reply::replacement());
-
-        assert!(bridge.refresher.revalidate().await.unwrap());
-
-        let after = bridge.state.callback.borrow().clone();
-        assert!(!Arc::ptr_eq(&before, &after));
-        assert_eq!(after.etag.as_deref(), Some("W/\"the-replacement\""));
-        // One value replaced: the policy names the hashes of the document served.
-        assert_eq!(
-            after.document.csp, before.document.csp,
-            "the same bundle hashes the same, whatever validator carried it"
-        );
-        assert!(String::from_utf8(after.document.body.to_vec())
-            .unwrap()
-            .contains("https://app.example"));
-    }
-
-    /// A schedule fast enough to assert on, in real time.
-    const BRISK: Schedule = Schedule {
-        interval: Duration::from_millis(10),
-        floor: Duration::from_millis(10),
-    };
-
-    /// A refresh that fails, one that finds nothing new, and one that
-    /// replaces: the first two leave the served document as it is, and the
-    /// loop reaches the third.
-    #[tokio::test]
-    async fn the_loop_survives_a_failed_refresh_and_replaces_on_a_later_one() {
-        let (distribution, bridge, before) = deployed().await;
-        let crate::Bridge { state, refresher } = bridge;
-
-        // Answered in order, then the standing replacement.
-        distribution.answers_next(Reply {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            ..Reply::artifact()
-        });
-        distribution.answers_next(Reply::artifact());
-        distribution.now_serves(Reply::replacement());
-
-        let mut published = state.callback.clone();
-        let loop_task = tokio::spawn(refresher.run(BRISK));
-        // Resolves on the first send, so nothing before it published.
-        published.changed().await.expect("the loop publishes");
-        // Stopped, though nothing below depends on how promptly it stops.
-        loop_task.abort();
-
-        let after = published.borrow_and_update().clone();
-        assert!(!Arc::ptr_eq(&before, &after));
-        assert_eq!(after.etag.as_deref(), Some("W/\"the-replacement\""));
-        // Both queued answers were given before the replacement was reached.
-        assert_eq!(distribution.still_queued(), 0);
-        assert!(distribution.requests().len() >= 4);
-    }
-
-    /// A Distribution that sends no validator answers every refresh with the
-    /// document itself; the same bytes are not a replacement, so nothing is
-    /// published and the served value is the one startup published.
-    #[tokio::test]
-    async fn the_same_document_under_no_validator_is_not_republished() {
-        let distribution = Distribution::healthy().await;
-        distribution.now_serves(Reply {
-            etag: None,
-            ..Reply::artifact()
-        });
-        let bridge = bridge(&distribution).await;
-        let before = bridge.state.callback.borrow().clone();
-        assert_eq!(before.etag, None, "the Distribution sent no validator");
-
-        for _ in 0..3 {
-            assert!(
-                !bridge
-                    .refresher
-                    .revalidate()
-                    .await
-                    .expect("a refresh that reaches the Distribution"),
-                "the same document is not a replacement"
-            );
-        }
-        assert!(Arc::ptr_eq(&before, &bridge.state.callback.borrow()));
-
-        // A document that did change is published, validator or not.
-        distribution.now_serves(Reply {
-            etag: None,
-            // Outside the modules, so the hashes its policy names still hold.
-            body: crate::fixtures::ARTIFACT.replace("<title>libID", "<title>libID "),
-            ..Reply::artifact()
-        });
-        assert!(bridge
-            .refresher
-            .revalidate()
-            .await
-            .expect("a refresh that reaches the Distribution"));
-        assert!(!Arc::ptr_eq(&before, &bridge.state.callback.borrow()));
-    }
-
-    /// An artifact served without a hash-only `script-src` is refused: the
-    /// hashes of the code it carries are what the composed policy names, and
-    /// this bridge computes none of its own.
-    #[tokio::test]
-    async fn an_artifact_whose_policy_is_not_hash_only_is_refused() {
-        let distribution = Distribution::healthy().await;
-        let bridge = bridge(&distribution).await;
-
-        for policy in [
-            None,
-            Some("default-src 'none'".to_owned()),
-            Some("script-src 'unsafe-inline'".to_owned()),
-            Some("script-src https://cdn.example".to_owned()),
-        ] {
-            distribution.now_serves(Reply {
-                etag: Some("W/\"the-replacement\""),
-                policy,
-                ..Reply::artifact()
-            });
-            let refusal = bridge
-                .refresher
-                .revalidate()
-                .await
-                .expect_err("an artifact this bridge cannot write a policy for");
-            assert!(
-                matches!(
-                    refusal,
-                    FetchError::Artifact(scan::ArtifactError::UpstreamPolicy(_))
-                ),
-                "{refusal}"
-            );
-        }
-
-        // What the deployment published at startup is still what it serves.
-        assert_eq!(
-            bridge.state.callback.borrow().etag.as_deref(),
-            Some("W/\"the-artifact\"")
-        );
-    }
-
-    /// A `3xx` is refused, not followed.
-    #[tokio::test]
-    async fn a_redirect_is_refused_rather_than_followed() {
-        let distribution = Distribution::healthy().await;
-        let bridge = bridge(&distribution).await;
-        distribution.now_serves(Reply {
-            status: StatusCode::FOUND,
-            etag: None,
-            ..Reply::artifact()
-        });
-
-        let refusal = bridge
-            .refresher
-            .revalidate()
-            .await
-            .expect_err("a redirect is not an artifact");
-        assert!(
-            matches!(refusal, FetchError::Redirect(StatusCode::FOUND)),
-            "{refusal}"
-        );
-        // One request, so nothing was followed.
-        assert_eq!(distribution.requests().len(), 2);
-    }
-
-    /// A body over the bound is refused, with or without a `content-length`.
-    #[tokio::test]
-    async fn a_body_over_the_bound_is_refused() {
-        let oversize = "x".repeat(scan::MAX_ARTIFACT_BYTES + 1);
-        for chunked in [false, true] {
-            let distribution = Distribution::serving(Reply {
-                etag: None,
-                body: oversize.clone(),
-                chunked,
-                ..Reply::artifact()
-            })
-            .await;
-            let refusal = refused(
-                upstream(&distribution),
-                &format!("chunked={chunked}: an oversize body is refused"),
-            )
-            .await;
-            assert!(
-                matches!(refusal, FetchError::TooLarge),
-                "chunked={chunked}: {refusal}"
-            );
-        }
-    }
-
-    /// A response that is not `text/html` is refused before scanning.
-    #[tokio::test]
-    async fn an_answer_that_is_not_html_is_refused() {
-        for media in [
-            "application/json",
-            "text/plain",
-            "text/htmlx",
-            "text/html-fragment",
-            "",
-        ] {
-            let distribution = Distribution::serving(Reply {
-                media,
-                etag: None,
-                body: "{}".to_owned(),
-                ..Reply::artifact()
-            })
-            .await;
-            let refusal =
-                refused(upstream(&distribution), "this is not the artifact").await;
-            assert!(
-                matches!(refusal, FetchError::Media(_)),
-                "{media:?}: {refusal}"
-            );
-        }
-    }
-
-    /// Every spelling of `text/html` is admitted: the type is
-    /// case-insensitive, and parameters begin after optional whitespace and a
-    /// `;`.
-    #[test]
-    fn every_spelling_of_text_html_is_the_artifact() {
-        for media in [
-            "text/html",
-            "text/html; charset=utf-8",
-            "text/html;charset=utf-8",
-            "TEXT/HTML",
-            "Text/HTML; charset=UTF-8",
-            "  text/html",
-            "text/html ",
-        ] {
-            assert!(is_html(media), "{media:?} names the artifact");
-        }
-        for media in ["text/htmlx", "text/html-fragment", "application/json", ""] {
-            assert!(!is_html(media), "{media:?} does not name the artifact");
-        }
-    }
-
-    /// The request carries nothing a deployment did not configure.
-    #[tokio::test]
-    async fn the_request_carries_nothing_a_deployment_did_not_configure() {
-        let distribution = Distribution::healthy().await;
-        let bridge = bridge(&distribution).await;
-        bridge.refresher.revalidate().await.unwrap();
-
-        let requests = distribution.requests();
-        let [first, second] = &requests[..] else {
-            panic!("startup and one revalidation, got {}", requests.len())
-        };
-        for request in [first, second] {
-            for absent in [
-                header::COOKIE,
-                header::AUTHORIZATION,
-                header::REFERER,
-                header::ORIGIN,
-            ] {
-                assert!(request.get(&absent).is_none(), "{absent} was sent");
-            }
-            assert_eq!(
-                request.get(header::ACCEPT_ENCODING).unwrap(),
-                "identity",
-                "the artifact must arrive as the bytes that get hashed"
-            );
-        }
-        // The first retrieval is unconditional; the second carries the
-        // validator the first was published with.
-        assert!(first.get(header::IF_NONE_MATCH).is_none());
-        assert_eq!(
-            second.get(header::IF_NONE_MATCH).unwrap(),
-            "W/\"the-artifact\""
-        );
-    }
-
-    /// A Distribution outlives the runtime that started it: the shared one is
-    /// started by whichever test reaches it first, and that test's runtime is
-    /// dropped when the test returns.
-    #[test]
-    fn a_distribution_outlives_the_runtime_that_started_it() {
-        let runtime = || tokio::runtime::Runtime::new().unwrap();
-        let distribution = runtime().block_on(Distribution::healthy());
-        let published =
-            runtime().block_on(upstream(&distribution).retrieve(&origins(), None));
-        assert!(published.unwrap().is_some());
-    }
-    /// A peer presenting a certificate the compiled-in anchors do not carry is
-    /// refused, and the refusal names the certificate.
-    #[tokio::test]
-    async fn an_untrusted_certificate_is_refused_as_a_certificate() {
-        let untrusted = untrusted_tls_origin().await;
-        let refusal = refused(
-            Upstream::new(&origin(&untrusted)),
-            "an untrusted peer is not a Distribution",
-        )
-        .await;
-        let detail = format!("{refusal}");
-        assert!(
-            detail.contains("certificate") && detail.contains("UnknownIssuer"),
-            "the refusal must name the certificate, and this one says: {detail}"
-        );
-    }
-
-    /// An encoded body is refused: the request admitted `identity` alone.
-    #[tokio::test]
-    async fn a_body_that_arrives_encoded_is_refused() {
-        let distribution = Distribution::serving(Reply {
-            etag: None,
-            encoding: Some("br"),
-            ..Reply::artifact()
-        })
-        .await;
-        let refusal = refused(
-            upstream(&distribution),
-            "an encoded body is not the artifact this bridge would hash",
-        )
-        .await;
-        assert!(matches!(refusal, FetchError::Encoded(_)), "{refusal}");
-    }
-
-    /// A `304` to a request that carried no validator is refused, and a
-    /// deployment cannot start on it.
-    #[tokio::test]
-    async fn a_304_to_a_request_that_asked_nothing_is_refused() {
-        let distribution = Distribution::serving(Reply {
-            status: StatusCode::NOT_MODIFIED,
-            etag: None,
-            ..Reply::artifact()
-        })
-        .await;
-        let refusal = refused(
-            upstream(&distribution),
-            "an unasked 304 leaves nothing to serve",
-        )
-        .await;
-        assert!(
-            matches!(refusal, FetchError::UnaskedNotModified),
-            "{refusal}"
-        );
-        assert!(crate::Bridge::start(&config(distribution.origin()))
-            .await
-            .is_err());
-    }
-
-    /// `Host` carries the port only when it is not the scheme's default.
-    #[test]
-    fn the_host_header_omits_a_default_port() {
-        let authority = |spelling| Upstream::new(&origin(spelling)).authority;
-        assert_eq!(authority("https://lib.id"), "lib.id");
-        assert_eq!(authority("https://lib.id:443"), "lib.id");
-        assert_eq!(authority("https://lib.id:8443"), "lib.id:8443");
-        assert_eq!(authority("http://127.0.0.1:8787"), "127.0.0.1:8787");
-        // An IPv6 literal is bracketed in the header and bare for the socket.
-        let upstream = Upstream::new(&origin("https://[::1]:8787"));
-        assert_eq!(upstream.authority, "[::1]:8787");
-        assert_eq!(upstream.host, "::1");
     }
 }

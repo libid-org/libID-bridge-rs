@@ -19,6 +19,7 @@ use libid_server_rs::{
     },
     routes,
     state::AppState,
+    Bridge,
 };
 use tower::ServiceExt;
 
@@ -38,7 +39,7 @@ async fn deployment(overrides: &[&str]) -> Arc<AppState> {
         "https://app.example,https://wallet.example",
     ];
     args.extend_from_slice(overrides);
-    AppState::fixture_serving(&args).await
+    AppState::fixture(&args).await
 }
 
 /// The default deployment: GitHub enabled.
@@ -643,14 +644,15 @@ async fn the_bridge_serves_no_ccdp_document_and_no_alias() {
 /// and says of the callback that it has no document and why.
 #[tokio::test]
 async fn a_deployment_without_its_distribution_serves_everything_else() {
-    let unreachable = Distribution::unreachable().await;
-    let state = AppState::fixture(&["--ccdp-origin", &unreachable]);
-
-    // The retrieval the refresh would perform, once, which records why it
+    let unreachable = fixtures::unreachable_origin().await;
+    let bridge = Bridge::fixture(&["--ccdp-origin", &unreachable]);
+    // The retrieval the refresher would perform, once, which records why it
     // produced nothing.
-    fixtures::retrieve_once(&state)
+    bridge
+        .retrieve_once()
         .await
         .expect_err("an unreachable Distribution answers nothing");
+    let state = bridge.state;
 
     for (path, expected) in [
         ("/health", StatusCode::OK),
@@ -695,19 +697,22 @@ async fn a_deployment_without_its_distribution_serves_everything_else() {
 #[tokio::test]
 async fn a_document_survives_a_distribution_that_stops_answering() {
     let distribution = Distribution::serving(fixtures::Reply::artifact()).await;
-    let state = AppState::fixture(&["--ccdp-origin", distribution.origin()]);
+    let bridge = Bridge::fixture(&["--ccdp-origin", distribution.origin()]);
 
-    assert!(fixtures::retrieve_once(&state).await.unwrap());
-    let served = callback_body(state.clone()).await;
+    assert!(bridge.retrieve_once().await.unwrap());
+    let served = callback_body(bridge.state.clone()).await;
     assert!(served.contains("<script"), "the document is served");
 
-    distribution
-        .now_serves(fixtures::Reply::artifact().with_status(StatusCode::BAD_GATEWAY));
-    fixtures::retrieve_once(&state)
+    distribution.now_serves(fixtures::Reply {
+        status: StatusCode::BAD_GATEWAY,
+        ..fixtures::Reply::artifact()
+    });
+    bridge
+        .retrieve_once()
         .await
         .expect_err("a 502 produces no document");
     assert_eq!(
-        callback_body(state.clone()).await,
+        callback_body(bridge.state.clone()).await,
         served,
         "the document already served stays"
     );
@@ -774,12 +779,15 @@ async fn a_distribution_policy_this_bridge_would_not_serve_under_is_refused() {
         "default-src 'none'; script-src 'nonce-abc'",
         "default-src 'none'",
     ] {
-        let distribution =
-            Distribution::serving(fixtures::Reply::artifact().with_policy(policy)).await;
-        let state = AppState::fixture(&["--ccdp-origin", distribution.origin()]);
-        fixtures::retrieve_once(&state).await.expect_err(policy);
+        let distribution = Distribution::serving(fixtures::Reply {
+            policy: Some(policy.to_owned()),
+            ..fixtures::Reply::artifact()
+        })
+        .await;
+        let bridge = Bridge::fixture(&["--ccdp-origin", distribution.origin()]);
+        bridge.retrieve_once().await.expect_err(policy);
 
-        let resp = app(state)
+        let resp = app(bridge.state)
             .oneshot(
                 Request::get(routes::CALLBACK_PATH)
                     .body(Body::empty())

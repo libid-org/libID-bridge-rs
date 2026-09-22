@@ -17,6 +17,9 @@ use policy::ArtifactError;
 
 use crate::origin::Origin;
 
+#[cfg(test)]
+pub(crate) use crate::fixtures::ARTIFACT as FIXTURE;
+
 /// What the deployment contributes to the document and its policy.
 pub(crate) struct DeploymentInputs<'a> {
     /// The CCDP Distribution this bridge selects: in the inserted list, and
@@ -56,7 +59,10 @@ impl CallbackDocument {
             return Err(ArtifactError::Markers(markers));
         }
 
-        // One unversioned list: `[allowedOrigins, ccdpOrigin]`.
+        // One unversioned list: `[allowedOrigins, ccdpOrigin]`, written in
+        // place of the marker. The encoder emits no `<`, `>` or `&`, so the
+        // inserted bytes can neither end the element that holds them nor open
+        // one of their own.
         let record = serde_json::json!([inputs.allowed_origins, inputs.ccdp_origin]);
         let body = html.replace(policy::MARKER, &json(&record));
 
@@ -82,19 +88,6 @@ pub(crate) struct Published {
     pub(crate) document: CallbackDocument,
     /// The `ETag` the document arrived with, sent back as `If-None-Match`.
     pub(crate) etag: Option<String>,
-}
-
-impl Published {
-    /// One log line naming the document: its URL, validator and policy.
-    pub(crate) fn log(&self, url: &str, event: &str) {
-        tracing::info!(
-            url,
-            etag = self.etag.as_deref().unwrap_or("<none>"),
-            bytes = self.document.body.len(),
-            policy = self.document.csp.to_str().unwrap_or("<unreadable>"),
-            "{event}"
-        );
-    }
 }
 
 /// The response policy: this deployment's own sources, and the script hashes
@@ -157,28 +150,26 @@ mod tests {
         ]
     }
 
-    fn composed(html: &str) -> CallbackDocument {
+    fn compose(html: &str) -> Result<CallbackDocument, ArtifactError> {
         CallbackDocument::compose(
             html,
-            &[crate::fixtures::artifact_hash()],
+            &crate::fixtures::artifact_hashes(),
             &DeploymentInputs {
                 ccdp_origin: &origin("https://ccdp.example"),
                 allowed_origins: &origins(),
             },
         )
-        .expect("composes")
     }
 
     fn text(doc: &CallbackDocument) -> String {
         String::from_utf8(doc.body.to_vec()).unwrap()
     }
 
-    /// The artifact a live Distribution serves composes, and the marker is
-    /// gone from what is served.
+    /// The artifact a live Distribution serves composes, and what is served
+    /// carries the deployment's data where the marker was.
     #[test]
     fn the_artifact_of_a_live_distribution_composes() {
-        let doc = composed(crate::fixtures::ARTIFACT);
-        let served = text(&doc);
+        let served = text(&compose(FIXTURE).unwrap());
         assert!(!served.contains(policy::MARKER));
         assert!(served.contains(
             r#"[["https://app.example","https://ccdp.example"],"https://ccdp.example"]"#
@@ -186,17 +177,16 @@ mod tests {
     }
 
     /// Only the marker changes: every other byte of the artifact is served as
-    /// it arrived.
+    /// it arrived, so no byte a declared hash covers moves.
     #[test]
     fn substitution_touches_only_the_marker() {
-        let artifact = crate::fixtures::ARTIFACT;
-        let served = text(&composed(artifact));
-        let at = artifact.find(policy::MARKER).unwrap();
-        assert_eq!(&served[..at], &artifact[..at]);
+        let served = text(&compose(FIXTURE).unwrap());
+        let at = FIXTURE.find(policy::MARKER).unwrap();
+        assert_eq!(&served[..at], &FIXTURE[..at]);
         let after = at + policy::MARKER.len();
         assert_eq!(
-            &served[served.len() - (artifact.len() - after)..],
-            &artifact[after..]
+            &served[served.len() - (FIXTURE.len() - after)..],
+            &FIXTURE[after..]
         );
     }
 
@@ -211,17 +201,10 @@ mod tests {
                 2,
             ),
         ] {
-            let err = CallbackDocument::compose(
-                html,
-                &[crate::fixtures::artifact_hash()],
-                &DeploymentInputs {
-                    ccdp_origin: &origin("https://ccdp.example"),
-                    allowed_origins: &origins(),
-                },
-            )
-            .map(|_| ())
-            .unwrap_err();
-            assert_eq!(err, ArtifactError::Markers(count));
+            assert_eq!(
+                compose(html).map(|_| ()).unwrap_err(),
+                ArtifactError::Markers(count)
+            );
         }
     }
 
@@ -229,13 +212,19 @@ mod tests {
     /// only from the configured Distribution, and admits no connection.
     #[test]
     fn the_policy_carries_the_hashes_and_this_deployments_sources() {
-        let doc = composed(crate::fixtures::ARTIFACT);
+        let doc = compose(FIXTURE).unwrap();
         let csp = doc.csp.to_str().unwrap();
-        assert!(csp.starts_with("default-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"));
-        assert!(csp.contains(&format!("script-src {}", crate::fixtures::artifact_hash())));
+        assert!(csp.starts_with(
+            "default-src 'none'; object-src 'none'; base-uri 'none'; \
+             form-action 'none'; frame-ancestors 'none'"
+        ));
+        for source in crate::fixtures::artifact_hashes() {
+            assert!(csp.contains(&source), "{csp}");
+        }
         assert!(csp.contains("frame-src https://ccdp.example"));
         assert!(csp.contains("connect-src 'none'"));
         assert!(!csp.contains("'unsafe-eval'"));
+        assert!(!csp.contains("'unsafe-inline'; script"), "{csp}");
     }
 
     /// Inserted data leaves as ASCII with no character a parser reads as

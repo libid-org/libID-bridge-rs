@@ -1,5 +1,9 @@
-//! The enabled platforms, checked once at startup, and the public ceremony
-//! configuration projected from them.
+//! What a deployment is, checked once at startup: the Distribution it
+//! selects, the origins it admits, the platforms it enables, and the public
+//! ceremony configuration projected from them. Nothing here is retrieved or
+//! bound.
+
+use std::sync::Arc;
 
 use bytes::Bytes;
 use serde::Deserialize;
@@ -9,20 +13,71 @@ use serde_json::{
     Value,
 };
 
-use crate::error::{
-    Error,
-    Result,
+use crate::{
+    config::Config,
+    error::{
+        Error,
+        Result,
+    },
+    origin::Origin,
 };
+
+/// The checked inputs of one deployment.
+pub(crate) struct Deployment {
+    /// The CCDP Distribution this deployment selects.
+    pub(crate) ccdp_origin: Origin,
+    /// The effective admission set `allowedAppOrigins ∪ {ccdpOrigin}`: the one
+    /// rule the configuration route applies, and what the callback document
+    /// is told.
+    pub(crate) allowed_origins: Arc<[Origin]>,
+    /// The enabled platforms.
+    pub(crate) platforms: Vec<PlatformProfile>,
+}
+
+impl Deployment {
+    /// Every rule a deployment must satisfy before it serves a request,
+    /// applied to the resolved configuration; the first rule broken is the
+    /// error.
+    pub(crate) fn checked(cfg: &Config) -> Result<Deployment> {
+        let ccdp_origin = ccdp_origin(&cfg.ccdp_origin)?;
+        // The resolved CCDP origin joins the admitted set once; an overridden
+        // `CCDP_ORIGIN` does not keep `https://lib.id` admitted unless it is
+        // listed.
+        let allowed_origins: Arc<[Origin]> = {
+            let mut set = allowed_app_origins(&cfg.allowed_app_origins)?;
+            if !set.contains(&ccdp_origin) {
+                set.push(ccdp_origin.clone());
+            }
+            set.into()
+        };
+        let platforms = platforms(cfg.platforms.clone())?;
+        Ok(Deployment {
+            ccdp_origin,
+            allowed_origins,
+            platforms,
+        })
+    }
+
+    /// The public ceremony configuration, as the bytes every admitted caller
+    /// receives.
+    pub(crate) fn ceremony_config(&self) -> Bytes {
+        CeremonyConfig {
+            ccdp_origin: &self.ccdp_origin,
+            platforms: &self.platforms,
+        }
+        .serialized()
+    }
+}
 
 /// The platforms a ceremony can run against. A name outside this catalog is
 /// refused while parsing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlatformId {
-    /// Google.
+    /// Keyed `google`.
     Google,
-    /// X.
+    /// Keyed `x`.
     X,
-    /// GitHub.
+    /// Keyed `github`.
     Github,
 }
 
@@ -42,23 +97,22 @@ impl PlatformId {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "id", rename_all = "lowercase", deny_unknown_fields)]
 pub enum PlatformProfile {
-    /// Google: the public client id and the ceremony versions advertised.
+    /// A public client.
     Google {
         /// The public OAuth client identifier.
         client_id: String,
         /// Platform ceremony versions, nonempty and duplicate-free.
         versions: Vec<u16>,
     },
-    /// X: the public client id and the ceremony versions advertised.
+    /// A public client.
     X {
         /// The public OAuth client identifier.
         client_id: String,
         /// Platform ceremony versions, nonempty and duplicate-free.
         versions: Vec<u16>,
     },
-    /// GitHub: the public client id, the ceremony versions advertised, and
-    /// the public credential the browser's token request sends as
-    /// `client_secret`.
+    /// A confidential client whose credential is public: the browser's
+    /// token request sends it as `client_secret`.
     Github {
         /// The public OAuth client identifier.
         client_id: String,
@@ -161,6 +215,58 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>>
         }
     }
     Ok(profiles)
+}
+
+/// The CCDP Distribution this deployment selects, in canonical form. An IPv6
+/// literal is refused: the callback document's policy names this origin as a
+/// `frame-src` source, and a Content-Security-Policy source expression has no
+/// form for one, so a browser discards the source and the document frames
+/// nothing.
+fn ccdp_origin(spelling: &str) -> Result<Origin> {
+    let origin = Origin::parse("CCDP_ORIGIN", spelling)?;
+    if origin.is_ipv6_literal() {
+        return Err(Error::Config {
+            detail: format!(
+                "CCDP_ORIGIN {spelling} names an IPv6 literal, which the \
+                 callback document's Content-Security-Policy cannot carry as a \
+                 source; name the Distribution by host"
+            ),
+        });
+    }
+    Ok(origin)
+}
+
+/// The application origins admitted to read the configuration, each as
+/// written: one that is not already canonical is refused, not folded. The
+/// surrounding whitespace of a comma-separated spelling is not part of a
+/// member and is dropped before the member is read.
+fn allowed_app_origins(list: &[String]) -> Result<Vec<Origin>> {
+    let mut out = Vec::new();
+    // The index is the member's own, so a refusal names the entry the
+    // operator wrote even where a blank one precedes it.
+    for (i, spelling) in list.iter().enumerate() {
+        let spelling = spelling.trim();
+        if spelling.is_empty() {
+            continue;
+        }
+        let field = format!("ALLOWED_APP_ORIGINS[{i}]");
+        let origin = Origin::listed(&field, spelling)?;
+        // A duplicate is refused, not folded.
+        if out.contains(&origin) {
+            return Err(Error::Config {
+                detail: format!("ALLOWED_APP_ORIGINS names {origin} more than once"),
+            });
+        }
+        out.push(origin);
+    }
+    if out.is_empty() {
+        return Err(Error::Config {
+            detail: "ALLOWED_APP_ORIGINS is empty, so no application could \
+                     read the ceremony configuration"
+                .into(),
+        });
+    }
+    Ok(out)
 }
 
 /// The public ceremony configuration: what one deployment publishes.

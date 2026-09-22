@@ -7,7 +7,7 @@
 //! deployment counts.
 //!
 //! The callback document is the CCDP Distribution's artifact with this
-//! deployment's data in place of its one marker; everything the browser runs
+//! deployment's data inserted into its one slot; everything the browser runs
 //! after the callback is served by that Distribution. This service performs
 //! no token exchange, opens no notary connection, verifies no proof, holds no
 //! secret and no key of its own, keeps no ceremony state, and talks to no
@@ -33,122 +33,66 @@ pub mod state;
 
 use std::sync::Arc;
 
-use error::{
-    Error,
-    Result,
-};
-use origin::Origin;
+use error::Result;
 use state::AppState;
 
-/// Build the shared [`AppState`] from the configuration. Everything that must
-/// be well-formed for a request to succeed is checked here, at startup, and a
-/// configuration this deployment could not serve a ceremony with returns
-/// `Err`.
-///
-/// No network request is made. The callback artifact is retrieved by the
-/// refresh that [`serve`] starts, so a Distribution that is unreachable
-/// delays the callback document and stops nothing.
-pub fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
-    let ccdp_origin = ccdp_origin(&cfg.ccdp_origin)?;
-    // The effective set `allowedAppOrigins ∪ {ccdpOrigin}`: the one admission
-    // rule of the configuration route, and what the callback document is
-    // told. The resolved CCDP origin joins once; an overridden `CCDP_ORIGIN`
-    // does not keep `https://lib.id` admitted unless it is listed.
-    let allowed_origins: Arc<[Origin]> = {
-        let mut set = allowed_app_origins(&cfg.allowed_app_origins)?;
-        if !set.contains(&ccdp_origin) {
-            set.push(ccdp_origin.clone());
-        }
-        set.into()
-    };
-    let platforms = deployment::platforms(cfg.platforms.clone())?;
-    let (callback, _) = tokio::sync::watch::channel(None);
-    let (failure, _) = tokio::sync::watch::channel(None);
-
-    Ok(Arc::new(AppState {
-        ceremony_config: deployment::CeremonyConfig {
-            ccdp_origin: &ccdp_origin,
-            platforms: &platforms,
-        }
-        .serialized(),
-        callback,
-        upstream: artifact::upstream::Upstream::new(&ccdp_origin),
-        allowed_origins,
-        failure,
-        metrics: metrics::Metrics::new(),
-    }))
+/// A deployment that has started: the state its routes read, and the
+/// refresher that keeps the callback document current.
+pub struct Bridge {
+    /// What the routes read.
+    pub state: Arc<AppState>,
+    /// What keeps the callback document current.
+    pub(crate) refresher: artifact::upstream::Refresher,
 }
 
-/// Serve `state` on `listener` until `shutdown` resolves; in-flight requests
-/// finish first. The callback artifact is retrieved and revalidated for as
-/// long as this runs.
+impl Bridge {
+    /// Check the deployment and build what the routes read. Everything that
+    /// must be well-formed for a request to succeed is checked here, at
+    /// startup; the error is the first thing that was not.
+    ///
+    /// No network request is made. The callback artifact is retrieved by the
+    /// refresher, so a Distribution that is unreachable delays the callback
+    /// document and stops nothing.
+    pub fn start(cfg: &config::Config) -> Result<Bridge> {
+        let deployment = deployment::Deployment::checked(cfg)?;
+        let upstream = artifact::upstream::Upstream::new(&deployment.ccdp_origin);
+        let (sender, callback) = tokio::sync::watch::channel(None);
+        let (failed, failure) = tokio::sync::watch::channel(None);
+        let metrics = Arc::new(metrics::Metrics::new());
+        let state = Arc::new(AppState {
+            callback,
+            allowed_origins: deployment.allowed_origins.clone(),
+            ceremony_config: deployment.ceremony_config(),
+            failure,
+            metrics: metrics.clone(),
+        });
+        let refresher = artifact::upstream::Refresher::new(
+            upstream,
+            deployment.allowed_origins,
+            sender,
+            failed,
+            metrics,
+        );
+        Ok(Bridge { state, refresher })
+    }
+}
+
+/// Serve `bridge` on `listener` until `shutdown` resolves; in-flight requests
+/// finish first. The callback artifact is revalidated for as long as this
+/// runs.
 pub async fn serve(
-    state: Arc<AppState>,
+    bridge: Bridge,
     listener: tokio::net::TcpListener,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    let app = routes::build_router(state.clone());
-    let refreshing = tokio::spawn(artifact::upstream::refresh(
-        state,
-        artifact::upstream::Schedule::DEPLOYED,
-    ));
+    let app = routes::build_router(bridge.state);
+    let refreshing =
+        tokio::spawn(bridge.refresher.run(artifact::upstream::Schedule::DEPLOYED));
     let served = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await;
     refreshing.abort();
     served
-}
-
-/// The CCDP Distribution this deployment selects, in canonical form. An IPv6
-/// literal is refused: the callback document's policy names this origin as a
-/// `frame-src` source, and a Content-Security-Policy source expression has no
-/// form for one, so a browser discards the source and the document frames
-/// nothing.
-fn ccdp_origin(spelling: &str) -> Result<Origin> {
-    let origin = Origin::parse("CCDP_ORIGIN", spelling)?;
-    if origin.is_ipv6_literal() {
-        return Err(Error::Config {
-            detail: format!(
-                "CCDP_ORIGIN {spelling} names an IPv6 literal, which the \
-                 callback document's Content-Security-Policy cannot carry as a \
-                 source; name the Distribution by host"
-            ),
-        });
-    }
-    Ok(origin)
-}
-
-/// The application origins admitted to read the configuration, each as
-/// written: one that is not already canonical is refused, not folded. The
-/// surrounding whitespace of a comma-separated spelling is not part of a
-/// member and is dropped before the member is read.
-fn allowed_app_origins(list: &[String]) -> Result<Vec<Origin>> {
-    let mut out = Vec::new();
-    // The index is the member's own, so a refusal names the entry the
-    // operator wrote even where a blank one precedes it.
-    for (i, spelling) in list.iter().enumerate() {
-        let spelling = spelling.trim();
-        if spelling.is_empty() {
-            continue;
-        }
-        let field = format!("ALLOWED_APP_ORIGINS[{i}]");
-        let origin = Origin::listed(&field, spelling)?;
-        // A duplicate is refused, not folded.
-        if out.contains(&origin) {
-            return Err(Error::Config {
-                detail: format!("ALLOWED_APP_ORIGINS names {origin} more than once"),
-            });
-        }
-        out.push(origin);
-    }
-    if out.is_empty() {
-        return Err(Error::Config {
-            detail: "ALLOWED_APP_ORIGINS is empty, so no application could \
-                     read the ceremony configuration"
-                .into(),
-        });
-    }
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -162,11 +106,17 @@ mod tests {
         *,
     };
 
+    /// The state of a deployment started on the fixture configuration with
+    /// `args`.
+    async fn started(args: &[&str]) -> Arc<AppState> {
+        Bridge::start(&Config::fixture(args)).unwrap().state
+    }
+
     /// An omitted CCDP origin selects the canonical libID Distribution: the
     /// declared default is `https://lib.id`, and the configured value reaches
     /// the published record.
-    #[test]
-    fn an_omitted_ccdp_origin_selects_the_canonical_distribution() {
+    #[tokio::test]
+    async fn an_omitted_ccdp_origin_selects_the_canonical_distribution() {
         let command = <config::Config as clap::CommandFactory>::command();
         let arg = command
             .get_arguments()
@@ -174,7 +124,7 @@ mod tests {
             .expect("the ccdp origin is an argument");
         assert_eq!(arg.get_default_values(), ["https://lib.id"]);
 
-        let state = build_state(&Config::fixture(&[])).unwrap();
+        let state = started(&[]).await;
         let record: serde_json::Value =
             serde_json::from_slice(&state.ceremony_config).unwrap();
         assert_eq!(record["ccdpOrigin"], Distribution::shared().origin());
@@ -182,10 +132,10 @@ mod tests {
 
     /// The effective set is `allowedAppOrigins ∪ {ccdpOrigin}`: the resolved
     /// origin joins once, and an origin already listed is not added twice.
-    #[test]
-    fn the_effective_admission_set_is_the_allowlist_plus_the_ccdp_origin() {
-        fn origins(args: &[&str]) -> Vec<String> {
-            let state = build_state(&Config::fixture(args)).unwrap();
+    #[tokio::test]
+    async fn the_effective_admission_set_is_the_allowlist_plus_the_ccdp_origin() {
+        async fn origins(args: &[&str]) -> Vec<String> {
+            let state = started(args).await;
             state
                 .allowed_origins
                 .iter()
@@ -194,22 +144,22 @@ mod tests {
         }
         let ccdp = Distribution::shared().origin().to_owned();
 
-        let joined = origins(&[]);
+        let joined = origins(&[]).await;
         assert_eq!(joined, ["https://app.example".to_owned(), ccdp.clone()]);
         assert!(!joined.iter().any(|o| o == "https://lib.id"));
 
         let listed = format!("https://app.example,{ccdp}");
         assert_eq!(
-            origins(&["--allowed-app-origins", &listed]),
+            origins(&["--allowed-app-origins", &listed]).await,
             ["https://app.example".to_owned(), ccdp]
         );
     }
 
     /// A refusal names the member the operator wrote, by its own index in
     /// the list, whatever blanks the list carries.
-    #[test]
-    fn a_refused_application_origin_carries_its_own_index() {
-        let err = build_state(&Config::fixture(&[
+    #[tokio::test]
+    async fn a_refused_application_origin_carries_its_own_index() {
+        let err = Bridge::start(&Config::fixture(&[
             "--allowed-app-origins",
             ",https://app.example,https://APP.example",
         ]))
@@ -220,8 +170,8 @@ mod tests {
     }
 
     /// Each of these is refused at startup.
-    #[test]
-    fn a_deployment_that_could_not_serve_a_ceremony_stops_the_process() {
+    #[tokio::test]
+    async fn a_deployment_that_could_not_serve_a_ceremony_stops_the_process() {
         for (why, args) in [
             ("no admitted origin", vec!["--allowed-app-origins", ""]),
             (
@@ -269,7 +219,7 @@ mod tests {
             ),
         ] {
             assert!(
-                build_state(&Config::fixture(&args)).is_err(),
+                Bridge::start(&Config::fixture(&args)).is_err(),
                 "{why} must stop the process"
             );
         }
@@ -278,13 +228,13 @@ mod tests {
     /// The published record keys every enabled platform by name and carries
     /// its client id and versions; the github entry carries its public
     /// client credential, and no other entry carries one.
-    #[test]
-    fn the_published_configuration_keys_every_enabled_platform_by_name() {
-        let state = build_state(&Config::fixture(&[
+    #[tokio::test]
+    async fn the_published_configuration_keys_every_enabled_platform_by_name() {
+        let state = started(&[
             "--platforms",
             r#"[{"id":"google","client_id":"g","versions":[1,2]},{"id":"x","client_id":"xc","versions":[3]},{"id":"github","client_id":"gh","versions":[1],"client_credential":"c0ffee"}]"#,
-        ]))
-        .unwrap();
+        ])
+        .await;
         let record: serde_json::Value =
             serde_json::from_slice(&state.ceremony_config).unwrap();
         let platforms = record["platforms"].as_object().unwrap();
@@ -302,9 +252,9 @@ mod tests {
     }
 
     /// The fixture deployment publishes the fixture credential.
-    #[test]
-    fn the_fixture_deployment_publishes_its_credential() {
-        let state = build_state(&Config::fixture(&[])).unwrap();
+    #[tokio::test]
+    async fn the_fixture_deployment_publishes_its_credential() {
+        let state = started(&[]).await;
         let record: serde_json::Value =
             serde_json::from_slice(&state.ceremony_config).unwrap();
         assert_eq!(
@@ -314,9 +264,9 @@ mod tests {
     }
 
     /// `build_router` mounts every path.
-    #[test]
-    fn building_the_router_for_a_configured_deployment_does_not_panic() {
-        let state = build_state(&Config::fixture(&[])).unwrap();
+    #[tokio::test]
+    async fn building_the_router_for_a_configured_deployment_does_not_panic() {
+        let state = started(&[]).await;
         let _: axum::Router = routes::build_router(state);
     }
 
@@ -328,11 +278,11 @@ mod tests {
             AsyncWriteExt,
         };
 
-        let state = build_state(&Config::fixture(&[])).unwrap();
+        let bridge = Bridge::start(&Config::fixture(&[])).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let server = tokio::spawn(serve(state, listener, async {
+        let server = tokio::spawn(serve(bridge, listener, async {
             let _ = stopped.await;
         }));
 

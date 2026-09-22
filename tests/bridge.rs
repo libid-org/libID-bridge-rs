@@ -132,6 +132,11 @@ mod root {
                 vec!["--ccdp-origin", "https://[::1]:8787"],
             ),
             (
+                "a CCDP origin whose host carries an underscore, which a \
+                 policy source expression has no form for",
+                vec!["--ccdp-origin", "https://dev_box.example"],
+            ),
+            (
                 "an admitted origin whose host carries a CSP keyword quote",
                 vec!["--allowed-app-origins", "https://a'b.example"],
             ),

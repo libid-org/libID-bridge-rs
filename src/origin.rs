@@ -82,10 +82,24 @@ impl Origin {
         Ok(origin)
     }
 
-    /// Whether the host is an IPv6 literal. A canonical origin brackets one
-    /// and carries a bracket nowhere else.
-    pub fn is_ipv6_literal(&self) -> bool {
-        self.0.contains('[')
+    /// Whether a Content-Security-Policy source expression can name this
+    /// origin's host. Its grammar admits letters, digits, `-` and the `.`
+    /// between labels, so an IPv6 literal and an underscore are both outside
+    /// it, and a browser discards a source it cannot parse.
+    pub fn names_a_policy_host(&self) -> bool {
+        let after_scheme = self
+            .0
+            .split_once("://")
+            .map(|(_, rest)| rest)
+            .unwrap_or(&self.0);
+        let host = after_scheme
+            .split_once(':')
+            .map(|(host, _)| host)
+            .unwrap_or(after_scheme);
+        !host.is_empty()
+            && host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
     }
 
     /// The canonical spelling.

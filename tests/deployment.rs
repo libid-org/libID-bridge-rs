@@ -143,6 +143,34 @@ mod deployment {
 mod origin {
     use libid_server_rs::origin::*;
 
+    /// What a policy source expression can name: letters, digits, `-` and
+    /// the `.` between labels, and nothing else.
+    #[test]
+    fn a_host_a_policy_cannot_name_is_known_for_one() {
+        for named in [
+            "https://lib.id",
+            "https://a-b.example:8443",
+            "http://localhost:3000",
+        ] {
+            assert!(
+                Origin::parse("T", named).unwrap().names_a_policy_host(),
+                "{named}"
+            );
+        }
+        for unnamed in [
+            "https://dev_box.example",
+            "https://[::1]:8787",
+            "http://127.0.0.1:8787",
+        ] {
+            let origin = Origin::parse("T", unnamed).unwrap();
+            assert_eq!(
+                origin.names_a_policy_host(),
+                !unnamed.contains('_') && !unnamed.contains('['),
+                "{unnamed}"
+            );
+        }
+    }
+
     /// `parse` folds; `listed` refuses what is not already canonical and names
     /// the spelling to write.
     #[test]

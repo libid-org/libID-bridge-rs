@@ -1,16 +1,27 @@
-//! What the tests build a deployment from: a Distribution on loopback serving
-//! the fixture artifact, and a configuration naming it. Compiled for the
-//! crate's own tests and, under the `fixtures` feature, for the integration
-//! tests.
+//! What the tests build a deployment from: the artifact a live Distribution
+//! serves, and a server on loopback that answers with it.
+//!
+//! [`ARTIFACT`] is `tests/fixtures/callback.html`, the libID testnet
+//! Distribution's artifact saved byte for byte, and [`ARTIFACT_POLICY`] is the
+//! `Content-Security-Policy` that response carried. Both were taken on
+//! 2026-09-22 with:
+//!
+//! ```text
+//! curl -sD - https://testnet.ccdp.lib.id/ccdp/callback.html \
+//!     -o tests/fixtures/callback.html
+//! ```
+//!
+//! They belong together: the policy names the hash of the module the file
+//! carries, so a refresh replaces both or neither.
+//!
+//! Compiled for the crate's own tests and, under the `fixtures` feature, for
+//! the integration tests.
 
-use std::{
-    collections::VecDeque,
-    sync::{
-        Arc,
-        LazyLock,
-        Mutex,
-        OnceLock,
-    },
+use std::sync::{
+    Arc,
+    LazyLock,
+    Mutex,
+    OnceLock,
 };
 
 use axum::{
@@ -31,12 +42,21 @@ use crate::{
     state::AppState,
 };
 
-/// The fixture artifact: one configuration slot, one executable module, one
-/// mount point.
+/// The artifact of a live Distribution.
 pub const ARTIFACT: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/callback.html"
 ));
+
+/// The policy that artifact was served under.
+pub const ARTIFACT_POLICY: &str = "default-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; script-src 'sha256-LaBqitbp5EWwcs7p4ANPVImzGYSfuMs/n1gfR6aHsPI='; style-src 'unsafe-inline'";
+
+/// The one script hash [`ARTIFACT_POLICY`] names.
+pub fn artifact_hash() -> String {
+    crate::artifact::policy::script_hashes(ARTIFACT_POLICY)
+        .expect("the saved policy names hashes")
+        .remove(0)
+}
 
 /// The runtime shared fixtures are served on. `#[tokio::test]` drops each
 /// test's runtime, and every task on it, when the test returns; this one is
@@ -51,192 +71,150 @@ pub fn runtime() -> &'static tokio::runtime::Runtime {
     &RUNTIME
 }
 
-/// The script hashes the fixture artifact is served with: what a Distribution
-/// computes over the code it ships, and what the bridge carries into the
-/// policy it composes.
-pub fn artifact_hashes() -> Vec<String> {
-    use base64::Engine as _;
-    use sha2::Digest as _;
-
-    const OPEN: &str = "<script type=\"module\">";
-    let start = ARTIFACT.find(OPEN).expect("the fixture carries one module") + OPEN.len();
-    let end = start + ARTIFACT[start..].find("</script>").expect("it closes");
-    let digest = sha2::Sha256::digest(&ARTIFACT.as_bytes()[start..end]);
-    vec![format!(
-        "'sha256-{}'",
-        base64::engine::general_purpose::STANDARD.encode(digest)
-    )]
-}
-
-/// The `Content-Security-Policy` a Distribution serves the fixture artifact
-/// under: hash-only, as the artifact contract requires.
-pub fn artifact_policy() -> String {
-    format!(
-        "default-src 'none'; script-src {}; style-src 'unsafe-inline'",
-        artifact_hashes().join(" ")
-    )
-}
-
-/// What the fixture Distribution answers with next.
+/// One answer a fixture Distribution gives.
 #[derive(Clone)]
 pub struct Reply {
-    /// The status line.
+    /// The status it answers with.
     pub status: StatusCode,
-    /// The `Content-Type`.
+    /// Its `Content-Type`.
     pub media: &'static str,
-    /// The `ETag`, when it sends one.
+    /// Its `ETag`, when it sends one.
     pub etag: Option<&'static str>,
-    /// The body.
+    /// Its body.
     pub body: String,
-    /// A `Content-Encoding` to claim, for a Distribution that ignores what
-    /// the request admitted.
+    /// Its `Content-Encoding`, when it declares one.
     pub encoding: Option<&'static str>,
-    /// Send the body with no `content-length`, as a chunked answer does.
-    pub chunked: bool,
-    /// The `Content-Security-Policy` it is served under, which names the
-    /// hashes of the code it carries. `None` sends none.
+    /// Its `Content-Security-Policy`, when it sends one.
     pub policy: Option<String>,
+    /// Its `Location`, when it redirects.
+    pub location: Option<&'static str>,
+}
+
+impl Default for Reply {
+    fn default() -> Reply {
+        Reply::artifact()
+    }
 }
 
 impl Reply {
-    /// The artifact, as a healthy Distribution serves it.
+    /// The artifact, as a Distribution serves it.
     pub fn artifact() -> Reply {
         Reply {
             status: StatusCode::OK,
             media: "text/html; charset=utf-8",
-            etag: Some("W/\"the-artifact\""),
+            etag: Some("\"the-artifact\""),
             body: ARTIFACT.to_owned(),
             encoding: None,
-            chunked: false,
-            policy: Some(artifact_policy()),
+            policy: Some(ARTIFACT_POLICY.to_owned()),
+            location: None,
         }
     }
 
-    /// The same artifact under a new validator.
+    /// The artifact after a compatible change: a different validator, and a
+    /// title the served document carries.
     pub fn replacement() -> Reply {
         Reply {
-            etag: Some("W/\"the-replacement\""),
+            etag: Some("\"the-replacement\""),
+            body: ARTIFACT.replace("<title>libID</title>", "<title>libID.</title>"),
             ..Reply::artifact()
         }
     }
+
+    /// The same answer with a different status.
+    pub fn with_status(self, status: StatusCode) -> Reply {
+        Reply { status, ..self }
+    }
+
+    /// The same answer with a different policy.
+    pub fn with_policy(self, policy: &str) -> Reply {
+        Reply {
+            policy: Some(policy.to_owned()),
+            ..self
+        }
+    }
 }
 
-/// What the fixture has been told to say, and what it has been asked.
-#[derive(Clone)]
-struct Answers {
-    /// Every request the fixture saw, in order.
-    seen: Arc<Mutex<Vec<HeaderMap>>>,
-    /// What it answers when nothing is queued.
-    standing: Arc<Mutex<Reply>>,
-    /// Answers for the next requests, ahead of the standing one.
-    queued: Arc<Mutex<VecDeque<Reply>>>,
-}
-
-/// A Distribution, on loopback and in plaintext, served on [`runtime`].
+/// A Distribution on loopback: it answers the artifact path with the reply it
+/// is holding, and records the headers each request carried.
 pub struct Distribution {
     origin: String,
-    answers: Answers,
+    state: Arc<Mutex<Held>>,
+}
+
+/// What a fixture Distribution answers with, and what it has been asked.
+#[derive(Default)]
+struct Held {
+    /// Answered once each, in order, before `standing`.
+    queued: std::collections::VecDeque<Reply>,
+    /// Answered whenever nothing is queued.
+    standing: Option<Reply>,
+    /// The headers of every request it received.
+    seen: Vec<HeaderMap>,
 }
 
 impl Distribution {
-    /// A Distribution answering with `reply`.
+    /// A Distribution answering `reply` until told otherwise. It serves on
+    /// the shared runtime, so it outlives the test that started it.
     pub async fn serving(reply: Reply) -> Distribution {
-        let answers = Answers {
-            seen: Arc::default(),
-            standing: Arc::new(Mutex::new(reply)),
-            queued: Arc::default(),
-        };
-        let router = Router::new()
+        let state = Arc::new(Mutex::new(Held {
+            standing: Some(reply),
+            ..Held::default()
+        }));
+        let app = Router::new()
             .route(ARTIFACT_PATH, get(answer))
-            .with_state(answers.clone());
+            .with_state(state.clone());
         let (bound, address) = tokio::sync::oneshot::channel();
         runtime().spawn(async move {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let _ = bound.send(listener.local_addr().unwrap());
-            let _ = axum::serve(listener, router).await;
+            let _ = axum::serve(listener, app).await;
         });
-        let origin = format!("http://{}", address.await.unwrap());
-        Distribution { origin, answers }
+        Distribution {
+            origin: format!("http://{}", address.await.unwrap()),
+            state,
+        }
     }
 
-    /// A Distribution serving the artifact.
-    pub async fn healthy() -> Distribution {
-        Distribution::serving(Reply::artifact()).await
+    /// A Distribution answering nothing: every retrieval fails to connect.
+    pub async fn unreachable() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin =
+            format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        drop(listener);
+        origin
     }
 
-    /// Where it is, as a deployment's `--ccdp-origin`.
+    /// Where it serves.
     pub fn origin(&self) -> &str {
         &self.origin
     }
 
-    /// Answer every request from now on with this.
+    /// What it answers from now on.
     pub fn now_serves(&self, reply: Reply) {
-        *self.answers.standing.lock().unwrap() = reply;
+        self.state.lock().unwrap().standing = Some(reply)
     }
 
-    /// Answer the next request with this, once.
+    /// What it answers once, before whatever it is serving.
     pub fn answers_next(&self, reply: Reply) {
-        self.answers.queued.lock().unwrap().push_back(reply);
+        self.state.lock().unwrap().queued.push_back(reply)
     }
 
-    /// How many queued answers are still waiting to be given.
-    pub fn still_queued(&self) -> usize {
-        self.answers.queued.lock().unwrap().len()
-    }
-
-    /// Every request seen so far, in order.
+    /// The headers of every request it received.
     pub fn requests(&self) -> Vec<HeaderMap> {
-        self.answers.seen.lock().unwrap().clone()
+        self.state.lock().unwrap().seen.clone()
     }
-}
 
-async fn answer(
-    State(answers): State<Answers>,
-    headers: HeaderMap,
-) -> axum::response::Response {
-    answers.seen.lock().unwrap().push(headers.clone());
-    let reply = match answers.queued.lock().unwrap().pop_front() {
-        Some(queued) => queued,
-        None => answers.standing.lock().unwrap().clone(),
-    };
-    // Only a `200` revalidates into a `304`.
-    let asked = headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|v| v.to_str().ok());
-    if reply.status == StatusCode::OK && reply.etag.is_some() && asked == reply.etag {
-        return StatusCode::NOT_MODIFIED.into_response();
-    }
-    let mut response = axum::response::Response::builder()
-        .status(reply.status)
-        .header(header::CONTENT_TYPE, reply.media);
-    if let Some(etag) = reply.etag {
-        response = response.header(header::ETAG, etag);
-    }
-    if let Some(encoding) = reply.encoding {
-        response = response.header(header::CONTENT_ENCODING, encoding);
-    }
-    if let Some(policy) = &reply.policy {
-        response = response.header(header::CONTENT_SECURITY_POLICY, policy);
-    }
-    let body = if reply.chunked {
-        axum::body::Body::from_stream(futures_util::stream::iter([Ok::<_, String>(
-            bytes::Bytes::from(reply.body),
-        )]))
-    } else {
-        axum::body::Body::from(reply.body)
-    };
-    response.body(body).unwrap().into_response()
-}
-
-impl Distribution {
-    /// One healthy Distribution, started once and shared by every test that
-    /// builds a deployment.
+    /// One Distribution every test that needs no answer of its own shares.
+    /// It starts on a thread of its own, so a test already inside a runtime
+    /// can ask for it.
     pub fn shared() -> &'static Distribution {
         static SHARED: OnceLock<Distribution> = OnceLock::new();
         SHARED.get_or_init(|| {
             std::thread::scope(|scope| {
                 scope
-                    .spawn(|| runtime().block_on(Distribution::healthy()))
+                    .spawn(|| {
+                        runtime().block_on(Distribution::serving(Reply::artifact()))
+                    })
                     .join()
                     .expect("the shared Distribution starts")
             })
@@ -244,19 +222,59 @@ impl Distribution {
     }
 }
 
-/// A file for the duration of a test, removed when the test lets go of it.
+/// The artifact path of a fixture Distribution.
+async fn answer(
+    State(state): State<Arc<Mutex<Held>>>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    let reply = {
+        let mut held = state.lock().unwrap();
+        held.seen.push(headers.clone());
+        held.queued
+            .pop_front()
+            .or_else(|| held.standing.clone())
+            .expect("a fixture Distribution answers something")
+    };
+    // A conditional request for the validator it is holding is answered `304`.
+    let asked = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok());
+    if asked.is_some() && asked == reply.etag && reply.status == StatusCode::OK {
+        return StatusCode::NOT_MODIFIED.into_response();
+    }
+
+    let mut out = HeaderMap::new();
+    out.insert(header::CONTENT_TYPE, reply.media.parse().unwrap());
+    for (name, value) in [
+        (header::ETAG, reply.etag.map(str::to_owned)),
+        (header::CONTENT_ENCODING, reply.encoding.map(str::to_owned)),
+        (header::CONTENT_SECURITY_POLICY, reply.policy.clone()),
+        (header::LOCATION, reply.location.map(str::to_owned)),
+    ] {
+        if let Some(value) = value {
+            out.insert(name, value.parse().unwrap());
+        }
+    }
+    (reply.status, out, reply.body).into_response()
+}
+
+/// A file that exists for as long as it is held.
 pub struct ScratchFile(std::path::PathBuf);
 
 impl ScratchFile {
-    /// `contents`, in a file of this process's own.
+    /// A file holding `contents`, named for this process and this file.
     pub fn holding(contents: &str) -> ScratchFile {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        use std::sync::atomic::{
+            AtomicU32,
+            Ordering,
+        };
+        static NEXT: AtomicU32 = AtomicU32::new(0);
         let path = std::env::temp_dir().join(format!(
-            "libid-{}-{}.toml",
+            "libid-bridge-{}-{}.toml",
             std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::write(&path, contents).expect("a scratch configuration file");
+        std::fs::write(&path, contents).expect("a scratch file is written");
         ScratchFile(path)
     }
 
@@ -272,11 +290,10 @@ impl Drop for ScratchFile {
     }
 }
 
-/// The client id every fixture deployment enables GitHub with.
+/// The public client identifier a fixture deployment publishes.
 pub const CLIENT_ID: &str = "Iv1.0123456789abcdef";
 
-/// The public client credential every fixture deployment publishes
-/// for GitHub.
+/// The public client credential a fixture deployment publishes.
 pub const CLIENT_CREDENTIAL: &str = "d3b07384d113edec49eaa6238ad5ff00c1f2e3a4";
 
 impl config::Config {
@@ -325,12 +342,29 @@ impl config::Config {
     }
 }
 
+/// One retrieval against the deployment's Distribution, as the refresh
+/// performs it. `Ok(true)` published a document, `Ok(false)` found the served
+/// one current, and an error left whatever is published in place.
+pub async fn retrieve_once(state: &Arc<AppState>) -> Result<bool, String> {
+    crate::artifact::upstream::retrieve_once(state)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 impl AppState {
     /// A deployment built from [`config::Config::fixture`], the way the
-    /// binary builds one.
-    pub async fn fixture(args: &[&str]) -> Arc<AppState> {
+    /// binary builds one: no document published yet.
+    pub fn fixture(args: &[&str]) -> Arc<AppState> {
         crate::build_state(&config::Config::fixture(args))
-            .await
             .expect("a deployment the fixtures can serve")
+    }
+
+    /// The same, with the artifact already retrieved.
+    pub async fn fixture_serving(args: &[&str]) -> Arc<AppState> {
+        let state = AppState::fixture(args);
+        retrieve_once(&state)
+            .await
+            .expect("the fixture Distribution answers the artifact");
+        state
     }
 }

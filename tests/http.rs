@@ -31,14 +31,14 @@ fn ccdp_origin() -> &'static str {
 }
 
 /// A deployment admitting two applications, with `overrides` replacing any
-/// flag they name.
+/// flag they name, serving the artifact its Distribution answered with.
 async fn deployment(overrides: &[&str]) -> Arc<AppState> {
     let mut args = vec![
         "--allowed-app-origins",
         "https://app.example,https://wallet.example",
     ];
     args.extend_from_slice(overrides);
-    AppState::fixture(&args).await
+    AppState::fixture_serving(&args).await
 }
 
 /// The default deployment: GitHub enabled.
@@ -636,5 +636,157 @@ async fn the_bridge_serves_no_ccdp_document_and_no_alias() {
     ] {
         let resp = get_callback(path, &[]).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{path}");
+    }
+}
+
+/// A deployment whose Distribution has not answered serves everything else,
+/// and says of the callback that it has no document and why.
+#[tokio::test]
+async fn a_deployment_without_its_distribution_serves_everything_else() {
+    let unreachable = Distribution::unreachable().await;
+    let state = AppState::fixture(&["--ccdp-origin", &unreachable]);
+
+    // The retrieval the refresh would perform, once, which records why it
+    // produced nothing.
+    fixtures::retrieve_once(&state)
+        .await
+        .expect_err("an unreachable Distribution answers nothing");
+
+    for (path, expected) in [
+        ("/health", StatusCode::OK),
+        (routes::CONFIG_PATH, StatusCode::FORBIDDEN),
+        ("/metrics", StatusCode::OK),
+    ] {
+        let resp = app(state.clone())
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), expected, "{path}");
+    }
+
+    let resp = app(state.clone())
+        .oneshot(
+            Request::get(routes::CALLBACK_PATH)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(resp.headers()[axum::http::header::RETRY_AFTER], "30");
+    let html = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!html.contains("<script"), "the page is inert: {html}");
+    assert!(
+        html.contains("ccdp/callback.html"),
+        "it names what could not be retrieved: {html}"
+    );
+}
+
+/// A Distribution that answers later is served from then on, and a retrieval
+/// that fails after that leaves the document already served in place.
+#[tokio::test]
+async fn a_document_survives_a_distribution_that_stops_answering() {
+    let distribution = Distribution::serving(fixtures::Reply::artifact()).await;
+    let state = AppState::fixture(&["--ccdp-origin", distribution.origin()]);
+
+    assert!(fixtures::retrieve_once(&state).await.unwrap());
+    let served = callback_body(state.clone()).await;
+    assert!(served.contains("<script"), "the document is served");
+
+    distribution
+        .now_serves(fixtures::Reply::artifact().with_status(StatusCode::BAD_GATEWAY));
+    fixtures::retrieve_once(&state)
+        .await
+        .expect_err("a 502 produces no document");
+    assert_eq!(
+        callback_body(state.clone()).await,
+        served,
+        "the document already served stays"
+    );
+}
+
+/// What the deployment counted reaches the metrics route.
+#[tokio::test]
+async fn the_metrics_route_reports_what_happened() {
+    let state = test_state().await;
+    let _ = callback_body(state.clone()).await;
+
+    let resp = app(state)
+        .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let text = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    for line in [
+        "libid_bridge_artifact_retrievals_total{outcome=\"published\"} 1",
+        "libid_bridge_callback_requests_total{outcome=\"document\"} 1",
+        "libid_bridge_callback_document_available 1",
+    ] {
+        assert!(text.contains(line), "{line} missing from:\n{text}");
+    }
+}
+
+/// The body the callback route answers with.
+async fn callback_body(state: Arc<AppState>) -> String {
+    let resp = app(state)
+        .oneshot(
+            Request::get(routes::CALLBACK_PATH)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap()
+}
+
+/// A Distribution whose own policy would let arbitrary script run is refused:
+/// those sources would otherwise become the ones this bridge serves its own
+/// origin's document under.
+#[tokio::test]
+async fn a_distribution_policy_this_bridge_would_not_serve_under_is_refused() {
+    for policy in [
+        "default-src 'none'; script-src 'unsafe-inline'",
+        "default-src 'none'; script-src https://cdn.example",
+        "default-src 'none'; script-src 'nonce-abc'",
+        "default-src 'none'",
+    ] {
+        let distribution =
+            Distribution::serving(fixtures::Reply::artifact().with_policy(policy)).await;
+        let state = AppState::fixture(&["--ccdp-origin", distribution.origin()]);
+        fixtures::retrieve_once(&state).await.expect_err(policy);
+
+        let resp = app(state)
+            .oneshot(
+                Request::get(routes::CALLBACK_PATH)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE, "{policy}");
     }
 }

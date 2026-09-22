@@ -43,15 +43,15 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    /// Check the deployment and build what the routes read. Everything that
-    /// must be well-formed for a request to succeed is checked here, at
-    /// startup; the error is the first thing that was not.
+    /// Check the deployment written in `settings` and build what the routes
+    /// read. Everything that must be well-formed for a request to succeed is
+    /// checked here, at startup; the error is the first thing that was not.
     ///
     /// No network request is made. The callback artifact is retrieved by the
     /// refresher, so a Distribution that is unreachable delays the callback
     /// document and stops nothing.
-    pub fn start(cfg: &config::Config) -> Result<Bridge> {
-        let deployment = deployment::Deployment::checked(cfg)?;
+    pub fn start(settings: &config::Settings) -> Result<Bridge> {
+        let deployment = deployment::Deployment::checked(settings)?;
         let upstream = artifact::upstream::Upstream::new(&deployment.ccdp_origin);
         let (sender, callback) = tokio::sync::watch::channel(None);
         let (failed, failure) = tokio::sync::watch::channel(None);

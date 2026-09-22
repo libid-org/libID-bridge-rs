@@ -14,7 +14,7 @@ use serde_json::{
 };
 
 use crate::{
-    config::Config,
+    config::Settings,
     error::{
         Error,
         Result,
@@ -38,19 +38,19 @@ impl Deployment {
     /// Every rule a deployment must satisfy before it serves a request,
     /// applied to the resolved configuration; the first rule broken is the
     /// error.
-    pub fn checked(cfg: &Config) -> Result<Deployment> {
-        let ccdp_origin = ccdp_origin(&cfg.ccdp_origin)?;
+    pub fn checked(settings: &Settings) -> Result<Deployment> {
+        let ccdp_origin = ccdp_origin(&settings.ccdp_origin)?;
         // The resolved CCDP origin joins the admitted set once; an overridden
         // `CCDP_ORIGIN` does not keep `https://lib.id` admitted unless it is
         // listed.
         let allowed_origins: Arc<[Origin]> = {
-            let mut set = allowed_app_origins(&cfg.allowed_app_origins)?;
+            let mut set = allowed_app_origins(&settings.allowed_app_origins)?;
             if !set.contains(&ccdp_origin) {
                 set.push(ccdp_origin.clone());
             }
             set.into()
         };
-        let platforms = platforms(cfg.platforms.clone())?;
+        let platforms = platforms(settings.platforms.clone())?;
         Ok(Deployment {
             ccdp_origin,
             allowed_origins,

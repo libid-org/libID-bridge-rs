@@ -1,7 +1,7 @@
 //! Binary entrypoint: resolve the configuration, build the state, serve.
 
 use libid_server_rs::{
-    config::Config,
+    config::Cli,
     serve,
     Bridge,
 };
@@ -15,13 +15,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let cfg = Config::resolve()?;
+    let cli = Cli::resolve()?;
     // No network request happens here: a Distribution that is unreachable
     // delays the callback document and stops nothing.
-    let bridge = Bridge::start(&cfg)?;
+    let bridge = Bridge::start(&cli.settings()?)?;
 
     let listener =
-        tokio::net::TcpListener::bind(format!("{}:{}", cfg.host, cfg.port)).await?;
+        tokio::net::TcpListener::bind(format!("{}:{}", cli.host, cli.port)).await?;
     tracing::info!("libid-server-rs listening on {}", listener.local_addr()?);
 
     serve(bridge, listener, async {

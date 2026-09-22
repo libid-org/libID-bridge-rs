@@ -291,48 +291,48 @@ pub const CLIENT_ID: &str = "Iv1.0123456789abcdef";
 /// for GitHub.
 pub const CLIENT_CREDENTIAL: &str = "d3b07384d113edec49eaa6238ad5ff00c1f2e3a4";
 
-/// A configuration that starts, with `args` replacing any default it
+/// The deployment a test starts from, with `args` replacing any default it
 /// names.
 ///
-/// Every flag that reads an environment variable is listed, so the
-/// process environment reaches nothing. `--platforms` is this fixture's
-/// own: the JSON records go to `Config::platforms`, which the binary
-/// fills from the configuration file. The CCDP origin is the shared
-/// Distribution's unless `args` names another.
-pub fn config(args: &[&str]) -> config::Config {
-    let platforms = format!(
+/// It is written to a file and read back, as the binary reads one.
+/// `--allowed-app-origins`, `--ccdp-origin` and `--platforms` are this
+/// fixture's own spellings of the file's keys; the first is a comma-separated
+/// list because a test reads more easily that way, and the last carries the
+/// JSON records a `[[platforms]]` table parses into. The CCDP origin is the
+/// shared Distribution's unless `args` names another.
+pub fn config(args: &[&str]) -> config::Settings {
+    let mut origins = "https://app.example".to_owned();
+    let mut ccdp_origin = Distribution::shared().origin().to_owned();
+    let mut platforms = format!(
         r#"[{{"id":"github","client_id":"{CLIENT_ID}","versions":[1],"client_credential":"{CLIENT_CREDENTIAL}"}}]"#
     );
-    let mut flags: Vec<(&str, &str)> = vec![
-        ("--host", "127.0.0.1"),
-        ("--port", "8722"),
-        ("--allowed-app-origins", "https://app.example"),
-        ("--ccdp-origin", Distribution::shared().origin()),
-        ("--platforms", &platforms),
-    ];
     for pair in args.chunks(2) {
         let [flag, value] = pair else {
             panic!("test flags come in pairs, got {pair:?}")
         };
-        match flags.iter_mut().find(|(f, _)| f == flag) {
-            Some(slot) => slot.1 = value,
-            None => flags.push((flag, value)),
+        match *flag {
+            "--allowed-app-origins" => origins = (*value).to_owned(),
+            "--ccdp-origin" => ccdp_origin = (*value).to_owned(),
+            "--platforms" => platforms = (*value).to_owned(),
+            other => panic!("the fixture names no {other}"),
         }
     }
-    let platforms = flags
-        .iter()
-        .position(|(f, _)| *f == "--platforms")
-        .map(|i| flags.remove(i).1)
-        .expect("the fixture lists --platforms");
-    let mut argv = vec!["libid-server-rs"];
-    for (flag, value) in &flags {
-        argv.push(flag);
-        argv.push(value);
-    }
-    let mut cfg = <config::Config as clap::Parser>::parse_from(argv);
-    cfg.platforms =
-        serde_json::from_str(platforms).expect("the fixture's platform records");
-    cfg
+
+    let listed = origins
+        .split(',')
+        .map(|o| format!("{o:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let file = ScratchFile::holding(&format!(
+        "allowed_app_origins = [{listed}]\nccdp_origin = {ccdp_origin:?}\n"
+    ));
+    let mut settings = config::Settings::read(file.path()).expect("the fixture resolves");
+    drop(file);
+    // The records a `[[platforms]]` table would have produced. The file path
+    // for them is covered by the configuration suite.
+    settings.platforms =
+        serde_json::from_str(&platforms).expect("the fixture's platform records");
+    settings
 }
 
 /// An origin nothing answers on: a Distribution this deployment cannot reach.

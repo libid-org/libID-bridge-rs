@@ -254,28 +254,27 @@ mod origin {
 mod config {
     use clap::CommandFactory as _;
     use libid_server_rs::{
-        config::Config,
+        config::{
+            Cli,
+            Settings,
+        },
         deployment::PlatformId,
         error::Result,
     };
 
-    /// Write a configuration file and resolve against it, with no environment
-    /// variable reaching a flag: what the file supplies is what this test
-    /// wrote, whatever the machine running it exports.
-    fn resolved(toml: &str, flags: &[&str]) -> Result<Config> {
+    /// The deployment a file describes.
+    fn resolved(toml: &str) -> Result<Settings> {
         let file = crate::common::ScratchFile::holding(toml);
-        resolved_file(file.path(), flags)
+        Settings::read(file.path())
     }
 
-    /// The configuration `path` describes, with `flags` on the command line.
-    fn resolved_file(path: &std::path::Path, flags: &[&str]) -> Result<Config> {
-        let mut argv = vec![
-            "libid-server-rs".to_owned(),
-            "--config".to_owned(),
-            path.display().to_string(),
-        ];
+    /// What an invocation names, with no environment variable reaching a
+    /// flag: what this test passes is what is read, whatever the machine
+    /// running it exports.
+    fn invoked(flags: &[&str]) -> Result<Cli> {
+        let mut argv = vec!["libid-server-rs".to_owned()];
         argv.extend(flags.iter().map(|f| (*f).to_owned()));
-        Config::merged(Config::command().mut_args(|a| a.env(None::<&str>)), argv)
+        Cli::parsed_by(Cli::command().mut_args(|a| a.env(None::<&str>)), argv)
     }
 
     /// A file supplies what nothing else did, the platform table included.
@@ -292,7 +291,6 @@ mod config {
             versions = [1]
             client_credential = "c0ffee_from_the_file"
             "#,
-            &[],
         )
         .expect("a file this deployment can read");
 
@@ -322,7 +320,6 @@ mod config {
             client_id = "Iv1.0123456789abcdef"
             versions = [1]
             "#,
-            &[],
         )
         .expect_err("no credential");
         assert!(err.to_string().contains("client_credential"), "{err}");
@@ -338,7 +335,6 @@ mod config {
             client_id = "WHRlc3RjbGllbnQ6MTpjaQ"
             versions = [1]
             "#,
-            &[],
         )
         .expect("a file this deployment can read");
         let platforms = libid_server_rs::deployment::platforms(cfg.platforms)
@@ -352,19 +348,35 @@ mod config {
 
     /// A flag beats the file.
     #[test]
-    fn the_command_line_beats_the_file() {
-        let cfg = resolved(
-            "ccdp_origin = \"https://dist.example\"\n",
-            &["--ccdp-origin", "https://other.example"],
-        )
-        .expect("a file this deployment can read");
-        assert_eq!(cfg.ccdp_origin, "https://other.example");
+    fn the_file_is_the_only_place_the_deployment_is_written() {
+        // Nothing but the file names a Distribution, so there is no second
+        // spelling to disagree with it.
+        for flag in ["--ccdp-origin", "--allowed-app-origins", "--platforms"] {
+            let command = Cli::command();
+            assert!(
+                !command
+                    .get_arguments()
+                    .any(|a| a.get_long() == Some(flag.trim_start_matches("--"))),
+                "{flag} is still a flag"
+            );
+        }
+
+        let cfg = resolved("ccdp_origin = \"https://dist.example\"\n")
+            .expect("a file this deployment can read");
+        assert_eq!(cfg.ccdp_origin, "https://dist.example");
+    }
+
+    /// A file naming no Distribution selects the canonical one.
+    #[test]
+    fn an_omitted_ccdp_origin_selects_the_canonical_distribution() {
+        let cfg = resolved("").expect("an empty file is a readable one");
+        assert_eq!(cfg.ccdp_origin, "https://lib.id");
     }
 
     /// Where neither says anything, the default stands.
     #[test]
     fn a_silent_file_changes_nothing() {
-        let cfg = resolved("allowed_app_origins = [\"https://app.example\"]\n", &[])
+        let cfg = resolved("allowed_app_origins = [\"https://app.example\"]\n")
             .expect("readable");
         assert_eq!(cfg.ccdp_origin, "https://lib.id");
     }
@@ -373,7 +385,7 @@ mod config {
     /// platform check refuses by name.
     #[test]
     fn no_platform_table_means_no_platform() {
-        let cfg = resolved("allowed_app_origins = [\"https://app.example\"]\n", &[])
+        let cfg = resolved("allowed_app_origins = [\"https://app.example\"]\n")
             .expect("readable");
         assert!(cfg.platforms.is_empty());
         let err = libid_server_rs::deployment::platforms(cfg.platforms)
@@ -385,7 +397,7 @@ mod config {
     #[test]
     fn the_example_file_is_one_this_bridge_accepts() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/bridge.toml.example");
-        let cfg = resolved_file(std::path::Path::new(path), &[])
+        let cfg = Settings::read(std::path::Path::new(path))
             .expect("the example beside this code");
 
         assert_eq!(cfg.ccdp_origin, "https://lib.id");
@@ -406,20 +418,19 @@ mod config {
     /// file would have carried are missing.
     #[test]
     fn a_run_that_names_no_file_is_told_so() {
-        let err = Config::merged(
-            Config::command().mut_args(|a| a.env(None::<&str>)),
-            ["libid-server-rs"],
-        )
-        .expect_err("no configuration file");
+        let err = invoked(&[])
+            .expect("an invocation naming no file still parses")
+            .settings()
+            .expect_err("but it has no deployment to read");
         let text = err.to_string();
-        assert!(text.contains("LIBID_CONFIG"), "{text}");
+        assert!(text.contains("no configuration file"), "{text}");
         assert!(text.contains("--config"), "{text}");
     }
 
     /// A misspelled key is refused rather than ignored.
     #[test]
     fn a_misspelled_key_is_refused() {
-        let err = resolved("prot = 9110\n", &[]).expect_err("an unknown key");
+        let err = resolved("prot = 9110\n").expect_err("an unknown key");
         assert!(err.to_string().contains("prot"), "{err}");
     }
 
@@ -435,7 +446,7 @@ mod config {
             "notary_wire_port = 7047\n",
             "gh_oauth_client_secret = \"s\"\n",
         ] {
-            let err = resolved(unread, &[]).expect_err("a key this bridge does not read");
+            let err = resolved(unread).expect_err("a key this bridge does not read");
             let key = unread.split(' ').next().unwrap();
             assert!(err.to_string().contains(key), "{err}");
         }

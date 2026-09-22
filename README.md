@@ -180,10 +180,11 @@ before this server sees the request at all.
 ## Configuration
 
 The bridge reads a TOML configuration file named by `LIBID_CONFIG` or
-`--config`. Every key in it can be overridden by the environment variable or
-flag of the same name; precedence is flag, then environment variable, then
-file, then default. `bridge.toml.example` beside this README is a complete
-starting point:
+`--config`. It is the deployment: nothing in it has a flag or a variable of
+its own, because the enabled platforms can be written nowhere else and a
+bridge with no platform could serve no ceremony. There is one place to look
+and nothing to disagree with it. `bridge.toml.example` beside this README is a
+complete starting point:
 
 ```toml
 allowed_app_origins = ["https://app.example", "https://wallet.example"]
@@ -208,9 +209,9 @@ the credential.
 |---|---|---|---|
 | — | `HOST`, `--host` | `127.0.0.1` | Bind address (`0.0.0.0` in the container image). Not a file key: the image sets it in the environment, which beats a file. |
 | — | `PORT`, `--port` | `8722` | Bind port. Not a file key, for the same reason. |
-| `allowed_app_origins` | `ALLOWED_APP_ORIGINS`, comma-separated | *(required)* | Application origins. Exact origins, no patterns; HTTPS, or HTTP on `localhost` or `127.0.0.1`. Each must already be canonical — a trailing slash, an uppercase host or a default port is refused with the canonical spelling named, not folded — and a duplicate is refused. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once. It is the one admission rule: the configuration route admits exactly one `Origin` from it, and the callback document is told the same set. A same-origin read carries no `Origin` and is admitted on `Sec-Fetch-Site: same-origin` alone. |
-| `ccdp_origin` | `CCDP_ORIGIN` | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/callback.html` and everything the browser runs after it, HTTPS, or HTTP on `localhost` or `127.0.0.1`. Published in the configuration and inserted into the callback document, and named as the one `frame-src` source of its policy, so an IPv6 literal is refused: a policy source expression has no form for one. Omitting it selects the canonical libID Distribution. |
-| `platforms` | — | *(required)* | The enabled platforms, as `[[platforms]]` tables: `id`, `client_id`, `versions`, and for `github` its `client_credential`. File only. |
+| `allowed_app_origins` | — | *(required)* | Application origins. Exact origins, no patterns; HTTPS, or HTTP on `localhost` or `127.0.0.1`. Each must already be canonical — a trailing slash, an uppercase host or a default port is refused with the canonical spelling named, not folded — and a duplicate is refused. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once. It is the one admission rule: the configuration route admits exactly one `Origin` from it, and the callback document is told the same set. A same-origin read carries no `Origin` and is admitted on `Sec-Fetch-Site: same-origin` alone. |
+| `ccdp_origin` | — | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/callback.html` and everything the browser runs after it, HTTPS, or HTTP on `localhost` or `127.0.0.1`. Published in the configuration and inserted into the callback document, and named as the one `frame-src` source of its policy, so a host a policy source expression cannot name, an IPv6 literal or an underscore among them, is refused. Omitting it selects the canonical libID Distribution. |
+| `platforms` | — | *(required)* | The enabled platforms, as `[[platforms]]` tables: `id`, `client_id`, `versions`, and for `github` its `client_credential`. |
 | — | `LIBID_CONFIG`, `--config` | *(none)* | Path to the configuration file. |
 
 ### Per platform

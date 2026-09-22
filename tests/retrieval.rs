@@ -112,7 +112,7 @@ mod upstream {
     }
 
     /// A deployment pointed at this test's own Distribution.
-    fn config(ccdp_origin: &str) -> libid_server_rs::config::Config {
+    fn config(ccdp_origin: &str) -> libid_server_rs::config::Settings {
         common::config(&["--ccdp-origin", ccdp_origin])
     }
 

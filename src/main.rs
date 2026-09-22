@@ -18,9 +18,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cfg = Config::resolve()?;
-    // The artifact is retrieved before the listener binds; a failure exits
-    // non-zero.
-    let state = build_state(&cfg).await?;
+    // No network request happens here: a Distribution that is unreachable
+    // delays the callback document and stops nothing.
+    let state = build_state(&cfg)?;
 
     let listener =
         tokio::net::TcpListener::bind(format!("{}:{}", cfg.host, cfg.port)).await?;

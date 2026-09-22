@@ -54,7 +54,8 @@ out; origin checks and a closed input surface cannot constrain its owner.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/health` | Liveness probe. Returns `OK`. Not one of the contract's routes — see below. |
+| `GET` | `/health` | Liveness probe. Returns `OK`, whether or not a callback document is available. Not one of the contract's routes — see below. |
+| `GET` | `/metrics` | What this deployment counts, in the Prometheus text exposition format. Not one of the contract's routes. |
 | `GET`, `OPTIONS` | `/api/v1/ceremony/config` | The public ceremony configuration: `{ ccdpOrigin, platforms }`. Readable from an admitted origin, or by a same-origin `GET` without `Origin` on `Sec-Fetch-Site: same-origin`. `403` for any other origin, `400` for a query. `OPTIONS` answers the preflight a caller sending its own header needs, by the same admission rule: `GET`, the headers asked for, no credentials. |
 | `GET` | `/auth/callback` | The registered OAuth callback document: the CCDP Distribution's artifact with this deployment's data inserted, identical for every request. |
 
@@ -111,21 +112,21 @@ implementation, with one non-executable slot for deployment data. The bridge
 reads that artifact, substitutes **one unversioned list** —
 `[allowedOrigins, ccdpOrigin]` — the effective admission set, which is
 `ALLOWED_APP_ORIGINS` plus the resolved CCDP origin, and that origin —
-into the slot, computes the response policy from the bytes it is about to
-serve, and publishes the pair. It parses no OAuth `state`, selects no CCDP
-version, and holds no version list: a compatible Callback change needs no
-bridge rebuild.
+in place of the marker, composes the response policy, and publishes the pair.
+It does not parse the document: the marker occurs once or the artifact is
+refused, and everything around it is served as it arrived. It parses no OAuth
+`state`, selects no CCDP version, and holds no version list: a compatible
+Callback change needs no bridge rebuild.
 
 The policy's `script-src` carries **only the hashes the artifact was served
 with**. The Distribution publishes the hashes of the code it ships; this bridge
-checks that its `script-src` names hashes and nothing else, and that those are
-the hashes of the modules the document carries. A Distribution shipping a stale
-hash is refused at startup rather than serving a document whose code the browser
-blocks, and no source this bridge did not write reaches a browser. Substitution
-cannot invalidate a hash, because the slot is a non-executable data block and
-the only thing substitution touches.
+checks that its `script-src` names hash sources and nothing else, then carries
+them into the policy it writes. Those hashes are the only script sources the
+served document has, so code they do not cover does not run whoever wrote it.
+Substitution cannot invalidate one: the data is escaped to ASCII with no
+character a parser reads as markup, and the marker occurs once.
 
-The document is composed once at startup and never varies: no request field —
+The document never varies: no request field —
 `Origin`, `Referer`, query, fragment — changes a byte of it or its policy. The
 server never sees the provider's return: the handler reads nothing from the
 request, and there is no request-logging middleware. **Any proxy in front of
@@ -133,18 +134,39 @@ this server must redact the callback path's query string from its access
 logs** — that half of the contract is the operator's.
 
 The artifact is **retrieved from the Distribution**: `{CCDP_ORIGIN}/ccdp/callback.html`,
-once before the listener binds and then every five minutes, conditionally on the
-`ETag` it came with. A refresh that returns `304`, fails to reach the
+first as soon as the process runs and then every five minutes, conditionally on
+the `ETag` it came with. A retrieval that returns `304`, fails to reach the
 Distribution, or returns something this bridge will not serve leaves the document
 already being served as it is; only a valid replacement replaces it, and the
 document and the policy naming its hashes are published as one value. Redirects
 are refused, and the request carries no cookie, credential, query, or anything
 derived from a callback request.
 
-**A deployment that cannot retrieve its artifact does not start.** There is no
-fallback document and no file override. A development stack serves its own
+**The Distribution's availability is not this deployment's.** The process starts
+without it, binds, and serves the configuration, the liveness probe and the
+metrics. Until a retrieval produces a document the callback path answers `503`
+with an inert page naming the last failure, and a failed retry backs off from
+thirty seconds to five minutes. Once a document is published it keeps being
+served through any later failure. A development stack serves its own
 Distribution over HTTP on `localhost` or `127.0.0.1`, the one plaintext
 exception the origin rules make.
+
+## What this deployment counts
+
+`GET /metrics` answers the Prometheus text exposition format. It is scraped
+from the pod and is not part of the ceremony contract.
+
+| Metric | What it says |
+|---|---|
+| `libid_bridge_artifact_retrievals_total{outcome}` | Retrievals, by `published`, `unchanged` or `failed` |
+| `libid_bridge_artifact_retrieval_failures_total{kind}` | Failed retrievals, by which refusal |
+| `libid_bridge_callback_requests_total{outcome}` | Callback requests, by `document` or `unavailable` |
+| `libid_bridge_callback_document_available` | `1` while a document is available |
+| `libid_bridge_callback_document_published_timestamp_seconds` | When the served document was published |
+
+A deployment serving a document it can no longer replace shows a rising
+`failed` count with `callback_document_available` still `1`, and its published
+timestamp stops moving.
 
 ## What the operator has to supply
 

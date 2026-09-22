@@ -1,6 +1,7 @@
 //! The OAuth Bridge's route table:
 //!
 //! - `GET  /health`
+//! - `GET  /metrics`
 //! - `GET`, `OPTIONS` `/api/v1/ceremony/config`
 //! - `GET  /auth/callback`
 //!
@@ -20,8 +21,12 @@ use std::sync::Arc;
 use axum::{
     http::{
         header,
-        HeaderName,
         HeaderValue,
+        StatusCode,
+    },
+    response::{
+        IntoResponse,
+        Response,
     },
     routing::get,
     Router,
@@ -52,34 +57,64 @@ impl<'a> Origins<'a> {
     }
 }
 
-/// `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, on every
-/// response this service writes.
-pub(crate) const ON_EVERY_RESPONSE: [(HeaderName, HeaderValue); 2] = [
-    (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
-    (
+/// `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, put on
+/// every response this service writes, a refusal and an unrouted path
+/// included.
+async fn standing_headers(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
-    ),
-];
+    );
+    response
+}
 
 /// Liveness probe: `OK`. Not one of the contract's routes; the published
-/// image's `HEALTHCHECK` targets it. It reads nothing from the request.
+/// image's `HEALTHCHECK` targets it. It reads nothing from the request, and
+/// answers whether or not a callback document is available, because the
+/// Distribution's availability is not this deployment's.
 async fn health() -> impl axum::response::IntoResponse {
-    (ON_EVERY_RESPONSE, "OK")
+    "OK"
+}
+
+/// What this deployment counts, in the Prometheus text exposition format.
+/// Scraped from the pod; not part of the ceremony contract.
+async fn metrics(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+) -> Response {
+    (
+        [(
+            header::CONTENT_TYPE,
+            "application/openmetrics-text; version=1.0.0; charset=utf-8",
+        )],
+        state.metrics.rendered(),
+    )
+        .into_response()
+}
+
+/// Every path this service does not serve.
+async fn unrouted() -> Response {
+    (StatusCode::NOT_FOUND, "").into_response()
 }
 
 /// The liveness probe.
 pub(crate) const HEALTH_PATH: &str = "/health";
+/// What this deployment counts.
+pub(crate) const METRICS_PATH: &str = "/metrics";
 /// The registered OAuth callback: the callback document.
 pub const CALLBACK_PATH: &str = "/auth/callback";
 /// The public ceremony configuration.
-pub(crate) const CONFIG_PATH: &str = "/api/v1/ceremony/config";
+pub const CONFIG_PATH: &str = "/api/v1/ceremony/config";
 
-/// The route table: the same three routes for every deployment.
+/// The route table: the same routes for every deployment.
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route(HEALTH_PATH, get(health))
+        .route(METRICS_PATH, get(metrics))
         .route(CONFIG_PATH, get(config::config).options(config::preflight))
         .route(CALLBACK_PATH, get(callback::callback))
+        .fallback(unrouted)
+        .layer(axum::middleware::map_response(standing_headers))
         .with_state(state)
 }

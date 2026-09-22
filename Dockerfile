@@ -11,7 +11,7 @@ COPY . .
 RUN cargo build --release --locked
 
 # Runtime stage. No CA bundle: the trust anchors for retrieving the callback
-# artifact are compiled in (`webpki-root-certs`), and the healthcheck is
+# artifact are compiled in (`webpki-roots`), and the healthcheck is
 # plaintext loopback. curl serves the healthcheck.
 FROM debian:bookworm-slim
 

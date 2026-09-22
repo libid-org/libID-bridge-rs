@@ -1,5 +1,5 @@
 //! What the bridge holds while it runs: configuration read once at startup,
-//! and the callback document as last retrieved.
+//! the callback document as last retrieved, and the numbers it publishes.
 //!
 //! There is no ceremony state. Each request is answered in isolation and
 //! shares nothing mutable with another; a restart or a lost response leaves
@@ -13,10 +13,10 @@ use tokio::sync::watch;
 pub struct AppState {
     /// The callback document, the policy it is served under, and the validator
     /// it was retrieved with: read by the callback route, replaced whole by
-    /// the refresh. Never empty: startup retrieves an artifact or the process
-    /// does not start. A test that waits for a replacement subscribes to it.
-    pub(crate) callback: watch::Sender<Arc<crate::artifact::Published>>,
-    /// The Distribution the artifact was retrieved from, and is revalidated
+    /// each retrieval that produces one. `None` until the first one arrives.
+    /// A test that waits for a replacement subscribes to it.
+    pub(crate) callback: watch::Sender<Option<Arc<crate::artifact::Published>>>,
+    /// The Distribution the artifact is retrieved from, and revalidated
     /// against on the refresh schedule.
     pub(crate) upstream: crate::artifact::upstream::Upstream,
     /// The effective admission set `allowedAppOrigins ∪ {ccdpOrigin}`: the one
@@ -26,4 +26,10 @@ pub struct AppState {
     /// The public ceremony configuration, serialized once: the exact bytes
     /// every admitted caller receives.
     pub(crate) ceremony_config: bytes::Bytes,
+    /// Why the last retrieval produced no document, cleared by one that
+    /// does. It is what the callback route reports when it has nothing to
+    /// serve, and names only this deployment's own Distribution URL.
+    pub(crate) failure: tokio::sync::watch::Sender<Option<String>>,
+    /// What this deployment counts.
+    pub(crate) metrics: crate::metrics::Metrics,
 }

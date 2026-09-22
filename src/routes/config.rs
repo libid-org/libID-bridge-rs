@@ -99,6 +99,7 @@ pub async fn preflight(
         return refuse(
             StatusCode::FORBIDDEN,
             "this configuration is readable only from an admitted origin",
+            None,
         );
     };
 
@@ -134,11 +135,20 @@ pub async fn config(
         return refuse(
             StatusCode::FORBIDDEN,
             "this configuration is readable only from an admitted origin",
+            None,
         );
     };
 
     if query.is_some_and(|q| !q.is_empty()) {
-        return refuse(StatusCode::BAD_REQUEST, "this route takes no query");
+        let admitted = match &admission {
+            Admission::Listed(origin) => Some(origin.clone()),
+            Admission::SameOrigin => None,
+        };
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "this route takes no query",
+            admitted,
+        );
     }
 
     // `insert`, not append: the `Bytes` body would otherwise add its own
@@ -158,14 +168,18 @@ pub async fn config(
     (StatusCode::OK, out, state.ceremony_config.clone()).into_response()
 }
 
-/// A refusal carries no configuration and no allow-origin header, so a caller
-/// that is not admitted cannot read the record out of an error, and a
-/// preflight it answers grants nothing. A browser reads neither body.
-fn refuse(status: StatusCode, message: &str) -> Response {
-    (
-        status,
-        [(header::VARY, VARY_ON)],
-        Json(json!({ "message": message })),
-    )
-        .into_response()
+/// A refusal carries no configuration, so a caller cannot read the record out
+/// of an error.
+///
+/// `admitted` is the origin the request was admitted from, where it was: a
+/// caller refused for something other than its origin gets the header that
+/// lets its browser surface the status, and one refused for its origin gets
+/// nothing, so it cannot tell an unlisted origin from a malformed request.
+fn refuse(status: StatusCode, message: &str, admitted: Option<HeaderValue>) -> Response {
+    let mut out = HeaderMap::new();
+    out.insert(header::VARY, HeaderValue::from_static(VARY_ON));
+    if let Some(origin) = admitted {
+        out.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    }
+    (status, out, Json(json!({ "message": message }))).into_response()
 }

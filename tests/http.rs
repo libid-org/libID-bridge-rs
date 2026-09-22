@@ -801,3 +801,35 @@ async fn a_distribution_policy_this_bridge_would_not_serve_under_is_refused() {
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE, "{policy}");
     }
 }
+
+/// A caller refused for something other than its origin can read the refusal;
+/// one refused for its origin cannot tell that from a malformed request.
+#[tokio::test]
+async fn an_admitted_caller_can_read_why_it_was_refused() {
+    let state = test_state().await;
+    let allow = axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN;
+
+    let queried = app(state.clone())
+        .oneshot(
+            Request::get(format!("{}?t=1", routes::CONFIG_PATH))
+                .header("origin", APP_ORIGIN)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(queried.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(queried.headers()[&allow], APP_ORIGIN);
+
+    let unlisted = app(state)
+        .oneshot(
+            Request::get(routes::CONFIG_PATH)
+                .header("origin", "https://evil.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unlisted.status(), StatusCode::FORBIDDEN);
+    assert!(!unlisted.headers().contains_key(&allow));
+}

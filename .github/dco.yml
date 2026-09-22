@@ -1,0 +1,10 @@
+# GitHub authors a squash commit with the merging account's *profile* identity,
+# while `git commit -s` signs off with the *git* identity. Where the two differ
+# the squashed commit carries no sign-off matching its own author, and this
+# check fails on a branch whose every original commit was signed off correctly.
+#
+# A remediation commit is this app's own remedy: an empty commit naming the
+# commit it signs off on, which adds the missing trailer without rewriting any
+# history that other branches are already built on.
+allowRemediationCommits:
+  individual: true

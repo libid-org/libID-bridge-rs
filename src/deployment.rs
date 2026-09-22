@@ -192,6 +192,13 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>>
         if p.client_id().is_empty() {
             return Err(refuse(format!("{id} carries no client_id")));
         }
+        // A client id the platform could never issue is a typo the
+        // deployment publishes and every ceremony then fails on.
+        if !printable_without_whitespace(p.client_id()) {
+            return Err(refuse(format!(
+                "{id}'s client_id is not printable ASCII without whitespace"
+            )));
+        }
         if p.versions().is_empty() {
             return Err(refuse(format!("{id} advertises no version")));
         }
@@ -206,7 +213,7 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>>
             if credential.is_empty() {
                 return Err(refuse(format!("{id} carries an empty client_credential")));
             }
-            if !credential.bytes().all(|b| (0x21..=0x7E).contains(&b)) {
+            if !printable_without_whitespace(credential) {
                 return Err(refuse(format!(
                     "{id}'s client_credential is not printable ASCII \
                      without whitespace"
@@ -215,6 +222,13 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>>
         }
     }
     Ok(profiles)
+}
+
+/// Whether every byte of `value` is printable ASCII carrying no whitespace,
+/// which is what a public client identifier and a public client credential
+/// are made of.
+fn printable_without_whitespace(value: &str) -> bool {
+    value.bytes().all(|b| (0x21..=0x7E).contains(&b))
 }
 
 /// The CCDP Distribution this deployment selects, in canonical form. A host a

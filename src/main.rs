@@ -3,9 +3,9 @@
 use tracing::info;
 
 use libid_server_rs::{
-    build_state,
     config::Config,
     serve,
+    Bridge,
 };
 
 #[tokio::main]
@@ -20,13 +20,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = Config::resolve()?;
     // The artifact is retrieved before the listener binds; a failure exits
     // non-zero.
-    let state = build_state(&cfg).await?;
+    let bridge = Bridge::start(&cfg).await?;
 
     let listener =
         tokio::net::TcpListener::bind(format!("{}:{}", cfg.host, cfg.port)).await?;
     info!("libid-server-rs listening on {}", listener.local_addr()?);
 
-    serve(state, listener, async {
+    serve(bridge, listener, async {
         let _ = tokio::signal::ctrl_c().await;
         info!("shutting down");
     })

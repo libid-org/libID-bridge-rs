@@ -326,11 +326,13 @@ impl config::Config {
 }
 
 impl AppState {
-    /// A deployment built from [`config::Config::fixture`], the way the
-    /// binary builds one.
+    /// The state of a deployment started from [`config::Config::fixture`],
+    /// the way the binary starts one. Its refresher is dropped with the
+    /// deployment: what was published at startup stays readable.
     pub async fn fixture(args: &[&str]) -> Arc<AppState> {
-        crate::build_state(&config::Config::fixture(args))
+        crate::Bridge::start(&config::Config::fixture(args))
             .await
             .expect("a deployment the fixtures can serve")
+            .state
     }
 }

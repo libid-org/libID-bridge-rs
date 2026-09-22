@@ -9,16 +9,15 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 
-/// Configuration every route reads.
+/// What a route reads. Nothing here retrieves or publishes; the refresher
+/// that does holds the sender of `callback` and nothing else of this.
 pub struct AppState {
     /// The callback document, the policy it is served under, and the validator
     /// it was retrieved with: read by the callback route, replaced whole by
-    /// the refresh. Never empty: startup retrieves an artifact or the process
-    /// does not start. A test that waits for a replacement subscribes to it.
-    pub(crate) callback: watch::Sender<Arc<crate::artifact::Published>>,
-    /// The Distribution the artifact was retrieved from, and is revalidated
-    /// against on the refresh schedule.
-    pub(crate) upstream: crate::artifact::upstream::Upstream,
+    /// the refresher. Never empty: startup retrieves an artifact or the
+    /// process does not start. A test that waits for a replacement clones the
+    /// receiver and awaits a change.
+    pub(crate) callback: watch::Receiver<Arc<crate::artifact::Published>>,
     /// The effective admission set `allowedAppOrigins ∪ {ccdpOrigin}`: the one
     /// rule the configuration route applies, and what the callback document
     /// is told.

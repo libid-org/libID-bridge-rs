@@ -19,12 +19,8 @@ use sha2::{
 };
 
 use scan::ArtifactError;
-use upstream::Upstream;
 
-use crate::{
-    error::Error,
-    origin::Origin,
-};
+use crate::origin::Origin;
 
 #[cfg(test)]
 pub(crate) use crate::fixtures::ARTIFACT as FIXTURE;
@@ -118,41 +114,6 @@ pub(crate) struct Published {
     pub(crate) document: CallbackDocument,
     /// The `ETag` the document arrived with, sent back as `If-None-Match`.
     pub(crate) etag: Option<String>,
-}
-
-impl Published {
-    /// The artifact retrieved from `upstream` by a request carrying no
-    /// validator, composed for the deployment. A retrieval that fails is an
-    /// error, and the process does not start.
-    pub(crate) async fn retrieved(
-        upstream: &Upstream,
-        allowed_origins: &[Origin],
-    ) -> Result<Published, Error> {
-        let url = upstream.url();
-        let published = upstream
-            .retrieve(allowed_origins, None)
-            .await
-            .map_err(|e| Error::ArtifactUnavailable {
-                url: url.clone(),
-                detail: format!("{e}"),
-            })?
-            .ok_or_else(|| Error::ArtifactUnavailable {
-                url: url.clone(),
-                detail: upstream::FetchError::UnaskedNotModified.to_string(),
-            })?;
-        published.log(&url, "retrieved the callback artifact");
-        Ok(published)
-    }
-
-    /// One log line naming the document: its URL, validator and policy.
-    pub(crate) fn log(&self, url: &str, event: &str) {
-        tracing::info!(
-            url,
-            etag = self.etag.as_deref().unwrap_or("<none>"),
-            policy = self.document.csp.to_str().unwrap_or("<unreadable>"),
-            "{event}"
-        );
-    }
 }
 
 /// The response policy: this deployment's own sources, and the script hashes

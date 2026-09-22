@@ -27,11 +27,7 @@ pub mod state;
 
 use std::sync::Arc;
 
-use error::{
-    Error,
-    Result,
-};
-use origin::Origin;
+use error::Result;
 use state::AppState;
 
 /// Build the shared [`AppState`] from the configuration. Everything that must
@@ -39,33 +35,17 @@ use state::AppState;
 /// the callback artifact is retrieved from the Distribution before this
 /// returns; it returns `Err` when it cannot.
 pub async fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
-    let ccdp_origin = ccdp_origin(&cfg.ccdp_origin)?;
-    // The effective set `allowedAppOrigins ∪ {ccdpOrigin}`: the one admission
-    // rule of the configuration route, and what the callback document is
-    // told. The resolved CCDP origin joins once; an overridden `CCDP_ORIGIN`
-    // does not keep `https://lib.id` admitted unless it is listed.
-    let allowed_origins: Arc<[Origin]> = {
-        let mut set = allowed_app_origins(&cfg.allowed_app_origins)?;
-        if !set.contains(&ccdp_origin) {
-            set.push(ccdp_origin.clone());
-        }
-        set.into()
-    };
-    let platforms = deployment::platforms(cfg.platforms.clone())?;
-
-    let upstream = artifact::upstream::Upstream::new(&ccdp_origin);
-    let published = artifact::Published::retrieved(&upstream, &allowed_origins).await?;
+    let deployment = deployment::Deployment::checked(cfg)?;
+    let upstream = artifact::upstream::Upstream::new(&deployment.ccdp_origin);
+    let published =
+        artifact::Published::retrieved(&upstream, &deployment.allowed_origins).await?;
     let (callback, _) = tokio::sync::watch::channel(Arc::new(published));
 
     Ok(Arc::new(AppState {
-        ceremony_config: deployment::CeremonyConfig {
-            ccdp_origin: &ccdp_origin,
-            platforms: &platforms,
-        }
-        .serialized(),
+        ceremony_config: deployment.ceremony_config(),
         callback,
         upstream,
-        allowed_origins,
+        allowed_origins: deployment.allowed_origins,
     }))
 }
 
@@ -90,58 +70,6 @@ pub async fn serve(
 /// returns only when the process ends.
 pub async fn refresh_callback(state: Arc<AppState>) {
     artifact::upstream::refresh(state, artifact::upstream::Schedule::DEPLOYED).await
-}
-
-/// The CCDP Distribution this deployment selects, in canonical form. An IPv6
-/// literal is refused: the callback document's policy names this origin as a
-/// `frame-src` source, and a Content-Security-Policy source expression has no
-/// form for one, so a browser discards the source and the document frames
-/// nothing.
-fn ccdp_origin(spelling: &str) -> Result<Origin> {
-    let origin = Origin::parse("CCDP_ORIGIN", spelling)?;
-    if origin.is_ipv6_literal() {
-        return Err(Error::Config {
-            detail: format!(
-                "CCDP_ORIGIN {spelling} names an IPv6 literal, which the \
-                 callback document's Content-Security-Policy cannot carry as a \
-                 source; name the Distribution by host"
-            ),
-        });
-    }
-    Ok(origin)
-}
-
-/// The application origins admitted to read the configuration, each as
-/// written: one that is not already canonical is refused, not folded. The
-/// surrounding whitespace of a comma-separated spelling is not part of a
-/// member and is dropped before the member is read.
-fn allowed_app_origins(list: &[String]) -> Result<Vec<Origin>> {
-    let mut out = Vec::new();
-    // The index is the member's own, so a refusal names the entry the
-    // operator wrote even where a blank one precedes it.
-    for (i, spelling) in list.iter().enumerate() {
-        let spelling = spelling.trim();
-        if spelling.is_empty() {
-            continue;
-        }
-        let field = format!("ALLOWED_APP_ORIGINS[{i}]");
-        let origin = Origin::listed(&field, spelling)?;
-        // A duplicate is refused, not folded.
-        if out.contains(&origin) {
-            return Err(Error::Config {
-                detail: format!("ALLOWED_APP_ORIGINS names {origin} more than once"),
-            });
-        }
-        out.push(origin);
-    }
-    if out.is_empty() {
-        return Err(Error::Config {
-            detail: "ALLOWED_APP_ORIGINS is empty, so no application could \
-                     read the ceremony configuration"
-                .into(),
-        });
-    }
-    Ok(out)
 }
 
 #[cfg(test)]

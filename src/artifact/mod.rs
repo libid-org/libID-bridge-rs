@@ -86,14 +86,15 @@ impl CallbackDocument {
             return Err(ArtifactError::Hashes);
         }
 
-        // One unversioned list: `[allowedOrigins, ccdpOrigin]`.
+        // One unversioned list: `[allowedOrigins, ccdpOrigin]`, written into
+        // the slot alone. The encoder emits no `<`, `>` or `&`, so the
+        // inserted bytes can neither end the slot nor open an element, and
+        // the document read above is the document served.
         let record = serde_json::json!([inputs.allowed_origins, inputs.ccdp_origin]);
         let mut body = String::with_capacity(html.len());
         body.push_str(&html[..layout.slot.start]);
         body.push_str(&json(&record));
         body.push_str(&html[layout.slot.end..]);
-        // The composed document carries the same one slot and mount point.
-        scan::read(&body)?;
 
         let csp = policy(hashes, inputs.ccdp_origin.as_str());
         let csp = HeaderValue::from_str(&csp)
@@ -323,12 +324,25 @@ mod tests {
         }
     }
 
-    /// An inserted value cannot end the script element that carries it.
+    /// An inserted value can neither end the slot that carries it nor open
+    /// an element the scan would have read: the encoder emits no `<`, `>` or
+    /// `&` at all, whatever the value spells.
     #[test]
-    fn an_inserted_value_cannot_end_the_script_element() {
-        let hostile = json(&serde_json::json!(["https://a.example/</script><script>x"]));
-        assert!(!hostile.contains("</script>"), "{hostile}");
-        assert!(!hostile.contains("<script"), "{hostile}");
+    fn an_inserted_value_carries_no_markup() {
+        for hostile in [
+            "https://a.example/</script><script>x",
+            "<script type=\"module\">import('x')</script>",
+            "<main id=\"libid-root\"></main>",
+            "&lt;script&gt;",
+            "caf\u{e9} <\u{2028}>",
+        ] {
+            let escaped = json(&serde_json::json!([hostile]));
+            assert!(escaped.is_ascii(), "{escaped}");
+            assert!(
+                !escaped.contains(['<', '>', '&']),
+                "{hostile:?} left markup in {escaped}"
+            );
+        }
     }
 
     /// A policy naming a hash that is not the code's is refused: the browser

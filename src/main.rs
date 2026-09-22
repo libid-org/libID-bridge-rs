@@ -1,7 +1,5 @@
 //! Binary entrypoint: resolve the configuration, build the state, serve.
 
-use tracing::info;
-
 use libid_server_rs::{
     config::Config,
     serve,
@@ -24,11 +22,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener =
         tokio::net::TcpListener::bind(format!("{}:{}", cfg.host, cfg.port)).await?;
-    info!("libid-server-rs listening on {}", listener.local_addr()?);
+    tracing::info!("libid-server-rs listening on {}", listener.local_addr()?);
 
     serve(bridge, listener, async {
         let _ = tokio::signal::ctrl_c().await;
-        info!("shutting down");
+        tracing::info!("shutting down");
     })
     .await?;
     Ok(())

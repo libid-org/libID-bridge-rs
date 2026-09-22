@@ -352,13 +352,29 @@ mod config {
 
     /// A flag beats the file.
     #[test]
-    fn the_command_line_beats_the_file() {
-        let cfg = resolved(
-            "ccdp_origin = \"https://dist.example\"\n",
-            &["--ccdp-origin", "https://other.example"],
-        )
-        .expect("a file this deployment can read");
-        assert_eq!(cfg.ccdp_origin, "https://other.example");
+    fn the_file_is_the_only_place_the_deployment_is_written() {
+        // Nothing but the file names a Distribution, so there is no second
+        // spelling to disagree with it.
+        for flag in ["--ccdp-origin", "--allowed-app-origins", "--platforms"] {
+            let command = <Config as clap::CommandFactory>::command();
+            assert!(
+                !command
+                    .get_arguments()
+                    .any(|a| a.get_long() == Some(flag.trim_start_matches("--"))),
+                "{flag} is still a flag"
+            );
+        }
+
+        let cfg = resolved("ccdp_origin = \"https://dist.example\"\n", &[])
+            .expect("a file this deployment can read");
+        assert_eq!(cfg.ccdp_origin, "https://dist.example");
+    }
+
+    /// A file naming no Distribution selects the canonical one.
+    #[test]
+    fn an_omitted_ccdp_origin_selects_the_canonical_distribution() {
+        let cfg = resolved("", &[]).expect("an empty file is a readable one");
+        assert_eq!(cfg.ccdp_origin, "https://lib.id");
     }
 
     /// Where neither says anything, the default stands.

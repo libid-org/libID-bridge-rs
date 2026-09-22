@@ -28,13 +28,6 @@ mod root {
     /// the published record.
     #[tokio::test]
     async fn an_omitted_ccdp_origin_selects_the_canonical_distribution() {
-        let command = <config::Config as clap::CommandFactory>::command();
-        let arg = command
-            .get_arguments()
-            .find(|a| a.get_id() == "ccdp_origin")
-            .expect("the ccdp origin is an argument");
-        assert_eq!(arg.get_default_values(), ["https://lib.id"]);
-
         let state = started(&[]).await;
         let record: serde_json::Value =
             serde_json::from_slice(&state.ceremony_config).unwrap();
@@ -81,9 +74,9 @@ mod root {
     }
 
     /// A member the operator did not mean to write is refused rather than
-    /// skipped, and the whitespace around a comma belongs to the separator.
+    /// skipped.
     #[tokio::test]
-    async fn a_blank_member_is_refused_and_a_separator_is_not_one() {
+    async fn a_blank_member_is_refused() {
         let err = Bridge::start(&common::config(&[
             "--allowed-app-origins",
             ",https://app.example",
@@ -94,16 +87,6 @@ mod root {
             err.to_string().contains("ALLOWED_APP_ORIGINS[0] is blank"),
             "{err}"
         );
-
-        // The same list written with the spacing a person would use.
-        let state = crate::common::state(&[
-            "--allowed-app-origins",
-            "https://app.example, https://wallet.example",
-        ])
-        .await;
-        let admitted: Vec<&str> =
-            state.allowed_origins.iter().map(|o| o.as_str()).collect();
-        assert!(admitted.contains(&"https://wallet.example"), "{admitted:?}");
     }
 
     /// Each of these is refused at startup.

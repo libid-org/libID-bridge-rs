@@ -14,9 +14,6 @@ pub const MARKER: &str = "__LIBID_CALLBACK_CONFIG__";
 /// which is the one place the bytes arrive.
 pub const MAX_ARTIFACT_BYTES: usize = 4 * 1024 * 1024;
 
-/// The most script hashes an artifact's policy may name.
-pub const MAX_HASHES: usize = 16;
-
 /// Why an artifact was refused. Every variant is a refusal to serve, never a
 /// repair.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -56,12 +53,6 @@ pub fn script_hashes(policy: &str) -> Result<Vec<String>, ArtifactError> {
         .collect();
     if hashes.is_empty() {
         return refuse("names a script-src with no source".into());
-    }
-    if hashes.len() > MAX_HASHES {
-        return refuse(format!(
-            "names {} script sources, and at most {MAX_HASHES} are read",
-            hashes.len()
-        ));
     }
     if let Some(source) = hashes.iter().find(|s| !is_hash(s)) {
         return refuse(format!("names the script source {source}, and not a hash"));

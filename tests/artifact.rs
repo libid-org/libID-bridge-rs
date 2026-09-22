@@ -119,9 +119,6 @@ mod artifact {
 mod policy {
     use libid_server_rs::artifact::policy::*;
 
-    #[allow(unused_imports)]
-    use crate::common;
-
     /// The hashes of a `script-src` are read in the order the policy names
     /// them, whichever directive order it uses.
     #[test]
@@ -178,17 +175,5 @@ mod policy {
             let err = script_hashes(policy).expect_err(policy);
             assert!(err.to_string().contains(expected), "{policy}: {err}");
         }
-    }
-
-    /// A policy naming more hashes than are read is refused rather than
-    /// truncated.
-    #[test]
-    fn a_policy_naming_more_hashes_than_are_read_is_refused() {
-        let many = (0..=MAX_HASHES)
-            .map(|i| format!("'sha256-{i}='"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let err = script_hashes(&format!("script-src {many}")).unwrap_err();
-        assert!(err.to_string().contains("at most"), "{err}");
     }
 }

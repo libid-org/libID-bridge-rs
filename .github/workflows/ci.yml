@@ -111,6 +111,30 @@ jobs:
             fi
           fi
 
+          # A remediation commit signs off on an earlier one it names, as the
+          # standard DCO probot allows and `.github/dco.yml` permits: the
+          # author adds a trailer they could not have written, without
+          # rewriting history other branches are already built on. GitHub
+          # authors a squash commit with the merging account's profile
+          # identity while `git commit -s` signs off with the git identity,
+          # so a branch whose every commit was signed off correctly can still
+          # be squashed into one that carries no trailer matching its author.
+          # A declaration counts only where the commit making it carries that
+          # trailer itself.
+          remediations=""
+          for r in $(git rev-list --no-merges "$range"); do
+            body=$(git log -1 --format=%B "$r")
+            while read -r target who; do
+              [ -n "$target" ] || continue
+              if printf '%s' "$body" | grep -Fxiq "Signed-off-by: $who"; then
+                remediations="$remediations$target $who
+          "
+              fi
+            done <<EOF
+          $(printf '%s' "$body" | sed -n -E 's/^I, (.+), hereby add my Signed-off-by to this commit: ([0-9a-f]{40})$/\2 \1/p')
+          EOF
+          done
+
           # Merge commits are exempt, as in the standard DCO probot: nobody
           # authors a merge, and the merged commits are themselves in range.
           missing=0
@@ -118,6 +142,10 @@ jobs:
             author=$(git log -1 --format='%an <%ae>' "$sha")
             if git log -1 --format=%B "$sha" \
               | grep -Fxiq "Signed-off-by: $author"; then
+              continue
+            fi
+            if printf '%s' "$remediations" | grep -Fxiq "$sha $author"; then
+              echo "commit $sha is signed off by a later remediation commit."
               continue
             fi
             echo "::error::commit $sha lacks Signed-off-by matching its author: $author"

@@ -89,11 +89,11 @@ mod root {
         assert!(text.contains("*.handles_link"), "{text}");
     }
 
-    /// This bridge admits what the transport admits and narrows nothing of
-    /// its own: a suffix of one label and a bare `*` are members, each
-    /// joining the effective set as written and beside an exact member.
+    /// How wide an allowlist is belongs to whoever writes it: a suffix of one
+    /// label and a bare `*` are members, each joining the effective set as
+    /// written and beside an exact member.
     #[tokio::test]
-    async fn a_member_as_wide_as_the_transport_accepts_is_a_member() {
+    async fn a_member_as_wide_as_an_operator_writes_is_a_member() {
         for member in ["*.com", "*"] {
             let state = started(&[
                 "--allowed-app-origins",

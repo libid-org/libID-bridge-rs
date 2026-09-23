@@ -244,9 +244,8 @@ inside the trust boundary. No public suffix list is consulted, so `*.vercel.app`
 and `*.co.uk` are suffixes like any other. What an allowlist admits is the
 responsibility of whoever writes it.
 
-These rules are the browser's, from `SUBDOMAIN_PATTERN` and `isAllowedOrigin`
-in `ts/packages/popup/src/message.ts`, and the bridge adds none of its own.
-An origin either side calls canonical is one the other does.
+A member and an origin carry one meaning wherever the allowlist is read, so
+a member admits the same origins here and in the document this bridge serves.
 
 A pattern and a `*` belong in `allowed_app_origins` and nowhere else.
 `ccdp_origin` is an exact origin, it is the one origin the callback document's

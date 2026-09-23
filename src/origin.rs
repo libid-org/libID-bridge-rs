@@ -25,8 +25,7 @@ use crate::error::{
 
 /// A canonical origin: `https`, or `http` on exactly `localhost` or
 /// `127.0.0.1`; a host and nothing after it; lowercase host, no default port;
-/// no host holding `*`. What the browser side calls canonical, so the two
-/// admit the same origins. Its two constructors are the only way to get one.
+/// no host holding `*`. Its two constructors are the only way to get one.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct Origin(String);
@@ -64,9 +63,9 @@ impl Origin {
                 "is plaintext http on a host that is not localhost or 127.0.0.1",
             ));
         }
-        // The browser side refuses a host holding `*` (`isCanonicalWebUrl` in
-        // `ts/packages/popup/src/message.ts`), so an allowlist member's own
-        // spelling is never an origin and never admits itself.
+        // A `*` belongs to an allowlist member, not to a host. Refusing it
+        // here is what keeps a member's own spelling from being an origin,
+        // so a peer offering one never admits itself.
         if url.host_str().is_some_and(|host| host.contains('*')) {
             return Err(refuse("names a host holding `*`"));
         }
@@ -123,11 +122,6 @@ impl fmt::Display for Origin {
 /// admits, at every depth. `*.handles.link` admits
 /// `https://app.handles.link` and `https://a.b.handles.link`, and not
 /// `https://handles.link`.
-///
-/// Its grammar and its matching are the browser's, byte for byte
-/// (`ts/packages/popup/src/message.ts`, `SUBDOMAIN_PATTERN` and
-/// `isAllowedOrigin`), save for the byte filter [`Origin::parse`] applies to
-/// every origin this bridge reads.
 ///
 /// No public suffix list is consulted. A pattern places the whole subdomain
 /// namespace of its suffix, at every depth, inside the trust boundary.

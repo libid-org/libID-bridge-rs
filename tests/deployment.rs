@@ -218,9 +218,9 @@ mod origin {
         }
     }
 
-    /// A host the browser side parses is one here too, so the bridge refuses
-    /// no origin the browser admits. Only the CCDP origin becomes a policy
-    /// source, and `names_a_policy_host` is what holds it to that alphabet.
+    /// A host is an origin's host whatever bytes it carries. Only the CCDP
+    /// origin becomes a policy source, and `names_a_policy_host` is what
+    /// holds it to the alphabet a source expression can carry.
     #[test]
     fn an_underscore_in_a_host_is_an_origin_like_any_other() {
         for spelling in [
@@ -357,9 +357,8 @@ mod origin {
         }
     }
 
-    /// A host the browser side calls canonical is one here too. Only the CCDP
-    /// origin becomes a policy source, and only it is held to the alphabet a
-    /// source expression can carry.
+    /// An application origin reaches the callback document as escaped data,
+    /// never as a policy source, so no alphabet beyond a host's own binds it.
     #[test]
     fn a_host_a_policy_could_not_carry_is_an_application_origin_like_any_other() {
         for spelling in [
@@ -383,9 +382,8 @@ mod origin {
     }
 
     /// Every depth under the suffix is admitted, and both ends are anchored.
-    /// These rows are the browser's, run against `isAllowedOrigin`: the two
-    /// sides admit the same origins or a ceremony waits on a peer that never
-    /// matches.
+    /// A member admits the same origins wherever the allowlist is read, or a
+    /// ceremony waits on a peer that never matches.
     #[test]
     fn a_pattern_admits_every_depth_under_its_suffix_and_nothing_else() {
         let members = [Admitted::listed("T", "*.handles.link").unwrap()];

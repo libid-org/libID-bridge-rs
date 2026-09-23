@@ -135,6 +135,88 @@ async fn config_refuses_an_absent_or_unlisted_origin() {
     }
 }
 
+/// An origin pattern admits the subdomains of its suffix at every depth, each
+/// answered with the origin that asked rather than with the pattern, and the
+/// near misses an exact member refuses stay refused.
+#[tokio::test]
+async fn config_admits_a_subdomain_of_a_pattern_and_still_refuses_the_near_misses() {
+    let state = deployment(&["--allowed-app-origins", "*.handles.link"]).await;
+    for admitted in [
+        "https://improve-account-linking.handles.link",
+        "https://a.b.c.d.e.handles.link",
+        "https://x_y.handles.link",
+        "https://xn--80ak6aa92e.handles.link",
+        "https://.handles.link",
+    ] {
+        let resp = config_with(state.clone(), &[("origin", admitted)], "").await;
+        assert_eq!(resp.status(), StatusCode::OK, "{admitted}");
+        assert_eq!(
+            resp.headers()["access-control-allow-origin"],
+            admitted,
+            "the origin that asked is echoed, never the pattern"
+        );
+    }
+    for refused in [
+        "https://handles.link",
+        "http://x.handles.link",
+        "https://x.handles.link:8443",
+        "https://evilhandles.link",
+        "https://handles.link.evil.test",
+        "https://x.handles.link.",
+        "https://X.handles.link",
+    ] {
+        let resp = config_with(state.clone(), &[("origin", refused)], "").await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{refused}");
+        assert!(resp.headers().get("access-control-allow-origin").is_none());
+    }
+}
+
+/// `*` admits every origin a browser stamps, each answered with the origin
+/// that asked. The member itself never reaches the allow-origin header, and
+/// offered as the request's `Origin` it is refused.
+#[tokio::test]
+async fn config_admits_every_origin_under_a_star_and_never_echoes_it() {
+    let state = deployment(&["--allowed-app-origins", "https://app.example,*"]).await;
+    for admitted in [
+        APP_ORIGIN,
+        "https://anything.example",
+        "https://a.b.c.handles.link",
+        "https://app.example:8443",
+        "http://localhost:3000",
+    ] {
+        let resp = config_with(state.clone(), &[("origin", admitted)], "").await;
+        assert_eq!(resp.status(), StatusCode::OK, "{admitted}");
+        assert_eq!(
+            resp.headers()["access-control-allow-origin"],
+            admitted,
+            "the origin that asked is echoed, never the member"
+        );
+    }
+    for refused in ["*", "null", "https://app.example/", "https://APP.example"] {
+        let resp = config_with(state.clone(), &[("origin", refused)], "").await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{refused}");
+        assert!(resp.headers().get("access-control-allow-origin").is_none());
+    }
+}
+
+/// A member's own spelling is not an origin a browser stamps. Offered as the
+/// request's `Origin` it is refused, so it never becomes the origin the answer
+/// names.
+#[tokio::test]
+async fn config_refuses_a_pattern_spelling_as_the_request_origin() {
+    let state = deployment(&["--allowed-app-origins", "*.handles.link"]).await;
+    for spelling in [
+        "*.handles.link",
+        "*",
+        "https://*.handles.link",
+        "https://*.*",
+    ] {
+        let resp = config_with(state.clone(), &[("origin", spelling)], "").await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{spelling}");
+        assert!(resp.headers().get("access-control-allow-origin").is_none());
+    }
+}
+
 /// Two `Origin` headers is not a request a browser sends, and taking the first
 /// would let a caller choose which one is read.
 #[tokio::test]

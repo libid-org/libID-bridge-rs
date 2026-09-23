@@ -118,6 +118,10 @@ refused, and everything around it is served as it arrived. It parses no OAuth
 `state`, selects no CCDP version, and holds no version list: a compatible
 Callback change needs no bridge rebuild.
 
+`allowedOrigins` is an array of strings, every member spelled as it was
+written, whichever kind it is. It carries `ccdpOrigin` itself, literally,
+whatever else the allowlist covers.
+
 The policy's `script-src` carries **only the hashes the artifact was served
 with**. The Distribution publishes the hashes of the code it ships; this bridge
 checks that its `script-src` names hash sources and nothing else, then carries
@@ -209,10 +213,51 @@ the credential.
 |---|---|---|---|
 | — | `HOST`, `--host` | `127.0.0.1` | Bind address (`0.0.0.0` in the container image). Not a file key: the image sets it in the environment, which beats a file. |
 | — | `PORT`, `--port` | `8722` | Bind port. Not a file key, for the same reason. |
-| `allowed_app_origins` | — | *(required)* | Application origins. Exact origins, no patterns; HTTPS, or HTTP on `localhost` or `127.0.0.1`. Each must already be canonical — a trailing slash, an uppercase host or a default port is refused with the canonical spelling named, not folded — and a duplicate is refused. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once. It is the one admission rule: the configuration route admits exactly one `Origin` from it, and the callback document is told the same set. A same-origin read carries no `Origin` and is admitted on `Sec-Fetch-Site: same-origin` alone. |
+| `allowed_app_origins` | — | *(required)* | The application allowlist. A member is an exact origin, an origin pattern or `*`, as described below. A repeated spelling is refused; a pattern and an origin it covers are two members. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once and by its literal spelling. It is the one admission rule: the configuration route admits exactly one `Origin` that a member admits, and echoes that origin itself; the callback document is told the same set. A same-origin read carries no `Origin` and is admitted on `Sec-Fetch-Site: same-origin` alone. |
 | `ccdp_origin` | — | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/callback.html` and everything the browser runs after it, HTTPS, or HTTP on `localhost` or `127.0.0.1`. Published in the configuration and inserted into the callback document, and named as the one `frame-src` source of its policy, so a host a policy source expression cannot name, an IPv6 literal or an underscore among them, is refused. Omitting it selects the canonical libID Distribution. |
 | `platforms` | — | *(required)* | The enabled platforms, as `[[platforms]]` tables: `id`, `client_id`, `versions`, and for `github` its `client_credential`. |
 | — | `LIBID_CONFIG`, `--config` | *(none)* | Path to the configuration file. |
+
+### Allowlist members
+
+A member of `allowed_app_origins` is one of three kinds.
+
+An **exact origin** admits itself: HTTPS, or HTTP on `localhost` or
+`127.0.0.1`, already canonical, so a trailing slash, an uppercase host or a
+default port is refused with the canonical spelling named rather than folded.
+
+An **origin pattern** is `*.` and then the host suffix whose subdomains it
+admits, with no scheme prefix, as in `*.handles.link`. It admits every HTTPS
+origin whose host ends in that suffix at a label boundary, at any depth, and
+not the suffix itself. The suffix is DNS labels: lowercase alphanumeric, with
+hyphens only inside a label, and the last label begins with a letter. So no
+scheme, no port, no path, no uppercase, no underscore, no trailing dot, no
+empty label and no second `*`. A member carrying a `*` that is not a
+well-formed pattern — `*handles.link`, `https://*.handles.link`,
+`*.handles.link:8443` — is refused at startup rather than read as an exact
+origin.
+
+**`*`** admits every origin.
+
+A pattern places the whole subdomain namespace of its suffix, at every depth,
+inside the trust boundary. No public suffix list is consulted, so `*.vercel.app`
+and `*.co.uk` are suffixes like any other. What an allowlist admits is the
+responsibility of whoever writes it.
+
+A member and an origin carry one meaning wherever the allowlist is read, so
+a member admits the same origins here and in the document this bridge serves.
+
+A pattern and a `*` belong in `allowed_app_origins` and nowhere else.
+`ccdp_origin` is an exact origin, it is the one origin the callback document's
+policy names, and it alone is held to the alphabet a policy source expression
+can carry: letters, digits, `-` and `.`.
+
+**A member that is not an exact origin needs a Callback that understands one.**
+A Callback published before origin-pattern support reads the list by the
+exact-origin rule. It raises `invalidCallbackInputs` and renders its failure
+text, before any connection exists, for every ceremony the deployment serves.
+Publish the CCDP Distribution that carries pattern support first, then
+configure the member.
 
 ### Per platform
 

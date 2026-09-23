@@ -12,8 +12,40 @@
 # and port are set with HOST and PORT, or --host and --port, because where the
 # process listens is not ceremony configuration.
 
-# Application origins admitted to read the public ceremony configuration, each
-# in canonical form: no trailing slash, lowercase host, no default port.
+# The application allowlist: what may read the public ceremony configuration.
+# A member is one of three kinds.
+#
+# An exact origin admits itself, in canonical form -- no trailing slash,
+# lowercase host, no default port:
+#
+#     allowed_app_origins = ["https://app.example"]
+#
+# An origin pattern is *. and then the host suffix whose subdomains it admits,
+# with no scheme prefix:
+#
+#     allowed_app_origins = ["*.handles.link"]
+#
+# It admits every HTTPS origin whose host ends in that suffix at a label
+# boundary, at any depth, and not the suffix itself. The suffix is DNS labels:
+# lowercase alphanumeric, hyphens only inside a label, and the last label
+# begins with a letter. So no scheme, no port, no path, no uppercase, no
+# underscore, no trailing dot, no empty label and no second *. A member
+# carrying a * that is not a well-formed pattern is refused at startup rather
+# than read as an exact origin.
+#
+# A bare * admits every origin:
+#
+#     allowed_app_origins = ["*"]
+#
+# A pattern places the whole subdomain namespace of its suffix, at every
+# depth, inside the trust boundary. No public suffix list is consulted. What
+# an allowlist admits is the responsibility of whoever writes it.
+#
+# A member that is not an exact origin needs a Callback that understands one.
+# A Callback published before origin-pattern support reads the list by the
+# exact-origin rule, raising invalidCallbackInputs and rendering its failure
+# text for every ceremony the deployment serves. Publish the CCDP Distribution
+# named below with pattern support first, then configure the member.
 allowed_app_origins = ["https://app.example", "https://wallet.example"]
 
 # The CCDP Distribution: the origin serving the Callback artifact and

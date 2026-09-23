@@ -19,7 +19,10 @@ use crate::{
         Error,
         Result,
     },
-    origin::Origin,
+    origin::{
+        Admitted,
+        Origin,
+    },
 };
 
 /// The checked inputs of one deployment.
@@ -28,8 +31,8 @@ pub struct Deployment {
     pub ccdp_origin: Origin,
     /// The effective admission set `allowedAppOrigins ∪ {ccdpOrigin}`: the one
     /// rule the configuration route applies, and what the callback document
-    /// is told.
-    pub allowed_origins: Arc<[Origin]>,
+    /// is told. The CCDP origin is a member of it literally.
+    pub allowed_origins: Arc<[Admitted]>,
     /// The enabled platforms.
     pub platforms: Vec<PlatformProfile>,
 }
@@ -42,11 +45,14 @@ impl Deployment {
         let ccdp_origin = ccdp_origin(&settings.ccdp_origin)?;
         // The resolved CCDP origin joins the admitted set once; an overridden
         // `CCDP_ORIGIN` does not keep `https://lib.id` admitted unless it is
-        // listed.
-        let allowed_origins: Arc<[Origin]> = {
+        // listed. Membership is the literal spelling: the Callback asserts
+        // the list carries this origin itself, so a member covering it — an
+        // origin pattern, or `*` — is a different member and does not stand
+        // in for it.
+        let allowed_origins: Arc<[Admitted]> = {
             let mut set = allowed_app_origins(&settings.allowed_app_origins)?;
-            if !set.contains(&ccdp_origin) {
-                set.push(ccdp_origin.clone());
+            if !set.iter().any(|m| m.as_str() == ccdp_origin.as_str()) {
+                set.push(Admitted::Exact(ccdp_origin.clone()));
             }
             set.into()
         };
@@ -221,10 +227,12 @@ fn ccdp_origin(spelling: &str) -> Result<Origin> {
     Ok(origin)
 }
 
-/// The application origins admitted to read the configuration, each as
-/// written: one that is not already canonical is refused rather than folded,
-/// and a blank one is a member the operator did not mean to write.
-fn allowed_app_origins(list: &[String]) -> Result<Vec<Origin>> {
+/// The application allowlist admitted to read the configuration, each member
+/// as written: an exact origin that is not already canonical is refused
+/// rather than folded, a pattern that is not well formed is refused rather
+/// than read as an origin, and a blank member is one the operator did not
+/// mean to write.
+fn allowed_app_origins(list: &[String]) -> Result<Vec<Admitted>> {
     let mut out = Vec::new();
     // The index is the member's own, so a refusal names the entry the
     // operator wrote.
@@ -235,14 +243,15 @@ fn allowed_app_origins(list: &[String]) -> Result<Vec<Origin>> {
                 detail: format!("{field} is blank"),
             });
         }
-        let origin = Origin::listed(&field, spelling)?;
-        // A duplicate is refused, not folded.
-        if out.contains(&origin) {
+        let member = Admitted::listed(&field, spelling)?;
+        // A duplicate is refused, not folded. Duplication is of the spelling,
+        // so a pattern and an origin it covers are two members.
+        if out.contains(&member) {
             return Err(Error::Config {
-                detail: format!("ALLOWED_APP_ORIGINS names {origin} more than once"),
+                detail: format!("ALLOWED_APP_ORIGINS names {member} more than once"),
             });
         }
-        out.push(origin);
+        out.push(member);
     }
     if out.is_empty() {
         return Err(Error::Config {

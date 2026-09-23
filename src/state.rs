@@ -20,8 +20,9 @@ pub struct AppState {
     pub callback: watch::Receiver<Option<Arc<crate::artifact::Published>>>,
     /// The effective admission set `allowedAppOrigins ∪ {ccdpOrigin}`: the one
     /// rule the configuration route applies, and what the callback document
-    /// is told.
-    pub allowed_origins: Arc<[crate::origin::Origin]>,
+    /// is told. A member admits one origin or the subdomains of one host
+    /// suffix; the CCDP origin is a member of it literally.
+    pub allowed_origins: Arc<[crate::origin::Admitted]>,
     /// The public ceremony configuration, serialized once: the exact bytes
     /// every admitted caller receives.
     pub ceremony_config: bytes::Bytes,

@@ -73,6 +73,71 @@ mod root {
         assert!(text.contains("ALLOWED_APP_ORIGINS[1]"), "{text}");
     }
 
+    /// A member beginning `*.` is judged as an origin pattern, so one that is
+    /// not well formed stops the process instead of being read as an origin,
+    /// and the refusal names the member by its own index.
+    #[tokio::test]
+    async fn a_malformed_pattern_is_refused_by_its_own_index() {
+        let err = Bridge::start(&common::config(&[
+            "--allowed-app-origins",
+            "https://app.example,*.handles_link",
+        ]))
+        .err()
+        .expect("the second member carries an underscore");
+        let text = err.to_string();
+        assert!(text.contains("ALLOWED_APP_ORIGINS[1]"), "{text}");
+        assert!(text.contains("*.handles_link"), "{text}");
+    }
+
+    /// How wide an allowlist is belongs to whoever writes it: a suffix of one
+    /// label and a bare `*` are members, each joining the effective set as
+    /// written and beside an exact member.
+    #[tokio::test]
+    async fn a_member_as_wide_as_an_operator_writes_is_a_member() {
+        for member in ["*.com", "*"] {
+            let state = started(&[
+                "--allowed-app-origins",
+                &format!("https://app.example,{member}"),
+            ])
+            .await;
+            let members: Vec<&str> =
+                state.allowed_origins.iter().map(|m| m.as_str()).collect();
+            assert_eq!(members[..2], ["https://app.example", member], "{member}");
+        }
+    }
+
+    /// A pattern is a member of the effective set as written, beside an
+    /// origin it covers: members are duplicates only where their spellings
+    /// are.
+    #[tokio::test]
+    async fn a_pattern_and_an_origin_it_covers_are_two_members() {
+        let state = started(&[
+            "--allowed-app-origins",
+            "*.handles.link,https://app.handles.link",
+        ])
+        .await;
+        let members: Vec<&str> =
+            state.allowed_origins.iter().map(|m| m.as_str()).collect();
+        assert_eq!(members[..2], ["*.handles.link", "https://app.handles.link"]);
+    }
+
+    /// The CCDP origin joins the effective set by its literal spelling: a
+    /// pattern covering it is a different member, and the Callback asserts
+    /// the list carries the origin itself.
+    #[tokio::test]
+    async fn a_pattern_covering_the_ccdp_origin_does_not_stand_in_for_it() {
+        let state = started(&[
+            "--ccdp-origin",
+            "https://dist.handles.link",
+            "--allowed-app-origins",
+            "*.handles.link",
+        ])
+        .await;
+        let members: Vec<&str> =
+            state.allowed_origins.iter().map(|m| m.as_str()).collect();
+        assert_eq!(members, ["*.handles.link", "https://dist.handles.link"]);
+    }
+
     /// A member the operator did not mean to write is refused rather than
     /// skipped.
     #[tokio::test]
@@ -102,8 +167,21 @@ mod root {
                 ],
             ),
             (
+                "a duplicate origin pattern",
+                vec!["--allowed-app-origins", "*.handles.link,*.handles.link"],
+            ),
+            (
+                "an origin pattern whose suffix is not lowercase DNS labels",
+                vec!["--allowed-app-origins", "*.HANDLES.link"],
+            ),
+            (
                 "a plaintext admitted origin that is not localhost or 127.0.0.1",
                 vec!["--allowed-app-origins", "http://app.example"],
+            ),
+            (
+                "a CCDP origin written as an origin pattern, which names no \
+                 Distribution and which a policy could not carry",
+                vec!["--ccdp-origin", "*.handles.link"],
             ),
             (
                 "a CCDP origin whose host carries a CSP directive separator",
@@ -118,10 +196,6 @@ mod root {
                 "a CCDP origin whose host carries an underscore, which a \
                  policy source expression has no form for",
                 vec!["--ccdp-origin", "https://dev_box.example"],
-            ),
-            (
-                "an admitted origin whose host carries a CSP keyword quote",
-                vec!["--allowed-app-origins", "https://a'b.example"],
             ),
             (
                 "an admitted origin carrying a trailing slash",

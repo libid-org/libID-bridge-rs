@@ -143,6 +143,14 @@ mod deployment {
 mod origin {
     use libid_server_rs::origin::*;
 
+    /// Whether any of `members` admits `observed`, as the configuration route
+    /// reads one `Origin`: the spelling is found canonical once, and one that
+    /// is not is admitted by no member.
+    fn admits(members: &[Admitted], observed: &str) -> bool {
+        Observed::stamped(observed)
+            .is_some_and(|observed| members.iter().any(|m| m.admits(observed)))
+    }
+
     /// What a policy source expression can name: letters, digits, `-` and
     /// the `.` between labels, and nothing else.
     #[test]
@@ -210,18 +218,276 @@ mod origin {
         }
     }
 
-    /// An underscore in a host is admitted; the bytes a Content-Security-Policy
-    /// reads as syntax are refused.
+    /// A host is an origin's host whatever bytes it carries. Only the CCDP
+    /// origin becomes a policy source, and `names_a_policy_host` is what
+    /// holds it to the alphabet a source expression can carry.
     #[test]
     fn an_underscore_in_a_host_is_an_origin_like_any_other() {
         for spelling in [
             "https://dev_box.example",
             "https://app_staging.example:8443",
+            "https://a;b.example",
+            "https://a'b.example",
         ] {
-            assert!(Origin::parse("T", spelling).is_ok(), "{spelling}");
+            let origin = Origin::parse("T", spelling)
+                .unwrap_or_else(|e| panic!("{spelling}: {e}"));
+            assert_eq!(
+                origin.names_a_policy_host(),
+                !spelling.contains(['_', ';', '\''])
+            );
         }
-        for hostile in ["https://a;b.example", "https://a'b.example"] {
-            assert!(Origin::parse("T", hostile).is_err(), "{hostile}");
+    }
+
+    /// `*` is not a byte an origin is made of, whichever position it takes.
+    #[test]
+    fn no_origin_spells_a_star() {
+        for spelling in [
+            "https://*.handles.link",
+            "https://*",
+            "https://a*b.example",
+            "*.handles.link",
+            "*",
+        ] {
+            assert!(Origin::parse("T", spelling).is_err(), "{spelling}");
+        }
+    }
+
+    /// A well-formed pattern is a member written as it stands, and it
+    /// publishes as that spelling.
+    #[test]
+    fn a_pattern_is_listed_and_published_as_written() {
+        let member = Admitted::listed("T", "*.handles.link").unwrap();
+        assert!(matches!(member, Admitted::Pattern(_)));
+        assert_eq!(member.as_str(), "*.handles.link");
+        assert_eq!(member.to_string(), "*.handles.link");
+        assert_eq!(
+            serde_json::to_string(&member).unwrap(),
+            r#""*.handles.link""#
+        );
+    }
+
+    /// `*` is a member admitting every origin, written as it stands and
+    /// published as that spelling.
+    #[test]
+    fn a_star_admits_every_origin() {
+        let member = Admitted::listed("T", "*").unwrap();
+        assert!(matches!(member, Admitted::Every));
+        assert_eq!(member.as_str(), "*");
+        assert_eq!(member.to_string(), "*");
+        assert_eq!(serde_json::to_string(&member).unwrap(), r#""*""#);
+
+        let members = [member];
+        for observed in [
+            "https://anything.example",
+            "https://a.b.c.handles.link",
+            "https://app.example:8443",
+            "http://localhost:3000",
+            "http://127.0.0.1:8722",
+        ] {
+            assert!(admits(&members, observed), "{observed}");
+        }
+    }
+
+    /// A suffix of one label is a suffix like any other.
+    #[test]
+    fn a_suffix_of_one_label_is_a_suffix_like_any_other() {
+        for (spelling, under, apex) in [
+            ("*.com", "https://shop.com", "https://com"),
+            ("*.localhost", "https://a.localhost", "https://localhost"),
+        ] {
+            let members = [Admitted::listed("T", spelling).unwrap()];
+            assert!(admits(&members, under), "{under}");
+            assert!(!admits(&members, apex), "{apex}");
+        }
+    }
+
+    /// A member beginning `*.` is an origin pattern, and one that is not
+    /// well formed is refused by name rather than read as an origin.
+    #[test]
+    fn a_malformed_pattern_is_refused_rather_than_read_as_an_origin() {
+        for spelling in [
+            // A suffix is DNS labels: no scheme, no port, no path, no query,
+            // no fragment, no credentials.
+            "https://*.handles.link",
+            "http://*.handles.link",
+            "*.handles.link:8443",
+            "*.handles.link/",
+            "*.handles.link/path",
+            "*.handles.link?q=1",
+            "*.handles.link#f",
+            "*.user@handles.link",
+            // A browser stamps a host lowercase, and no label carries an
+            // underscore.
+            "*.HANDLES.link",
+            "*._a.handles.link",
+            // A hyphen lives inside a label, never at either end.
+            "*.-a.handles.link",
+            "*.a-.handles.link",
+            // Every label carries something, and the suffix ends where the
+            // spelling does.
+            "*.handles.link.",
+            "*..handles.link",
+            "*..",
+            "*.",
+            // One `*`, in the one position a pattern spells it.
+            "*.*.handles.link",
+            "*handles.link",
+        ] {
+            let refusal = Admitted::listed("FIELD", spelling).unwrap_err();
+            assert!(
+                refusal.to_string().contains("FIELD"),
+                "{spelling}: {refusal}"
+            );
+        }
+    }
+
+    /// An exact member admits its own spelling and nothing else: neither a
+    /// subdomain of it nor a near miss of it.
+    #[test]
+    fn an_exact_member_admits_only_itself() {
+        let members = [Admitted::listed("T", "https://app.example").unwrap()];
+        assert!(admits(&members, "https://app.example"));
+        for other in [
+            "https://sub.app.example",
+            "https://APP.example",
+            "https://app.example/",
+            "https://app.example:8443",
+        ] {
+            assert!(!admits(&members, other), "{other}");
+        }
+    }
+
+    /// An application origin reaches the callback document as escaped data,
+    /// never as a policy source, so no alphabet beyond a host's own binds it.
+    #[test]
+    fn a_host_a_policy_could_not_carry_is_an_application_origin_like_any_other() {
+        for spelling in [
+            "https://a'b.example",
+            "https://a;b.example",
+            "https://a~b.example",
+            "https://a$b.example",
+        ] {
+            let member = Admitted::listed("T", spelling)
+                .unwrap_or_else(|e| panic!("{spelling} must be a member: {e}"));
+            assert_eq!(member.as_str(), spelling);
+            let observed = Observed::stamped(spelling)
+                .unwrap_or_else(|| panic!("{spelling} must be an observed origin"));
+            assert!(member.admits(observed));
+            assert!(
+                !Origin::parse("CCDP_ORIGIN", spelling)
+                    .is_ok_and(|o| o.names_a_policy_host()),
+                "{spelling} must not name a policy host"
+            );
+        }
+    }
+
+    /// Every depth under the suffix is admitted, and both ends are anchored.
+    /// A member admits the same origins wherever the allowlist is read, or a
+    /// ceremony waits on a peer that never matches.
+    #[test]
+    fn a_pattern_admits_every_depth_under_its_suffix_and_nothing_else() {
+        let members = [Admitted::listed("T", "*.handles.link").unwrap()];
+        for (observed, wanted) in [
+            ("https://improve-account-linking.handles.link", true),
+            // The depth above the suffix is unbounded.
+            ("https://a.b.c.d.e.handles.link", true),
+            ("https://x_y.handles.link", true),
+            ("https://xn--80ak6aa92e.handles.link", true),
+            // An empty label is a label: the dot is where the suffix begins.
+            ("https://.handles.link", true),
+            // The apex carries nothing under the suffix.
+            ("https://handles.link", false),
+            ("http://x.handles.link", false),
+            // The port falls inside the compared slice.
+            ("https://x.handles.link:8443", false),
+            // The label boundary, and the end of the host.
+            ("https://evilhandles.link", false),
+            ("https://handles.link.evil.test", false),
+            // A trailing dot names a different host.
+            ("https://x.handles.link.", false),
+            // A browser stamps a lowercase host.
+            ("https://X.handles.link", false),
+        ] {
+            assert_eq!(admits(&members, observed), wanted, "{observed}");
+        }
+    }
+
+    /// No public suffix list is consulted, and none is to be added: telling
+    /// `*.vercel.app` from `*.handles.link` needs one, and that list is a
+    /// worse liability here than the case it would prevent. A pattern places
+    /// the whole subdomain namespace of its suffix, at every depth, inside
+    /// the trust boundary, and the operator writing one asserts control of
+    /// it.
+    #[test]
+    fn a_public_suffix_is_a_suffix_like_any_other() {
+        for (spelling, under, apex) in [
+            ("*.co.uk", "https://shop.co.uk", "https://co.uk"),
+            (
+                "*.vercel.app",
+                "https://preview.vercel.app",
+                "https://vercel.app",
+            ),
+        ] {
+            let members = [Admitted::listed("T", spelling).unwrap()];
+            assert!(admits(&members, under), "{under}");
+            assert!(!admits(&members, apex), "{apex}");
+        }
+    }
+
+    /// There is no address pattern, and so no loopback pattern: the last
+    /// label of a suffix begins with a letter, and no form of an address
+    /// ends in one.
+    #[test]
+    fn no_pattern_names_an_address() {
+        for spelling in [
+            "*.127.0.0.1",
+            "*.10.0.0.1",
+            "*.0x7f.1",
+            "*.2130706433",
+            "*.[::1]",
+            "*.::1",
+            "*.[::ffff:127.0.0.1]",
+        ] {
+            let refusal = Admitted::listed("FIELD", spelling).unwrap_err();
+            assert!(
+                refusal.to_string().contains("FIELD"),
+                "{spelling}: {refusal}"
+            );
+        }
+    }
+
+    /// A refusal names what is actually wrong, so an operator is not sent
+    /// after the wrong mistake.
+    #[test]
+    fn a_refusal_names_what_is_wrong_with_the_spelling() {
+        for (spelling, why) in [
+            ("*.handles.link:443", "outside the lowercase DNS alphabet"),
+            ("*.HANDLES.link", "outside the lowercase DNS alphabet"),
+            ("*.-a.handles.link", "begins or ends with a hyphen"),
+            ("*.", "an empty label"),
+            ("*.127.0.0.1", "does not begin with a letter"),
+            (
+                "https://*.handles.link",
+                "carries a * and is not an origin pattern",
+            ),
+        ] {
+            let refusal = Admitted::listed("FIELD", spelling).unwrap_err().to_string();
+            assert!(refusal.contains(why), "{spelling}: {refusal}");
+        }
+    }
+
+    /// A member's own spelling is not an origin a browser stamps. Offered as
+    /// one it is refused whichever members the allowlist carries, `*` among
+    /// them, so it never becomes a bound origin.
+    #[test]
+    fn a_member_spelling_is_never_an_observed_origin() {
+        let members = [
+            Admitted::listed("T", "*.handles.link").unwrap(),
+            Admitted::listed("T", "https://app.example").unwrap(),
+            Admitted::listed("T", "*").unwrap(),
+        ];
+        for observed in ["*.handles.link", "*", "*.*", "https://*.handles.link"] {
+            assert!(!admits(&members, observed), "{observed}");
         }
     }
 

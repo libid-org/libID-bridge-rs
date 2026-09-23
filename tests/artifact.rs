@@ -10,7 +10,11 @@ mod artifact {
             policy::ArtifactError,
             *,
         },
-        origin::Origin,
+        origin::{
+            Admitted,
+            Origin,
+            Pattern,
+        },
     };
 
     use crate::common::ARTIFACT as FIXTURE;
@@ -19,20 +23,27 @@ mod artifact {
         Origin::parse("T", spelling).unwrap()
     }
 
-    fn origins() -> Vec<Origin> {
+    fn origins() -> Vec<Admitted> {
         vec![
-            origin("https://app.example"),
-            origin("https://ccdp.example"),
+            Admitted::Exact(origin("https://app.example")),
+            Admitted::Exact(origin("https://ccdp.example")),
         ]
     }
 
     fn compose(html: &str) -> Result<CallbackDocument, ArtifactError> {
+        composed_for(html, &origins())
+    }
+
+    fn composed_for(
+        html: &str,
+        allowed_origins: &[Admitted],
+    ) -> Result<CallbackDocument, ArtifactError> {
         CallbackDocument::compose(
             html,
             &crate::common::artifact_hashes(),
             &DeploymentInputs {
                 ccdp_origin: &origin("https://ccdp.example"),
-                allowed_origins: &origins(),
+                allowed_origins,
             },
         )
     }
@@ -49,6 +60,22 @@ mod artifact {
         assert!(!served.contains(policy::MARKER));
         assert!(served.contains(
             r#"[["https://app.example","https://ccdp.example"],"https://ccdp.example"]"#
+        ));
+    }
+
+    /// Every member reaches the island as the spelling it was written in, so
+    /// the list the Callback reads is an array of strings whichever kind a
+    /// member is.
+    #[test]
+    fn every_member_reaches_the_island_as_its_own_spelling() {
+        let members = vec![
+            Admitted::Pattern(Pattern::listed("T", "*.handles.link").unwrap()),
+            Admitted::Every,
+            Admitted::Exact(origin("https://ccdp.example")),
+        ];
+        let served = text(&composed_for(FIXTURE, &members).unwrap());
+        assert!(served.contains(
+            r#"[["*.handles.link","*","https://ccdp.example"],"https://ccdp.example"]"#
         ));
     }
 

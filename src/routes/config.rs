@@ -26,7 +26,10 @@ use axum::{
 };
 use serde_json::json;
 
-use crate::state::AppState;
+use crate::{
+    origin::Observed,
+    state::AppState,
+};
 
 /// What `Vary` names, on every response this route writes: `Origin` and
 /// `Sec-Fetch-Site` decide the body, on refusals too.
@@ -46,8 +49,8 @@ const PREFLIGHT_MAX_AGE: &str = "600";
 
 /// How a request is admitted to read the configuration.
 enum Admission {
-    /// One `Origin`, matching an admitted origin exactly; echoed as the
-    /// allow-origin.
+    /// One `Origin` a member of the admission set admits; echoed as the
+    /// allow-origin, exactly as it was sent.
     Listed(HeaderValue),
     /// No `Origin`: a same-origin browser `GET`, which carries none, on
     /// `Sec-Fetch-Site: same-origin`. It needs no CORS header.
@@ -56,19 +59,22 @@ enum Admission {
 
 /// How this request may read the configuration, or `None`.
 ///
-/// One `Origin` must match an admitted origin exactly: `null`, a malformed
-/// value, an unlisted one and two headers are refused whatever else the
-/// request carries. With no `Origin`, exactly one `Sec-Fetch-Site:
+/// One `Origin` must be admitted by a member of the admission set: `null`, a
+/// malformed value, an unadmitted one and two headers are refused whatever
+/// else the request carries. With no `Origin`, exactly one `Sec-Fetch-Site:
 /// same-origin` admits. `Referer`, the request host and absent fetch
 /// metadata admit nothing.
 fn admission(state: &AppState, headers: &HeaderMap) -> Option<Admission> {
     match crate::routes::Origins::of(headers) {
         crate::routes::Origins::One(origin) => {
-            let value = origin.to_str().ok()?;
+            // Canonicality is the precondition of every membership test and
+            // depends on no member, so the header is read once however long
+            // the admission set is.
+            let observed = Observed::stamped(origin.to_str().ok()?)?;
             state
                 .allowed_origins
                 .iter()
-                .any(|a| a.as_str() == value)
+                .any(|member| member.admits(observed))
                 .then(|| Admission::Listed(origin.clone()))
         }
         crate::routes::Origins::Several => None,

@@ -245,14 +245,13 @@ and `*.co.uk` are suffixes like any other. What an allowlist admits is the
 responsibility of whoever writes it.
 
 These rules are the browser's, from `SUBDOMAIN_PATTERN` and `isAllowedOrigin`
-in `ts/packages/popup/src/message.ts`. The bridge adds one of its own: an
-origin carrying a byte outside `alnum - _ . : [ ] /` is refused, as a member
-and as a request `Origin`, because the CCDP origin is spliced into a
-`Content-Security-Policy`.
+in `ts/packages/popup/src/message.ts`, and the bridge adds none of its own.
+An origin either side calls canonical is one the other does.
 
 A pattern and a `*` belong in `allowed_app_origins` and nowhere else.
-`ccdp_origin` is an exact origin, and the callback document's policy names
-that origin alone.
+`ccdp_origin` is an exact origin, it is the one origin the callback document's
+policy names, and it alone is held to the alphabet a policy source expression
+can carry: letters, digits, `-` and `.`.
 
 **A member that is not an exact origin needs a Callback that understands one.**
 A Callback published before origin-pattern support reads the list by the

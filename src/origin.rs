@@ -25,8 +25,8 @@ use crate::error::{
 
 /// A canonical origin: `https`, or `http` on exactly `localhost` or
 /// `127.0.0.1`; a host and nothing after it; lowercase host, no default port;
-/// made only of the bytes an origin is made of. Its two constructors are the
-/// only way to get one.
+/// no host holding `*`. What the browser side calls canonical, so the two
+/// admit the same origins. Its two constructors are the only way to get one.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct Origin(String);
@@ -64,20 +64,13 @@ impl Origin {
                 "is plaintext http on a host that is not localhost or 127.0.0.1",
             ));
         }
-        // `;`, quotes and other bytes a Content-Security-Policy reads as syntax
-        // are refused: the CCDP origin is spliced into `script-src` and
-        // `frame-src`.
-        let origin = url.origin().ascii_serialization();
-        if !origin
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"-_.:[]/".contains(&b))
-        {
-            return Err(refuse(
-                "carries a byte an origin is not made of, which a \
-                 Content-Security-Policy would read as syntax",
-            ));
+        // The browser side refuses a host holding `*` (`isCanonicalWebUrl` in
+        // `ts/packages/popup/src/message.ts`), so an allowlist member's own
+        // spelling is never an origin and never admits itself.
+        if url.host_str().is_some_and(|host| host.contains('*')) {
+            return Err(refuse("names a host holding `*`"));
         }
-        Ok(Origin(origin))
+        Ok(Origin(url.origin().ascii_serialization()))
     }
 
     /// `spelling` as written: refused unless it is already canonical, with

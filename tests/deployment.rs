@@ -218,18 +218,23 @@ mod origin {
         }
     }
 
-    /// An underscore in a host is admitted; the bytes a Content-Security-Policy
-    /// reads as syntax are refused.
+    /// A host the browser side parses is one here too, so the bridge refuses
+    /// no origin the browser admits. Only the CCDP origin becomes a policy
+    /// source, and `names_a_policy_host` is what holds it to that alphabet.
     #[test]
     fn an_underscore_in_a_host_is_an_origin_like_any_other() {
         for spelling in [
             "https://dev_box.example",
             "https://app_staging.example:8443",
+            "https://a;b.example",
+            "https://a'b.example",
         ] {
-            assert!(Origin::parse("T", spelling).is_ok(), "{spelling}");
-        }
-        for hostile in ["https://a;b.example", "https://a'b.example"] {
-            assert!(Origin::parse("T", hostile).is_err(), "{hostile}");
+            let origin = Origin::parse("T", spelling)
+                .unwrap_or_else(|e| panic!("{spelling}: {e}"));
+            assert_eq!(
+                origin.names_a_policy_host(),
+                !spelling.contains(['_', ';', '\''])
+            );
         }
     }
 
@@ -349,6 +354,31 @@ mod origin {
             "https://app.example:8443",
         ] {
             assert!(!admits(&members, other), "{other}");
+        }
+    }
+
+    /// A host the browser side calls canonical is one here too. Only the CCDP
+    /// origin becomes a policy source, and only it is held to the alphabet a
+    /// source expression can carry.
+    #[test]
+    fn a_host_a_policy_could_not_carry_is_an_application_origin_like_any_other() {
+        for spelling in [
+            "https://a'b.example",
+            "https://a;b.example",
+            "https://a~b.example",
+            "https://a$b.example",
+        ] {
+            let member = Admitted::listed("T", spelling)
+                .unwrap_or_else(|e| panic!("{spelling} must be a member: {e}"));
+            assert_eq!(member.as_str(), spelling);
+            let observed = Observed::stamped(spelling)
+                .unwrap_or_else(|| panic!("{spelling} must be an observed origin"));
+            assert!(member.admits(observed));
+            assert!(
+                !Origin::parse("CCDP_ORIGIN", spelling)
+                    .is_ok_and(|o| o.names_a_policy_host()),
+                "{spelling} must not name a policy host"
+            );
         }
     }
 

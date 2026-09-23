@@ -198,10 +198,6 @@ mod root {
                 vec!["--ccdp-origin", "https://dev_box.example"],
             ),
             (
-                "an admitted origin whose host carries a CSP keyword quote",
-                vec!["--allowed-app-origins", "https://a'b.example"],
-            ),
-            (
                 "an admitted origin carrying a trailing slash",
                 vec!["--allowed-app-origins", "https://app.example/"],
             ),

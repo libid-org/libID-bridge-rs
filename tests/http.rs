@@ -171,6 +171,19 @@ async fn config_admits_a_subdomain_of_a_pattern_and_still_refuses_the_near_misse
     }
 }
 
+/// A member's own spelling is not an origin a browser stamps. Offered as the
+/// request's `Origin` it is refused, so it never becomes the origin the answer
+/// names.
+#[tokio::test]
+async fn config_refuses_a_pattern_spelling_as_the_request_origin() {
+    let state = deployment(&["--allowed-app-origins", "https://*.handles.link"]).await;
+    for spelling in ["https://*.handles.link", "https://*", "https://*.*"] {
+        let resp = config_with(state.clone(), &[("origin", spelling)], "").await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{spelling}");
+        assert!(resp.headers().get("access-control-allow-origin").is_none());
+    }
+}
+
 /// Two `Origin` headers is not a request a browser sends, and taking the first
 /// would let a caller choose which one is read.
 #[tokio::test]

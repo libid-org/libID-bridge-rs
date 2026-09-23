@@ -136,10 +136,11 @@ impl Pattern {
     /// and is refused where it is not a well-formed one.
     pub const PREFIX: &'static str = "https://*.";
 
-    /// `spelling` as written, well formed: the scheme is `https`, the suffix
-    /// carries at least one `.` and no second `*`, and it is the host of a
-    /// canonical origin, which [`Origin::listed`] decides so that one
-    /// validator answers for both member kinds. A refusal names `field`.
+    /// `spelling` as written, well formed: the scheme is `https`, and the
+    /// suffix is the host of a canonical origin — which [`Origin::listed`]
+    /// decides, so that one validator answers for both member kinds —
+    /// carrying at least one `.`, no second `*`, no port, no trailing `.`
+    /// and no empty label. A refusal names `field`.
     pub fn listed(field: &str, spelling: &str) -> Result<Pattern> {
         let refuse = |why: &str| Error::Config {
             detail: format!(
@@ -160,26 +161,35 @@ impl Pattern {
         if Origin::listed(field, &format!("https://{suffix}")).is_err() {
             return Err(refuse("names a suffix that is not a canonical host"));
         }
+        // A URL parser keeps a port, an empty label and a trailing `.`, and
+        // reports the result canonical, so the three are read off the
+        // spelling. Each leaves a suffix no browser-stamped host ends in, and
+        // so a pattern that admits nothing at all.
+        if suffix.contains(':') {
+            return Err(refuse("names a suffix carrying a port"));
+        }
+        if suffix.starts_with('.') || suffix.contains("..") {
+            return Err(refuse("names a suffix carrying an empty label"));
+        }
+        if suffix.ends_with('.') {
+            return Err(refuse("names a suffix carrying a trailing dot"));
+        }
         Ok(Pattern(spelling.to_owned()))
     }
 
-    /// Whether this pattern admits `origin`, as a browser stamped it.
+    /// Whether this pattern admits `origin`, which [`Admitted::admits`] has
+    /// already found canonical.
     ///
-    /// It does when `origin` is a canonical origin, spelled `https://` and
-    /// then a host carrying no `:` and no `/`, which ends in `.` and this
-    /// pattern's suffix, with one nonempty label carrying no `.` ahead of
-    /// that. Both ends are anchored.
+    /// It does when `origin` is spelled `https://` and then a host carrying
+    /// no `:` and no `/`, which ends in `.` and this pattern's suffix, with
+    /// one nonempty label carrying no `.` ahead of that. Both ends are
+    /// anchored.
     ///
     /// Nothing is normalised here. Both sides are canonical already — a
     /// browser stamps an origin lowercase and in punycode, and a suffix in
     /// any other form is refused at construction — so the comparison is of
     /// bytes.
-    pub fn admits(&self, origin: &str) -> bool {
-        // The precondition an exact member is held to, applied to what the
-        // browser stamped; only whether it holds is read.
-        if Origin::listed("Origin", origin).is_err() {
-            return false;
-        }
+    fn admits(&self, origin: &str) -> bool {
         let Some(host) = origin.strip_prefix("https://") else {
             return false;
         };
@@ -226,18 +236,41 @@ pub enum Admitted {
 impl Admitted {
     /// `spelling` as written. A member beginning with [`Pattern::PREFIX`] is
     /// an origin pattern and is refused where it is not a well-formed one,
-    /// rather than read as an origin; every other member is an exact
-    /// canonical origin. A refusal names `field`.
+    /// rather than read as an origin; a member carrying a `*` anywhere else
+    /// is refused too; every other member is an exact canonical origin. A
+    /// refusal names `field`.
     pub fn listed(field: &str, spelling: &str) -> Result<Admitted> {
         if spelling.starts_with(Pattern::PREFIX) {
-            Pattern::listed(field, spelling).map(Admitted::Pattern)
-        } else {
-            Origin::listed(field, spelling).map(Admitted::Exact)
+            return Pattern::listed(field, spelling).map(Admitted::Pattern);
         }
+        // No browser stamps an origin whose host carries a `*`, so a member
+        // carrying one outside the pattern prefix is a mistyped pattern and
+        // matches nothing. Reading it as an exact origin keeps the typo until
+        // a ceremony hangs waiting for a peer that never matches.
+        if spelling.contains('*') {
+            return Err(Error::Config {
+                detail: format!(
+                    "{field} {spelling} carries a * and is not an origin \
+                     pattern, which is https://*. followed by the host whose \
+                     direct subdomains it admits, as in https://*.handles.link"
+                ),
+            });
+        }
+        Origin::listed(field, spelling).map(Admitted::Exact)
     }
 
     /// Whether this member admits `origin`, as a browser stamped it.
+    ///
+    /// Canonicality is decided ahead of membership of either kind. A member
+    /// spelling is not an origin a browser stamps, so a peer offering one as
+    /// its own origin is turned away by that precondition rather than matched
+    /// by the literal comparison and bound.
     pub fn admits(&self, origin: &str) -> bool {
+        // The precondition an exact member is held to, applied to what the
+        // browser stamped; only whether it holds is read.
+        if Origin::listed("Origin", origin).is_err() {
+            return false;
+        }
         match self {
             Admitted::Exact(exact) => exact.as_str() == origin,
             Admitted::Pattern(pattern) => pattern.admits(origin),

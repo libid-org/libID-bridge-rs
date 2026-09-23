@@ -247,20 +247,32 @@ mod origin {
         );
     }
 
-    /// A member beginning `https://*.` is an origin pattern, and one that is
-    /// not well formed is refused by name rather than read as an origin.
+    /// A `*` makes a member an origin pattern, and one that is not well
+    /// formed is refused by name rather than read as an origin.
     #[test]
     fn a_malformed_pattern_is_refused_rather_than_read_as_an_origin() {
         for spelling in [
+            // The suffix is a host and nothing more. A URL parser keeps a
+            // port, an empty label and a trailing dot, and each leaves a
+            // suffix no browser-stamped host ends in.
+            "https://*.handles.link:8443",
+            "https://*.handles.link.",
+            "https://*..handles.link",
+            "https://*..",
+            "https://*.link",
             "https://*.",
             "https://*.localhost",
-            "https://*.*.handles.link",
-            "https://*.HANDLES.link",
             "https://*.handles.link/",
             "https://*.handles.link/path",
             "https://*.handles.link?q=1",
             "https://*.handles.link#f",
             "https://*.user@handles.link",
+            // The suffix is already in the form a browser stamps.
+            "https://*.HANDLES.link",
+            // One `*`, in the one position a pattern spells it.
+            "https://*.*.handles.link",
+            "https://*handles.link",
+            // HTTPS, on a loopback host as on any other.
             "http://*.localhost",
             "http://*.handles.link",
         ] {
@@ -291,7 +303,7 @@ mod origin {
     /// One label under the suffix is admitted, and both ends are anchored.
     #[test]
     fn a_pattern_admits_one_label_under_its_suffix_and_nothing_else() {
-        let pattern = Pattern::listed("T", "https://*.handles.link").unwrap();
+        let member = Admitted::listed("T", "https://*.handles.link").unwrap();
         for (observed, admitted) in [
             ("https://improve-account-linking.handles.link", true),
             ("https://x_y.handles.link", true),
@@ -311,7 +323,24 @@ mod origin {
             // A browser stamps a lowercase host.
             ("https://X.handles.link", false),
         ] {
-            assert_eq!(pattern.admits(observed), admitted, "{observed}");
+            assert_eq!(member.admits(observed), admitted, "{observed}");
+        }
+    }
+
+    /// A member's own spelling is not an origin a browser stamps. Offered as
+    /// one it is refused, by the pattern that spells it and by an exact
+    /// member alongside it, so it never becomes a bound origin.
+    #[test]
+    fn a_member_spelling_is_never_an_observed_origin() {
+        let members = [
+            Admitted::listed("T", "https://*.handles.link").unwrap(),
+            Admitted::listed("T", "https://app.example").unwrap(),
+        ];
+        for observed in ["https://*.handles.link", "https://*", "https://*.*"] {
+            assert!(
+                !members.iter().any(|member| member.admits(observed)),
+                "{observed}"
+            );
         }
     }
 

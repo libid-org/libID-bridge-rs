@@ -20,10 +20,14 @@
 #     allowed_app_origins = ["https://app.example", "https://*.handles.link"]
 #
 # https://*.handles.link admits https://app.handles.link, and neither
-# https://handles.link nor https://a.b.handles.link. No public suffix list is
-# consulted: a pattern places the whole direct-subdomain namespace of its
-# suffix inside the trust boundary, and the operator writing one asserts
-# control of that namespace.
+# https://handles.link nor https://a.b.handles.link. The suffix is a host and
+# nothing more: at least two labels, lowercase, no port, no trailing dot, no
+# empty label and no second *. A member carrying a * that is not a well-formed
+# pattern is refused at startup rather than read as an exact origin.
+#
+# No public suffix list is consulted: a pattern places the whole
+# direct-subdomain namespace of its suffix inside the trust boundary, and the
+# operator writing one asserts control of that namespace.
 #
 # A Callback that does not understand patterns accepts a pattern member and
 # then matches it against no peer, so the ceremony never fails and never

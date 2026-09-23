@@ -5,3 +5,8 @@ target/
 # Local configuration and secrets: the builder stage copies the checkout.
 /bridge.toml
 /.env*
+# Browser cookie exports, and the live suite's settings, sessions and
+# profiles: session secrets, never build input.
+/*_json_*.json
+/ceremony-tests/.env*
+/ceremony-tests/*_json_*.json

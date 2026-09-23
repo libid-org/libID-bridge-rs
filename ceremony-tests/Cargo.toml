@@ -1,0 +1,55 @@
+[package]
+name = "ceremony-tests"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/libid-org/libID-server-rs"
+description = "The live ceremony suite: real MPC-TLS sessions through a notary of its own against github.com, api.x.com and accounts.google.com, driven from a Chrome, with the deployment under test behind the `Deployment` interface."
+publish = false
+
+[dependencies]
+# ── the prover and the notary ───────────────────────────────────────────
+# One source, one revision: libid-tlsn is git-only and its API exposes
+# libid-transcript types. The tlsn and mpz revisions they build on are pinned
+# by the [patch] tables of the workspace root -- the one manual step when this
+# crate moves (README).
+libid-ceremony = { git = "https://github.com/libid-org/libID-rs", tag = "v0.4.0" }
+libid-crypto = { git = "https://github.com/libid-org/libID-rs", tag = "v0.4.0" }
+libid-tlsn = { git = "https://github.com/libid-org/libID-rs", tag = "v0.4.0" }
+libid-transcript = { git = "https://github.com/libid-org/libID-rs", tag = "v0.4.0" }
+
+# ── the Google ID token: RS256 over a JWKS fetched over verified TLS ────
+ring = "0.17"
+# `ring` is the one crypto provider in the graph, so `ClientConfig::builder()`
+# has exactly one to pick. Declared as the root declares it: a
+# default-feature declaration would unify aws-lc-rs in.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+webpki-root-certs = "1"
+
+# ── requests as the suite's prover sends them ───────────────────────────
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+
+# ── the browser ─────────────────────────────────────────────────────────
+chromiumoxide = { version = "0.7", default-features = false, features = ["tokio-runtime"] }
+totp-rs = "5"
+tempfile = "3"
+futures-util = "0.3"
+
+# ── settings ────────────────────────────────────────────────────────────
+dotenvy = "0.15"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# ── the redirect fixture Chrome is checked against ──────────────────────
+axum = "0.8"
+
+# ── everything else ─────────────────────────────────────────────────────
+base64 = "0.22"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+url = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }

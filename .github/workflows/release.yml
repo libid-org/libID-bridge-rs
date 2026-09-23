@@ -1,13 +1,18 @@
 name: Release
 
-# Publishing a GitHub Release tagged `v<version>` runs the full checks and
-# then builds + pushes the container image to
+# Publishing a GitHub Release tagged `v<version>` produces the release
+# artifact: a Docker image pushed to
 #   ghcr.io/libid-org/libid-bridge-rs:<version>
 #   ghcr.io/libid-org/libid-bridge-rs:latest
-# using the built-in GITHUB_TOKEN — no long-lived registry credential.
+# and the same two tags under the legacy name libid-server-rs,
+# using the built-in GITHUB_TOKEN, with no long-lived registry credential.
 #
-# Every third-party action is pinned by commit SHA, with the tag in a
-# comment, so a moved tag cannot change what executes.
+# Three jobs: verify-tag and checks run first, and docker publishes only once
+# both pass. The Rust checks are ci.yml's: a release must not outrun a red
+# main.
+#
+# Every third-party action is pinned by commit SHA, with the tag in a comment,
+# so a moved tag cannot change what executes.
 
 on:
   release:
@@ -15,28 +20,60 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 env:
+  # Every cargo invocation, not just clippy, treats warnings as errors.
   RUSTFLAGS: "-D warnings"
   CARGO_TERM_COLOR: always
+  # Incremental state is written, cached and never read in CI.
   CARGO_INCREMENTAL: 0
+  # Rust stable, pinned so a toolchain release cannot break a release.
   RUST_VERSION: 1.97.1
+  # Nightly is for `cargo +"$NIGHTLY" fmt` ONLY; see ci.yml.
   NIGHTLY: nightly-2026-08-10
   IMAGE: ghcr.io/libid-org/libid-bridge-rs
   # Keep existing deployments following the old image name working.
   LEGACY_IMAGE: ghcr.io/libid-org/libid-server-rs
 
 jobs:
-  # The same gate as CI: nothing ships from a tree that does not pass the
-  # checks a PR would have to pass.
+  # ---------------------------------------------------------------------------
+  # The tag names the version the manifest already carries: the tag is a
+  # pointer, never a source. Read from env, not `${{ }}`-interpolated into the
+  # script: git permits shell metacharacters in tag names.
+  # ---------------------------------------------------------------------------
+  verify-tag:
+    name: Release tag matches version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Tag matches Cargo.toml version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)"
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::release tag '$TAG' does not match 'v$version'"
+            exit 1
+          fi
+          echo "Tag $TAG matches Cargo.toml."
+
+  # ---------------------------------------------------------------------------
+  # The same checks as ci.yml: nothing ships from a tree that does not pass
+  # the checks a PR would have to pass.
+  # ---------------------------------------------------------------------------
   checks:
-    name: Checks
+    name: Rust checks
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Nightly first, stable second: this action makes the LAST toolchain it
+      # installs the default, and everything except `cargo +"$NIGHTLY" fmt`
+      # must run on the pinned stable.
       - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
         with:
           toolchain: ${{ env.NIGHTLY }}
@@ -52,44 +89,45 @@ jobs:
         run: cargo +"$NIGHTLY" fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
       - name: Tests
-        run: cargo test --all
+        run: cargo test --all --locked
 
+  # ---------------------------------------------------------------------------
+  # The image, linux/amd64, tagged with the version and `latest`.
+  # ---------------------------------------------------------------------------
   docker:
-    name: Build and push image
+    name: Docker image → ghcr.io
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    needs: [checks]
+    needs: [verify-tag, checks]
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # The tag is a pointer, never a source: it must name a strict SemVer
-      # version. Read from env, not `${{ }}`-interpolated into the script —
-      # git permits shell metacharacters in tag names.
-      - name: Derive version from the release tag
-        id: version
-        env:
-          TAG: ${{ github.event.release.tag_name }}
-        run: |
-          set -euo pipefail
-          version="${TAG#v}"
-          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
-            || { echo "::error::release tag '${TAG}' is not vX.Y.Z"; exit 1; }
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # verify-tag has already matched the tag to the manifest, so the
+      # version is the tag without its `v`.
+      - name: Version from the release tag
+        id: version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           push: true

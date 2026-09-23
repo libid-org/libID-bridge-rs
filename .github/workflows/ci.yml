@@ -1,7 +1,8 @@
 name: CI
 
-# Two jobs: rust (fmt/clippy/test) and dco. Conventions and action SHA pins
-# copied from libID-contracts/libID-rs.
+# Two PR jobs: rust (fmt/clippy/test) and dco. Releases run their own
+# workflow (release.yml), which re-runs the rust checks before publishing
+# anything; the live ceremony suite runs in ceremony.yml.
 #
 # Every third-party action is pinned by commit SHA, with the tag in a
 # comment, so a moved tag cannot change what executes.

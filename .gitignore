@@ -2,3 +2,7 @@
 # Local configuration and secrets.
 /bridge.toml
 /.env*
+
+# Browser cookie exports: a session secret, never a fixture. The rung reads one
+# from the gitignored .env* path GOOGLE_TEST_ALICE_COOKIES_FILE names.
+/*_json_*.json

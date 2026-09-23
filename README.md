@@ -288,6 +288,23 @@ The image sets
 `HOST=0.0.0.0` and `PORT=8722` and carries a `/health` healthcheck on that
 port; `-e PORT=` moves both.
 
+## Testing
+
+`cargo test` is hermetic: it opens no socket outside the process and needs no
+credentials.
+
+The ceremonies the published configuration starts are covered by
+[`ceremony-tests`](ceremony-tests/README.md), a crate of its own that this
+repository runs with its bridge as the deployment under test, one rung at a
+time:
+
+```sh
+cargo test --features live-ceremony --test ceremony -- --test-threads=1
+```
+
+The crate's README names every setting and rung, and the exports that renew
+the X and Google sessions.
+
 ## Building from source
 
 ```sh

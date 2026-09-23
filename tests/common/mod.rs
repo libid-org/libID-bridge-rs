@@ -3,6 +3,8 @@
 //! crate's own tests and, under the `fixtures` feature, for the integration
 //! tests.
 
+pub mod bridge;
+
 use std::{
     collections::VecDeque,
     sync::{

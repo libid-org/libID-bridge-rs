@@ -1,5 +1,10 @@
 //! A configured origin in its canonical form: what every origin this bridge
 //! admits, publishes or dials is checked into, once, at startup.
+//!
+//! An application allowlist is written in the wider vocabulary of
+//! [`Admitted`]: an exact origin, or an origin pattern admitting the direct
+//! subdomains of one host. Everything else — the Distribution this bridge
+//! dials, the origin its policy names — is an [`Origin`] and nothing else.
 
 use std::fmt;
 
@@ -111,6 +116,146 @@ impl Origin {
 impl fmt::Display for Origin {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+/// An origin pattern: `https://*.` followed by a suffix host, admitting the
+/// direct subdomains of that host and not the host itself.
+/// `https://*.handles.link` admits `https://app.handles.link`, and neither
+/// `https://handles.link` nor `https://a.b.handles.link`.
+///
+/// No public suffix list is consulted. A pattern places the whole
+/// direct-subdomain namespace of its suffix inside the trust boundary, and
+/// the operator writing one asserts control of that namespace.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct Pattern(String);
+
+impl Pattern {
+    /// What an origin pattern begins with. A member beginning with it is one,
+    /// and is refused where it is not a well-formed one.
+    pub const PREFIX: &'static str = "https://*.";
+
+    /// `spelling` as written, well formed: the scheme is `https`, the suffix
+    /// carries at least one `.` and no second `*`, and it is the host of a
+    /// canonical origin, which [`Origin::listed`] decides so that one
+    /// validator answers for both member kinds. A refusal names `field`.
+    pub fn listed(field: &str, spelling: &str) -> Result<Pattern> {
+        let refuse = |why: &str| Error::Config {
+            detail: format!(
+                "{field} {spelling} {why}; an origin pattern is https://*. \
+                 followed by the host whose direct subdomains it admits, \
+                 as in https://*.handles.link"
+            ),
+        };
+        let Some(suffix) = spelling.strip_prefix(Pattern::PREFIX) else {
+            return Err(refuse("is not an origin pattern"));
+        };
+        if !suffix.contains('.') {
+            return Err(refuse("names a suffix of one label"));
+        }
+        if suffix.contains('*') {
+            return Err(refuse("names a suffix carrying a second *"));
+        }
+        if Origin::listed(field, &format!("https://{suffix}")).is_err() {
+            return Err(refuse("names a suffix that is not a canonical host"));
+        }
+        Ok(Pattern(spelling.to_owned()))
+    }
+
+    /// Whether this pattern admits `origin`, as a browser stamped it.
+    ///
+    /// It does when `origin` is a canonical origin, spelled `https://` and
+    /// then a host carrying no `:` and no `/`, which ends in `.` and this
+    /// pattern's suffix, with one nonempty label carrying no `.` ahead of
+    /// that. Both ends are anchored.
+    ///
+    /// Nothing is normalised here. Both sides are canonical already — a
+    /// browser stamps an origin lowercase and in punycode, and a suffix in
+    /// any other form is refused at construction — so the comparison is of
+    /// bytes.
+    pub fn admits(&self, origin: &str) -> bool {
+        // The precondition an exact member is held to, applied to what the
+        // browser stamped; only whether it holds is read.
+        if Origin::listed("Origin", origin).is_err() {
+            return false;
+        }
+        let Some(host) = origin.strip_prefix("https://") else {
+            return false;
+        };
+        if host.contains(':') || host.contains('/') {
+            return false;
+        }
+        let Some(label) = host
+            .strip_suffix(self.suffix())
+            .and_then(|head| head.strip_suffix('.'))
+        else {
+            return false;
+        };
+        !label.is_empty() && !label.contains('.')
+    }
+
+    /// The spelling.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The host whose direct subdomains this pattern admits.
+    fn suffix(&self) -> &str {
+        &self.0[Pattern::PREFIX.len()..]
+    }
+}
+
+impl fmt::Display for Pattern {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// One member of an application allowlist, published as the spelling it was
+/// written in.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum Admitted {
+    /// A canonical origin, admitting itself and nothing else.
+    Exact(Origin),
+    /// An origin pattern, admitting the direct subdomains of its suffix.
+    Pattern(Pattern),
+}
+
+impl Admitted {
+    /// `spelling` as written. A member beginning with [`Pattern::PREFIX`] is
+    /// an origin pattern and is refused where it is not a well-formed one,
+    /// rather than read as an origin; every other member is an exact
+    /// canonical origin. A refusal names `field`.
+    pub fn listed(field: &str, spelling: &str) -> Result<Admitted> {
+        if spelling.starts_with(Pattern::PREFIX) {
+            Pattern::listed(field, spelling).map(Admitted::Pattern)
+        } else {
+            Origin::listed(field, spelling).map(Admitted::Exact)
+        }
+    }
+
+    /// Whether this member admits `origin`, as a browser stamped it.
+    pub fn admits(&self, origin: &str) -> bool {
+        match self {
+            Admitted::Exact(exact) => exact.as_str() == origin,
+            Admitted::Pattern(pattern) => pattern.admits(origin),
+        }
+    }
+
+    /// The spelling.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Admitted::Exact(exact) => exact.as_str(),
+            Admitted::Pattern(pattern) => pattern.as_str(),
+        }
+    }
+}
+
+impl fmt::Display for Admitted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

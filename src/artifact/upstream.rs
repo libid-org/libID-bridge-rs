@@ -30,7 +30,10 @@ use super::{
     DeploymentInputs,
     Published,
 };
-use crate::origin::Origin;
+use crate::origin::{
+    Admitted,
+    Origin,
+};
 
 /// The artifact's path under the CCDP origin.
 pub const ARTIFACT_PATH: &str = "/ccdp/callback.html";
@@ -217,7 +220,7 @@ impl Upstream {
     /// refresh loop both take this path.
     pub async fn retrieve(
         &self,
-        allowed_origins: &[Origin],
+        allowed_origins: &[Admitted],
         etag: Option<&str>,
     ) -> Result<Option<Published>, FetchError> {
         match self.fetch(etag).await? {
@@ -348,7 +351,7 @@ impl Fetched {
 /// is.
 pub struct Refresher {
     upstream: Upstream,
-    allowed_origins: Arc<[Origin]>,
+    allowed_origins: Arc<[Admitted]>,
     callback: watch::Sender<Option<Arc<Published>>>,
     failure: watch::Sender<Option<String>>,
     metrics: Arc<crate::metrics::Metrics>,
@@ -360,7 +363,7 @@ impl Refresher {
     /// callback route reports while it has no document.
     pub fn new(
         upstream: Upstream,
-        allowed_origins: Arc<[Origin]>,
+        allowed_origins: Arc<[Admitted]>,
         callback: watch::Sender<Option<Arc<Published>>>,
         failure: watch::Sender<Option<String>>,
         metrics: Arc<crate::metrics::Metrics>,

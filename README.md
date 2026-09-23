@@ -118,6 +118,10 @@ refused, and everything around it is served as it arrived. It parses no OAuth
 `state`, selects no CCDP version, and holds no version list: a compatible
 Callback change needs no bridge rebuild.
 
+`allowedOrigins` is an array of strings, every member spelled as it was
+written and an origin pattern among them where one is configured. It carries
+`ccdpOrigin` itself, literally, whatever else the allowlist covers.
+
 The policy's `script-src` carries **only the hashes the artifact was served
 with**. The Distribution publishes the hashes of the code it ships; this bridge
 checks that its `script-src` names hash sources and nothing else, then carries
@@ -188,6 +192,8 @@ complete starting point:
 
 ```toml
 allowed_app_origins = ["https://app.example", "https://wallet.example"]
+# A member may also be an origin pattern, where the Distribution's Callback
+# understands one: allowed_app_origins = ["https://*.handles.link"]
 
 [[platforms]]
 id                        = "github"
@@ -209,10 +215,51 @@ the credential.
 |---|---|---|---|
 | — | `HOST`, `--host` | `127.0.0.1` | Bind address (`0.0.0.0` in the container image). Not a file key: the image sets it in the environment, which beats a file. |
 | — | `PORT`, `--port` | `8722` | Bind port. Not a file key, for the same reason. |
-| `allowed_app_origins` | — | *(required)* | Application origins. Exact origins, no patterns; HTTPS, or HTTP on `localhost` or `127.0.0.1`. Each must already be canonical — a trailing slash, an uppercase host or a default port is refused with the canonical spelling named, not folded — and a duplicate is refused. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once. It is the one admission rule: the configuration route admits exactly one `Origin` from it, and the callback document is told the same set. A same-origin read carries no `Origin` and is admitted on `Sec-Fetch-Site: same-origin` alone. |
+| `allowed_app_origins` | — | *(required)* | The application allowlist. A member is an exact origin — HTTPS, or HTTP on `localhost` or `127.0.0.1`, and already canonical, so a trailing slash, an uppercase host or a default port is refused with the canonical spelling named rather than folded — or an **origin pattern**, `https://*.<suffix>`, described below. A repeated spelling is refused; a pattern and an origin it covers are two members. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once and by its literal spelling. It is the one admission rule: the configuration route admits exactly one `Origin` that a member admits, and echoes that origin itself; the callback document is told the same set. A same-origin read carries no `Origin` and is admitted on `Sec-Fetch-Site: same-origin` alone. |
 | `ccdp_origin` | — | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/callback.html` and everything the browser runs after it, HTTPS, or HTTP on `localhost` or `127.0.0.1`. Published in the configuration and inserted into the callback document, and named as the one `frame-src` source of its policy, so a host a policy source expression cannot name, an IPv6 literal or an underscore among them, is refused. Omitting it selects the canonical libID Distribution. |
 | `platforms` | — | *(required)* | The enabled platforms, as `[[platforms]]` tables: `id`, `client_id`, `versions`, and for `github` its `client_credential`. |
 | — | `LIBID_CONFIG`, `--config` | *(none)* | Path to the configuration file. |
+
+### Origin patterns
+
+An allowlist member may be an **origin pattern**: `https://*.` and then the
+host whose direct subdomains it admits, as in `https://*.handles.link`. It
+admits one nonempty label under that host, and both ends are anchored.
+
+| Origin | `https://*.handles.link` |
+|---|---|
+| `https://improve-account-linking.handles.link` | admitted |
+| `https://x_y.handles.link` | admitted |
+| `https://xn--80ak6aa92e.handles.link` | admitted |
+| `https://handles.link` | refused — the apex is not a subdomain |
+| `https://a.b.handles.link` | refused — one label only |
+| `http://x.handles.link` | refused — scheme |
+| `https://x.handles.link:8443` | refused — port |
+| `https://evilhandles.link` | refused — no label boundary |
+| `https://handles.link.evil.test` | refused — anchored at the end |
+| `https://.handles.link` | refused — empty label |
+| `https://x.handles.link.` | refused — a trailing dot names another host |
+| `https://X.handles.link` | refused — not canonical |
+
+Nothing is normalised while matching. A browser stamps an origin lowercase and
+in punycode, and a pattern whose suffix is in any other form is refused at
+startup, so both sides are canonical already and the comparison is of bytes.
+
+A pattern belongs in `allowed_app_origins` and nowhere else. `ccdp_origin` is
+an exact origin, and the callback document's policy names that origin alone,
+so no pattern reaches a `Content-Security-Policy`.
+
+No public suffix list is consulted, and none is to be added. `https://*.co.uk`
+satisfies the grammar: a pattern places the whole direct-subdomain namespace of
+its suffix inside the trust boundary, and the operator writing one asserts
+control of that namespace.
+
+**A pattern needs a Callback that understands one.** A Callback that does not
+still accepts a pattern member — a URL parser reads `*` as an ordinary host
+byte, so the member passes its validation — and then matches it against no
+peer. The ceremony does not fail; it never becomes ready. Configure a pattern
+only where the CCDP Distribution this bridge serves carries a Callback that
+understands patterns.
 
 ### Per platform
 

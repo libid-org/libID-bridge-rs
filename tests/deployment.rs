@@ -225,6 +225,96 @@ mod origin {
         }
     }
 
+    /// `*` is not a byte an origin is made of, whichever position it takes.
+    #[test]
+    fn no_origin_spells_a_star() {
+        for spelling in ["https://*.handles.link", "https://*", "https://a*b.example"] {
+            assert!(Origin::parse("T", spelling).is_err(), "{spelling}");
+        }
+    }
+
+    /// A well-formed pattern is a member written as it stands, and it
+    /// publishes as that spelling.
+    #[test]
+    fn a_pattern_is_listed_and_published_as_written() {
+        let member = Admitted::listed("T", "https://*.handles.link").unwrap();
+        assert!(matches!(member, Admitted::Pattern(_)));
+        assert_eq!(member.as_str(), "https://*.handles.link");
+        assert_eq!(member.to_string(), "https://*.handles.link");
+        assert_eq!(
+            serde_json::to_string(&member).unwrap(),
+            r#""https://*.handles.link""#
+        );
+    }
+
+    /// A member beginning `https://*.` is an origin pattern, and one that is
+    /// not well formed is refused by name rather than read as an origin.
+    #[test]
+    fn a_malformed_pattern_is_refused_rather_than_read_as_an_origin() {
+        for spelling in [
+            "https://*.",
+            "https://*.localhost",
+            "https://*.*.handles.link",
+            "https://*.HANDLES.link",
+            "https://*.handles.link/",
+            "https://*.handles.link/path",
+            "https://*.handles.link?q=1",
+            "https://*.handles.link#f",
+            "https://*.user@handles.link",
+            "http://*.localhost",
+            "http://*.handles.link",
+        ] {
+            let refusal = Admitted::listed("FIELD", spelling).unwrap_err();
+            assert!(
+                refusal.to_string().contains("FIELD"),
+                "{spelling}: {refusal}"
+            );
+        }
+    }
+
+    /// An exact member admits its own spelling and nothing else: neither a
+    /// subdomain of it nor a near miss of it.
+    #[test]
+    fn an_exact_member_admits_only_itself() {
+        let member = Admitted::listed("T", "https://app.example").unwrap();
+        assert!(member.admits("https://app.example"));
+        for other in [
+            "https://sub.app.example",
+            "https://APP.example",
+            "https://app.example/",
+            "https://app.example:8443",
+        ] {
+            assert!(!member.admits(other), "{other}");
+        }
+    }
+
+    /// One label under the suffix is admitted, and both ends are anchored.
+    #[test]
+    fn a_pattern_admits_one_label_under_its_suffix_and_nothing_else() {
+        let pattern = Pattern::listed("T", "https://*.handles.link").unwrap();
+        for (observed, admitted) in [
+            ("https://improve-account-linking.handles.link", true),
+            ("https://x_y.handles.link", true),
+            ("https://xn--80ak6aa92e.handles.link", true),
+            // The apex is not a subdomain of itself.
+            ("https://handles.link", false),
+            // One label, and no more.
+            ("https://a.b.handles.link", false),
+            ("http://x.handles.link", false),
+            ("https://x.handles.link:8443", false),
+            // The label boundary, and the end of the host.
+            ("https://evilhandles.link", false),
+            ("https://handles.link.evil.test", false),
+            ("https://.handles.link", false),
+            // A trailing dot names a different host.
+            ("https://x.handles.link.", false),
+            // A browser stamps a lowercase host.
+            ("https://X.handles.link", false),
+        ] {
+            assert_eq!(pattern.admits(observed), admitted, "{observed}");
+        }
+    }
+
     /// Anything but a bare `http`/`https` origin with a host is refused,
     /// naming the field.
     #[test]

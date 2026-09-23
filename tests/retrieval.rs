@@ -19,7 +19,10 @@ mod upstream {
             upstream::*,
             Published,
         },
-        origin::Origin,
+        origin::{
+            Admitted,
+            Origin,
+        },
     };
 
     use crate::common::{
@@ -73,8 +76,8 @@ mod upstream {
     }
 
     /// The origins a deployment admits.
-    fn origins() -> Vec<Origin> {
-        vec![origin("https://app.example")]
+    fn origins() -> Vec<Admitted> {
+        vec![Admitted::Exact(origin("https://app.example"))]
     }
 
     /// A deployment pointed at a fixture Distribution, started the way the

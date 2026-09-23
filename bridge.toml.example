@@ -12,8 +12,23 @@
 # and port are set with HOST and PORT, or --host and --port, because where the
 # process listens is not ceremony configuration.
 
-# Application origins admitted to read the public ceremony configuration, each
-# in canonical form: no trailing slash, lowercase host, no default port.
+# The application allowlist: what may read the public ceremony configuration.
+# A member is an exact origin in canonical form -- no trailing slash, lowercase
+# host, no default port -- or an origin pattern, https://*. and then the host
+# whose direct subdomains it admits:
+#
+#     allowed_app_origins = ["https://app.example", "https://*.handles.link"]
+#
+# https://*.handles.link admits https://app.handles.link, and neither
+# https://handles.link nor https://a.b.handles.link. No public suffix list is
+# consulted: a pattern places the whole direct-subdomain namespace of its
+# suffix inside the trust boundary, and the operator writing one asserts
+# control of that namespace.
+#
+# A Callback that does not understand patterns accepts a pattern member and
+# then matches it against no peer, so the ceremony never fails and never
+# becomes ready. Configure a pattern only where the CCDP Distribution named
+# below carries a Callback that understands one.
 allowed_app_origins = ["https://app.example", "https://wallet.example"]
 
 # The CCDP Distribution: the origin serving the Callback artifact and

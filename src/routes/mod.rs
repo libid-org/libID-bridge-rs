@@ -7,8 +7,9 @@
 //!
 //! Everything the browser runs is served by the CCDP Distribution at the
 //! configured `ccdpOrigin`. The configuration route admits exactly one
-//! `Origin`, in the effective set `allowedAppOrigins ∪ {ccdpOrigin}`, echoes
-//! it as the one origin allowed, and answers on `OPTIONS` the preflight a
+//! `Origin`, and only one a member of the effective set
+//! `allowedAppOrigins ∪ {ccdpOrigin}` admits, echoes that origin itself as
+//! the one origin allowed, and answers on `OPTIONS` the preflight a
 //! caller sending its own header needs. The callback carries no CORS: it is a
 //! top-level navigation. No other path is served, and no route performs a
 //! token exchange or opens a notary connection.
@@ -35,7 +36,8 @@ use axum::{
 use crate::state::AppState;
 
 /// How many `Origin` headers a request carried. The configuration route
-/// admits exactly one, matching an admitted origin.
+/// admits exactly one, and only where a member of the admission set admits
+/// it.
 pub enum Origins<'a> {
     /// No `Origin`.
     Absent,

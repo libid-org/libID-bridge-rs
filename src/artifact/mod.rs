@@ -15,7 +15,10 @@ use bytes::Bytes;
 
 use policy::ArtifactError;
 
-use crate::origin::Origin;
+use crate::origin::{
+    Admitted,
+    Origin,
+};
 
 /// What the deployment contributes to the document and its policy.
 pub struct DeploymentInputs<'a> {
@@ -23,8 +26,8 @@ pub struct DeploymentInputs<'a> {
     /// the one origin the policy admits a frame from.
     pub ccdp_origin: &'a Origin,
     /// The effective admission set, which the Callback authenticates an
-    /// application against. It contains the CCDP origin.
-    pub allowed_origins: &'a [Origin],
+    /// application against. It contains the CCDP origin, literally.
+    pub allowed_origins: &'a [Admitted],
 }
 
 /// The finished document: the exact bytes, and the policy they are served

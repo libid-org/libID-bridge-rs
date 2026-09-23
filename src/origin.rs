@@ -2,9 +2,10 @@
 //! admits, publishes or dials is checked into, once, at startup.
 //!
 //! An application allowlist is written in the wider vocabulary of
-//! [`Admitted`]: an exact origin, or an origin pattern admitting the direct
-//! subdomains of one host. Everything else — the Distribution this bridge
-//! dials, the origin its policy names — is an [`Origin`] and nothing else.
+//! [`Admitted`]: an exact origin, or an origin pattern admitting the
+//! subdomains of one host suffix. Everything else — the Distribution this
+//! bridge dials, the origin its policy names — is an [`Origin`] and nothing
+//! else.
 //!
 //! What a request arrived under is an [`Observed`], read from the `Origin`
 //! header once and carrying the proof that it is canonical. Membership takes
@@ -13,10 +14,7 @@
 use std::fmt;
 
 use serde::Serialize;
-use url::{
-    Host,
-    Url,
-};
+use url::Url;
 
 use crate::error::{
     Error,
@@ -126,13 +124,20 @@ impl fmt::Display for Origin {
     }
 }
 
-/// An origin pattern: `https://*.` followed by a suffix host, admitting the
-/// direct subdomains of that host and not the host itself.
-/// `https://*.handles.link` admits `https://app.handles.link`, and neither
-/// `https://handles.link` nor `https://a.b.handles.link`.
+/// An origin pattern: `*.` and then the host suffix whose subdomains it
+/// admits, at every depth. `*.handles.link` admits
+/// `https://app.handles.link` and `https://a.b.handles.link`, and not
+/// `https://handles.link`.
 ///
-/// No public suffix list is consulted. A pattern places the whole
-/// direct-subdomain namespace of its suffix inside the trust boundary, and
+/// Its matching is the browser's byte for byte, and its grammar is the
+/// browser's narrowed in the one place [`Pattern::listed`] names
+/// (`ts/packages/popup/src/message.ts`, `SUBDOMAIN_PATTERN` and
+/// `isAllowedOrigin`). A member the bridge publishes and the browser reads
+/// differently yields a ceremony that never becomes ready rather than an
+/// error, so the two sides do not get to drift.
+///
+/// No public suffix list is consulted. A pattern places the whole subdomain
+/// namespace of its suffix, at every depth, inside the trust boundary, and
 /// the operator writing one asserts control of that namespace.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
@@ -141,56 +146,51 @@ pub struct Pattern(String);
 impl Pattern {
     /// What an origin pattern begins with. A member beginning with it is one,
     /// and is refused where it is not a well-formed one.
-    pub const PREFIX: &'static str = "https://*.";
+    pub const PREFIX: &'static str = "*.";
 
-    /// `spelling` as written, well formed: the scheme is `https`, and the
-    /// suffix is the host of a canonical origin — which [`Origin::listed`]
-    /// decides, so that one validator answers for both member kinds — naming
-    /// a host rather than an address, and carrying at least one `.`, no
-    /// second `*`, no port, no trailing `.` and no empty label.
+    /// The fewest labels a configured suffix carries.
+    const LEAST_LABELS: usize = 2;
+
+    /// `spelling` as written, well formed: [`Pattern::PREFIX`] and then one
+    /// or more DNS labels, each lowercase alphanumeric with hyphens only
+    /// inside it, the last of them beginning with a letter. So no scheme, no
+    /// port, no path, no uppercase, no underscore, no trailing dot, no empty
+    /// label, no second `*`.
+    ///
+    /// The suffix carries at least [`Pattern::LEAST_LABELS`] labels, which
+    /// the browser does not ask for. It is the one place this bridge is the
+    /// narrower of the two: a whole top-level domain is not an allowlist, and
+    /// a narrower bridge admits a subset of what the browser admits, so the
+    /// two cannot disagree over an origin either one lets through.
     ///
     /// A refusal names `field` and the first thing actually wrong with the
-    /// spelling. The checks read off the spelling run ahead of the parser,
-    /// which folds a default port away and would otherwise leave a suffix
-    /// carrying one reported as an uncanonical host.
+    /// spelling.
     pub fn listed(field: &str, spelling: &str) -> Result<Pattern> {
         let refuse = |why: &str| Error::Config {
             detail: format!(
-                "{field} {spelling} {why}; an origin pattern is https://*. \
-                 followed by the host whose direct subdomains it admits, \
-                 as in https://*.handles.link"
+                "{field} {spelling} {why}; an origin pattern is *. followed \
+                 by the host suffix whose subdomains it admits, as in \
+                 *.handles.link"
             ),
         };
         let Some(suffix) = spelling.strip_prefix(Pattern::PREFIX) else {
             return Err(refuse("is not an origin pattern"));
         };
-        if suffix.is_empty() {
-            return Err(refuse("names no suffix"));
+        // Splitting the empty suffix yields one empty label, which the walk
+        // refuses, so an empty suffix needs no case of its own.
+        let mut labels = suffix.split('.').peekable();
+        let mut count = 0usize;
+        while let Some(label) = labels.next() {
+            count += 1;
+            if let Some(fault) = label_fault(label, labels.peek().is_none()) {
+                return Err(refuse(fault));
+            }
         }
-        if suffix.contains('*') {
-            return Err(refuse("names a suffix carrying a second *"));
-        }
-        if names_an_address(suffix) {
-            return Err(refuse("names an address rather than a host"));
-        }
-        // A URL parser keeps a port, an empty label and a trailing `.`, and
-        // reports the result canonical, so the three are read off the
-        // spelling. Each leaves a suffix no browser-stamped host ends in, and
-        // so a pattern that admits nothing at all.
-        if suffix.contains(':') {
-            return Err(refuse("names a suffix carrying a port"));
-        }
-        if suffix.starts_with('.') || suffix.contains("..") {
-            return Err(refuse("names a suffix carrying an empty label"));
-        }
-        if suffix.ends_with('.') {
-            return Err(refuse("names a suffix carrying a trailing dot"));
-        }
-        if !suffix.contains('.') {
-            return Err(refuse("names a suffix of one label"));
-        }
-        if Origin::listed(field, &format!("https://{suffix}")).is_err() {
-            return Err(refuse("names a suffix that is not a canonical host"));
+        if count < Pattern::LEAST_LABELS {
+            return Err(refuse(
+                "names a suffix of one label, and a whole top-level domain is \
+                 not an allowlist",
+            ));
         }
         Ok(Pattern(spelling.to_owned()))
     }
@@ -198,29 +198,20 @@ impl Pattern {
     /// Whether this pattern admits `origin`, the spelling of an
     /// [`Observed`] and so already canonical.
     ///
-    /// It does when `origin` is spelled `https://` and then a host carrying
-    /// no `:` and no `/`, which ends in `.` and this pattern's suffix, with
-    /// one nonempty label carrying no `.` ahead of that. Both ends are
-    /// anchored.
+    /// It does when `origin` is spelled `https://` and then anything ending
+    /// in this pattern's suffix together with the dot ahead of it. That dot
+    /// anchors the suffix to a label boundary; the depth above it is
+    /// unbounded; and the comparison runs over everything past the scheme,
+    /// so a port falls inside it and ends the match.
     ///
     /// Nothing is normalised here. Both sides are canonical already — a
     /// browser stamps an origin lowercase and in punycode, and a suffix in
     /// any other form is refused at construction — so the comparison is of
     /// bytes.
     fn admits(&self, origin: &str) -> bool {
-        let Some(host) = origin.strip_prefix("https://") else {
-            return false;
-        };
-        if host.contains(':') || host.contains('/') {
-            return false;
-        }
-        let Some(label) = host
-            .strip_suffix(self.suffix())
-            .and_then(|head| head.strip_suffix('.'))
-        else {
-            return false;
-        };
-        !label.is_empty() && !label.contains('.')
+        origin
+            .strip_prefix("https://")
+            .is_some_and(|host| host.ends_with(self.anchored_suffix()))
     }
 
     /// The spelling.
@@ -228,9 +219,10 @@ impl Pattern {
         &self.0
     }
 
-    /// The host whose direct subdomains this pattern admits.
-    fn suffix(&self) -> &str {
-        &self.0[Pattern::PREFIX.len()..]
+    /// The suffix together with the dot that anchors it to a label boundary:
+    /// what an admitted host ends in.
+    fn anchored_suffix(&self) -> &str {
+        &self.0["*".len()..]
     }
 }
 
@@ -274,7 +266,7 @@ impl<'a> Observed<'a> {
 pub enum Admitted {
     /// A canonical origin, admitting itself and nothing else.
     Exact(Origin),
-    /// An origin pattern, admitting the direct subdomains of its suffix.
+    /// An origin pattern, admitting the subdomains of its suffix.
     Pattern(Pattern),
 }
 
@@ -284,7 +276,21 @@ impl Admitted {
     /// rather than read as an origin; a member carrying a `*` anywhere else
     /// is refused too; every other member is an exact canonical origin. A
     /// refusal names `field`.
+    ///
+    /// A bare `*` is a member the browser reads as every origin. It is
+    /// refused here: an allowlist this bridge publishes names what it
+    /// serves. Refusing it narrows admission, so the browser is never asked
+    /// to admit something the bridge would not.
     pub fn listed(field: &str, spelling: &str) -> Result<Admitted> {
+        if spelling == "*" {
+            return Err(Error::Config {
+                detail: format!(
+                    "{field} * admits every origin, and an allowlist this \
+                     bridge publishes names the origins and the suffixes it \
+                     serves"
+                ),
+            });
+        }
         if spelling.starts_with(Pattern::PREFIX) {
             return Pattern::listed(field, spelling).map(Admitted::Pattern);
         }
@@ -296,8 +302,8 @@ impl Admitted {
             return Err(Error::Config {
                 detail: format!(
                     "{field} {spelling} carries a * and is not an origin \
-                     pattern, which is https://*. followed by the host whose \
-                     direct subdomains it admits, as in https://*.handles.link"
+                     pattern, which is *. followed by the host suffix whose \
+                     subdomains it admits, as in *.handles.link"
                 ),
             });
         }
@@ -332,18 +338,34 @@ impl fmt::Display for Admitted {
     }
 }
 
-/// Whether `spelling` names an IP address rather than a host: an IPv4
-/// address in any of its forms, or an IPv6 address written with or without
-/// its brackets.
+/// Why `label` is not a label of a pattern suffix, or `None` where it is
+/// one: nonempty, lowercase alphanumeric with hyphens only inside it, and,
+/// where it is the `last` label, beginning with a letter.
 ///
-/// An address has no subdomains, so no origin pattern names one, and there is
-/// no loopback pattern. A dotted quad passes every check that reads the
-/// spelling alone, because it is a canonical origin host of four labels.
-fn names_an_address(spelling: &str) -> bool {
-    // A URL carries an IPv6 address in brackets and `Host` reads one only in
-    // brackets; a suffix written without them names the same address.
-    matches!(Host::parse(spelling), Ok(Host::Ipv4(_) | Host::Ipv6(_)))
-        || matches!(Host::parse(&format!("[{spelling}]")), Ok(Host::Ipv6(_)))
+/// That letter is what leaves an address outside the grammar. The last label
+/// of an IPv4 address in any of its forms is digits, and an IPv6 literal
+/// carries bytes no label carries at all.
+fn label_fault(label: &str, last: bool) -> Option<&'static str> {
+    let bytes = label.as_bytes();
+    let (Some(first), Some(end)) = (bytes.first(), bytes.last()) else {
+        return Some("names a suffix carrying an empty label");
+    };
+    if !bytes
+        .iter()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+    {
+        return Some("names a suffix carrying a label outside the lowercase DNS alphabet");
+    }
+    if *first == b'-' || *end == b'-' {
+        return Some("names a suffix carrying a label that begins or ends with a hyphen");
+    }
+    if last && !first.is_ascii_lowercase() {
+        return Some(
+            "ends in a label that does not begin with a letter, so it names an \
+             address rather than a host",
+        );
+    }
+    None
 }
 
 /// Whether `url` is plaintext `http` on exactly `localhost` or `127.0.0.1`:

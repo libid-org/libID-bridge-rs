@@ -69,12 +69,12 @@ mod artifact {
     #[test]
     fn a_pattern_member_reaches_the_island_as_its_own_spelling() {
         let members = vec![
-            Admitted::Pattern(Pattern::listed("T", "https://*.handles.link").unwrap()),
+            Admitted::Pattern(Pattern::listed("T", "*.handles.link").unwrap()),
             Admitted::Exact(origin("https://ccdp.example")),
         ];
         let served = text(&composed_for(FIXTURE, &members).unwrap());
         assert!(served.contains(
-            r#"[["https://*.handles.link","https://ccdp.example"],"https://ccdp.example"]"#
+            r#"[["*.handles.link","https://ccdp.example"],"https://ccdp.example"]"#
         ));
     }
 

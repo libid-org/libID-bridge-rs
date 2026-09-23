@@ -73,20 +73,43 @@ mod root {
         assert!(text.contains("ALLOWED_APP_ORIGINS[1]"), "{text}");
     }
 
-    /// A member beginning `https://*.` is judged as an origin pattern, so one
-    /// that is not well formed stops the process instead of being read as an
-    /// origin, and the refusal names the member by its own index.
+    /// A member beginning `*.` is judged as an origin pattern, so one that is
+    /// not well formed stops the process instead of being read as an origin,
+    /// and the refusal names the member by its own index.
     #[tokio::test]
     async fn a_malformed_pattern_is_refused_by_its_own_index() {
         let err = Bridge::start(&common::config(&[
             "--allowed-app-origins",
-            "https://app.example,https://*.localhost",
+            "https://app.example,*.handles_link",
         ]))
         .err()
         .expect("the second member names a suffix of one label");
         let text = err.to_string();
         assert!(text.contains("ALLOWED_APP_ORIGINS[1]"), "{text}");
-        assert!(text.contains("https://*.localhost"), "{text}");
+        assert!(text.contains("*.handles_link"), "{text}");
+    }
+
+    /// This bridge is narrower than the browser about what an allowlist may
+    /// name. A whole top-level domain and a bare `*` each stop the process,
+    /// naming the member and its own index: an operator reads a startup
+    /// refusal, where an admission this wide is read by nobody.
+    #[tokio::test]
+    async fn a_member_wider_than_this_bridge_publishes_is_refused_by_its_own_index() {
+        for (member, why) in [
+            ("*.com", "a suffix of one label"),
+            ("*", "admits every origin"),
+        ] {
+            let err = Bridge::start(&common::config(&[
+                "--allowed-app-origins",
+                &format!("https://app.example,{member}"),
+            ]))
+            .err()
+            .unwrap_or_else(|| panic!("{member} is wider than this bridge publishes"));
+            let text = err.to_string();
+            assert!(text.contains("ALLOWED_APP_ORIGINS[1]"), "{member}: {text}");
+            assert!(text.contains(member), "{member}: {text}");
+            assert!(text.contains(why), "{member}: {text}");
+        }
     }
 
     /// A pattern is a member of the effective set as written, beside an
@@ -96,15 +119,12 @@ mod root {
     async fn a_pattern_and_an_origin_it_covers_are_two_members() {
         let state = started(&[
             "--allowed-app-origins",
-            "https://*.handles.link,https://app.handles.link",
+            "*.handles.link,https://app.handles.link",
         ])
         .await;
         let members: Vec<&str> =
             state.allowed_origins.iter().map(|m| m.as_str()).collect();
-        assert_eq!(
-            members[..2],
-            ["https://*.handles.link", "https://app.handles.link"]
-        );
+        assert_eq!(members[..2], ["*.handles.link", "https://app.handles.link"]);
     }
 
     /// The CCDP origin joins the effective set by its literal spelling: a
@@ -116,15 +136,12 @@ mod root {
             "--ccdp-origin",
             "https://dist.handles.link",
             "--allowed-app-origins",
-            "https://*.handles.link",
+            "*.handles.link",
         ])
         .await;
         let members: Vec<&str> =
             state.allowed_origins.iter().map(|m| m.as_str()).collect();
-        assert_eq!(
-            members,
-            ["https://*.handles.link", "https://dist.handles.link"]
-        );
+        assert_eq!(members, ["*.handles.link", "https://dist.handles.link"]);
     }
 
     /// A member the operator did not mean to write is refused rather than
@@ -157,18 +174,15 @@ mod root {
             ),
             (
                 "a duplicate origin pattern",
-                vec![
-                    "--allowed-app-origins",
-                    "https://*.handles.link,https://*.handles.link",
-                ],
+                vec!["--allowed-app-origins", "*.handles.link,*.handles.link"],
             ),
             (
                 "an origin pattern whose suffix is one label",
-                vec!["--allowed-app-origins", "https://*.localhost"],
+                vec!["--allowed-app-origins", "*.localhost"],
             ),
             (
-                "an origin pattern whose suffix is not canonical",
-                vec!["--allowed-app-origins", "https://*.HANDLES.link"],
+                "an origin pattern whose suffix is not lowercase DNS labels",
+                vec!["--allowed-app-origins", "*.HANDLES.link"],
             ),
             (
                 "a plaintext admitted origin that is not localhost or 127.0.0.1",
@@ -177,7 +191,7 @@ mod root {
             (
                 "a CCDP origin written as an origin pattern, which names no \
                  Distribution and which a policy could not carry",
-                vec!["--ccdp-origin", "https://*.handles.link"],
+                vec!["--ccdp-origin", "*.handles.link"],
             ),
             (
                 "a CCDP origin whose host carries a CSP directive separator",

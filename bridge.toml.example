@@ -14,27 +14,34 @@
 
 # The application allowlist: what may read the public ceremony configuration.
 # A member is an exact origin in canonical form -- no trailing slash, lowercase
-# host, no default port -- or an origin pattern, https://*. and then the host
-# whose direct subdomains it admits:
+# host, no default port -- or an origin pattern, *. and then the host suffix
+# whose subdomains it admits, with no scheme prefix:
 #
-#     allowed_app_origins = ["https://app.example", "https://*.handles.link"]
+#     allowed_app_origins = ["https://app.example", "*.handles.link"]
 #
-# https://*.handles.link admits https://app.handles.link, and neither
-# https://handles.link nor https://a.b.handles.link. The suffix is a host and
-# nothing more: a name rather than an address, at least two labels, lowercase,
-# no port, no trailing dot, no empty label and no second *. There is no address
-# pattern and so no loopback pattern -- an address has no subdomains. A member
-# carrying a * that is not a well-formed pattern is refused at startup rather
-# than read as an exact origin.
+# *.handles.link admits every HTTPS origin whose host ends in .handles.link, at
+# any depth: https://app.handles.link and https://a.b.handles.link, and not
+# https://handles.link itself. The suffix is DNS labels: lowercase
+# alphanumeric, hyphens only inside a label, and the last label begins with a
+# letter, so no scheme, no port, no path, no uppercase, no underscore, no
+# trailing dot, no empty label and no second *. A member carrying a * that is
+# not a well-formed pattern is refused at startup rather than read as an exact
+# origin.
 #
-# No public suffix list is consulted: a pattern places the whole
-# direct-subdomain namespace of its suffix inside the trust boundary, and the
-# operator writing one asserts control of that namespace.
+# Two members the browser accepts are refused here, by name and by index: a
+# bare *, because an allowlist this bridge publishes names what it serves, and
+# a suffix of one label such as *.com, because a whole top-level domain is not
+# an allowlist.
 #
-# A Callback that does not understand patterns accepts a pattern member and
-# then matches it against no peer, so the ceremony never fails and never
-# becomes ready. Configure a pattern only where the CCDP Distribution named
-# below carries a Callback that understands one.
+# No public suffix list is consulted, so *.vercel.app is accepted: a pattern
+# places the whole subdomain namespace of its suffix, at every depth, inside
+# the trust boundary, and the operator writing one asserts control of that
+# namespace.
+#
+# A Callback published before origin-pattern support matches a pattern against
+# no peer, so the ceremony never fails and never becomes ready. Publish the
+# CCDP Distribution named below with pattern support first, then configure the
+# pattern.
 allowed_app_origins = ["https://app.example", "https://wallet.example"]
 
 # The CCDP Distribution: the origin serving the Callback artifact and

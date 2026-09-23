@@ -135,16 +135,18 @@ async fn config_refuses_an_absent_or_unlisted_origin() {
     }
 }
 
-/// An origin pattern admits the direct subdomains of its suffix, each answered
-/// with the origin that asked rather than with the pattern, and the near
-/// misses an exact member refuses stay refused.
+/// An origin pattern admits the subdomains of its suffix at every depth, each
+/// answered with the origin that asked rather than with the pattern, and the
+/// near misses an exact member refuses stay refused.
 #[tokio::test]
 async fn config_admits_a_subdomain_of_a_pattern_and_still_refuses_the_near_misses() {
-    let state = deployment(&["--allowed-app-origins", "https://*.handles.link"]).await;
+    let state = deployment(&["--allowed-app-origins", "*.handles.link"]).await;
     for admitted in [
         "https://improve-account-linking.handles.link",
+        "https://a.b.c.d.e.handles.link",
         "https://x_y.handles.link",
         "https://xn--80ak6aa92e.handles.link",
+        "https://.handles.link",
     ] {
         let resp = config_with(state.clone(), &[("origin", admitted)], "").await;
         assert_eq!(resp.status(), StatusCode::OK, "{admitted}");
@@ -156,12 +158,10 @@ async fn config_admits_a_subdomain_of_a_pattern_and_still_refuses_the_near_misse
     }
     for refused in [
         "https://handles.link",
-        "https://a.b.handles.link",
         "http://x.handles.link",
         "https://x.handles.link:8443",
         "https://evilhandles.link",
         "https://handles.link.evil.test",
-        "https://.handles.link",
         "https://x.handles.link.",
         "https://X.handles.link",
     ] {
@@ -176,8 +176,13 @@ async fn config_admits_a_subdomain_of_a_pattern_and_still_refuses_the_near_misse
 /// names.
 #[tokio::test]
 async fn config_refuses_a_pattern_spelling_as_the_request_origin() {
-    let state = deployment(&["--allowed-app-origins", "https://*.handles.link"]).await;
-    for spelling in ["https://*.handles.link", "https://*", "https://*.*"] {
+    let state = deployment(&["--allowed-app-origins", "*.handles.link"]).await;
+    for spelling in [
+        "*.handles.link",
+        "*",
+        "https://*.handles.link",
+        "https://*.*",
+    ] {
         let resp = config_with(state.clone(), &[("origin", spelling)], "").await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{spelling}");
         assert!(resp.headers().get("access-control-allow-origin").is_none());

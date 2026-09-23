@@ -236,7 +236,13 @@ mod origin {
     /// `*` is not a byte an origin is made of, whichever position it takes.
     #[test]
     fn no_origin_spells_a_star() {
-        for spelling in ["https://*.handles.link", "https://*", "https://a*b.example"] {
+        for spelling in [
+            "https://*.handles.link",
+            "https://*",
+            "https://a*b.example",
+            "*.handles.link",
+            "*",
+        ] {
             assert!(Origin::parse("T", spelling).is_err(), "{spelling}");
         }
     }
@@ -245,13 +251,13 @@ mod origin {
     /// publishes as that spelling.
     #[test]
     fn a_pattern_is_listed_and_published_as_written() {
-        let member = Admitted::listed("T", "https://*.handles.link").unwrap();
+        let member = Admitted::listed("T", "*.handles.link").unwrap();
         assert!(matches!(member, Admitted::Pattern(_)));
-        assert_eq!(member.as_str(), "https://*.handles.link");
-        assert_eq!(member.to_string(), "https://*.handles.link");
+        assert_eq!(member.as_str(), "*.handles.link");
+        assert_eq!(member.to_string(), "*.handles.link");
         assert_eq!(
             serde_json::to_string(&member).unwrap(),
-            r#""https://*.handles.link""#
+            r#""*.handles.link""#
         );
     }
 
@@ -260,29 +266,35 @@ mod origin {
     #[test]
     fn a_malformed_pattern_is_refused_rather_than_read_as_an_origin() {
         for spelling in [
-            // The suffix is a host and nothing more. A URL parser keeps a
-            // port, an empty label and a trailing dot, and each leaves a
-            // suffix no browser-stamped host ends in.
-            "https://*.handles.link:8443",
-            "https://*.handles.link.",
-            "https://*..handles.link",
-            "https://*..",
-            "https://*.link",
-            "https://*.",
-            "https://*.localhost",
-            "https://*.handles.link/",
-            "https://*.handles.link/path",
-            "https://*.handles.link?q=1",
-            "https://*.handles.link#f",
-            "https://*.user@handles.link",
-            // The suffix is already in the form a browser stamps.
-            "https://*.HANDLES.link",
-            // One `*`, in the one position a pattern spells it.
-            "https://*.*.handles.link",
-            "https://*handles.link",
-            // HTTPS, on a loopback host as on any other.
-            "http://*.localhost",
+            // A suffix is DNS labels: no scheme, no port, no path, no query,
+            // no fragment, no credentials.
+            "https://*.handles.link",
             "http://*.handles.link",
+            "*.handles.link:8443",
+            "*.handles.link/",
+            "*.handles.link/path",
+            "*.handles.link?q=1",
+            "*.handles.link#f",
+            "*.user@handles.link",
+            // A browser stamps a host lowercase, and no label carries an
+            // underscore.
+            "*.HANDLES.link",
+            "*._a.handles.link",
+            // A hyphen lives inside a label, never at either end.
+            "*.-a.handles.link",
+            "*.a-.handles.link",
+            // Every label carries something, and the suffix ends where the
+            // spelling does.
+            "*.handles.link.",
+            "*..handles.link",
+            "*..",
+            "*.",
+            // One `*`, in the one position a pattern spells it.
+            "*.*.handles.link",
+            "*handles.link",
+            // A whole top-level domain is not an allowlist.
+            "*.link",
+            "*.localhost",
         ] {
             let refusal = Admitted::listed("FIELD", spelling).unwrap_err();
             assert!(
@@ -308,24 +320,29 @@ mod origin {
         }
     }
 
-    /// One label under the suffix is admitted, and both ends are anchored.
+    /// Every depth under the suffix is admitted, and both ends are anchored.
+    /// These rows are the browser's, run against `isAllowedOrigin`: the two
+    /// sides admit the same origins or a ceremony waits on a peer that never
+    /// matches.
     #[test]
-    fn a_pattern_admits_one_label_under_its_suffix_and_nothing_else() {
-        let members = [Admitted::listed("T", "https://*.handles.link").unwrap()];
+    fn a_pattern_admits_every_depth_under_its_suffix_and_nothing_else() {
+        let members = [Admitted::listed("T", "*.handles.link").unwrap()];
         for (observed, wanted) in [
             ("https://improve-account-linking.handles.link", true),
+            // The depth above the suffix is unbounded.
+            ("https://a.b.c.d.e.handles.link", true),
             ("https://x_y.handles.link", true),
             ("https://xn--80ak6aa92e.handles.link", true),
-            // The apex is not a subdomain of itself.
+            // An empty label is a label: the dot is where the suffix begins.
+            ("https://.handles.link", true),
+            // The apex carries nothing under the suffix.
             ("https://handles.link", false),
-            // One label, and no more.
-            ("https://a.b.handles.link", false),
             ("http://x.handles.link", false),
+            // The port falls inside the compared slice.
             ("https://x.handles.link:8443", false),
             // The label boundary, and the end of the host.
             ("https://evilhandles.link", false),
             ("https://handles.link.evil.test", false),
-            ("https://.handles.link", false),
             // A trailing dot names a different host.
             ("https://x.handles.link.", false),
             // A browser stamps a lowercase host.
@@ -335,44 +352,41 @@ mod origin {
         }
     }
 
-    /// No public suffix list is consulted, and none is to be added. A pattern
-    /// places the whole direct-subdomain namespace of its suffix inside the
-    /// trust boundary, and the operator writing one asserts control of it.
+    /// No public suffix list is consulted, and none is to be added: telling
+    /// `*.vercel.app` from `*.handles.link` needs one, and that list is a
+    /// worse liability here than the case it would prevent. A pattern places
+    /// the whole subdomain namespace of its suffix, at every depth, inside
+    /// the trust boundary, and the operator writing one asserts control of
+    /// it.
     #[test]
     fn a_public_suffix_is_a_suffix_like_any_other() {
-        let members = [Admitted::listed("T", "https://*.co.uk").unwrap()];
-        assert!(admits(&members, "https://shop.co.uk"));
-        assert!(!admits(&members, "https://co.uk"));
-    }
-
-    /// A label leading with `-` or `_` is a host a browser stamps, so a
-    /// suffix spells one like any other and the label ahead of it is admitted.
-    /// No label grammar is applied on either side: the layers must not
-    /// disagree about which hosts are plausible.
-    #[test]
-    fn a_suffix_label_may_lead_with_a_hyphen_or_an_underscore() {
-        for (spelling, observed) in [
-            ("https://*.-a.handles.link", "https://app.-a.handles.link"),
-            ("https://*._a.handles.link", "https://app._a.handles.link"),
+        for (spelling, under, apex) in [
+            ("*.co.uk", "https://shop.co.uk", "https://co.uk"),
+            (
+                "*.vercel.app",
+                "https://preview.vercel.app",
+                "https://vercel.app",
+            ),
         ] {
             let members = [Admitted::listed("T", spelling).unwrap()];
-            assert!(admits(&members, observed), "{observed}");
+            assert!(admits(&members, under), "{under}");
+            assert!(!admits(&members, apex), "{apex}");
         }
     }
 
-    /// There is no address pattern, and so no loopback pattern: an address
-    /// has no subdomains. A dotted quad passes every check that reads the
-    /// spelling alone, because it is a canonical origin host of four labels.
+    /// There is no address pattern, and so no loopback pattern: the last
+    /// label of a suffix begins with a letter, and no form of an address
+    /// ends in one.
     #[test]
     fn no_pattern_names_an_address() {
         for spelling in [
-            "https://*.127.0.0.1",
-            "https://*.10.0.0.1",
-            "https://*.0x7f.1",
-            "https://*.2130706433",
-            "https://*.[::1]",
-            "https://*.::1",
-            "https://*.[::ffff:127.0.0.1]",
+            "*.127.0.0.1",
+            "*.10.0.0.1",
+            "*.0x7f.1",
+            "*.2130706433",
+            "*.[::1]",
+            "*.::1",
+            "*.[::ffff:127.0.0.1]",
         ] {
             let refusal = Admitted::listed("FIELD", spelling).unwrap_err();
             assert!(
@@ -383,16 +397,21 @@ mod origin {
     }
 
     /// A refusal names what is actually wrong, so an operator is not sent
-    /// after the wrong mistake: a URL parser folds a default port away and
-    /// reports what is left canonical, and an empty suffix has no label to
-    /// count.
+    /// after the wrong mistake.
     #[test]
     fn a_refusal_names_what_is_wrong_with_the_spelling() {
         for (spelling, why) in [
-            ("https://*.handles.link:443", "carrying a port"),
-            ("https://*.handles.link:8443", "carrying a port"),
-            ("https://*.", "names no suffix"),
-            ("https://*.127.0.0.1", "names an address"),
+            ("*", "admits every origin"),
+            ("*.handles.link:443", "outside the lowercase DNS alphabet"),
+            ("*.HANDLES.link", "outside the lowercase DNS alphabet"),
+            ("*.-a.handles.link", "begins or ends with a hyphen"),
+            ("*.", "an empty label"),
+            ("*.127.0.0.1", "does not begin with a letter"),
+            ("*.com", "a suffix of one label"),
+            (
+                "https://*.handles.link",
+                "carries a * and is not an origin pattern",
+            ),
         ] {
             let refusal = Admitted::listed("FIELD", spelling).unwrap_err().to_string();
             assert!(refusal.contains(why), "{spelling}: {refusal}");
@@ -405,10 +424,10 @@ mod origin {
     #[test]
     fn a_member_spelling_is_never_an_observed_origin() {
         let members = [
-            Admitted::listed("T", "https://*.handles.link").unwrap(),
+            Admitted::listed("T", "*.handles.link").unwrap(),
             Admitted::listed("T", "https://app.example").unwrap(),
         ];
-        for observed in ["https://*.handles.link", "https://*", "https://*.*"] {
+        for observed in ["*.handles.link", "*", "*.*", "https://*.handles.link"] {
             assert!(!admits(&members, observed), "{observed}");
         }
     }

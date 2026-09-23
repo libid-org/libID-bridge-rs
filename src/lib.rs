@@ -1,77 +1,93 @@
-//! Minimal identity/handles backend.
+//! The OAuth Bridge of a libID ceremony. The contract is `specs/oauth-bridge.md`
+//! in the libid repository.
 //!
-//! Exactly the endpoints the OAuth handle-claim flow needs, and nothing
-//! else: the UI does OAuth via this server, the server produces a
-//! bind-ready proof via MPC-TLS with the notary, the UI submits the bind
-//! on-chain itself. No database, no wallet routes, no sponsor pool, no
-//! indexer, no JWKS rotator.
+//! It publishes the configuration an application starts from and serves the
+//! one callback document the OAuth platforms redirect back to. `/health` is a
+//! liveness probe for the container healthcheck and `/metrics` is what this
+//! deployment counts.
+//!
+//! The callback document is the CCDP Distribution's artifact with this
+//! deployment's data inserted into its one slot; everything the browser runs
+//! after the callback is served by that Distribution. This service performs
+//! no token exchange, opens no notary connection, verifies no proof, holds no
+//! secret and no key of its own, keeps no ceremony state, and talks to no
+//! chain.
+//!
+//! The Distribution is a separate deployment and this one starts without it.
+//! The callback route says it has no document until a retrieval produces one,
+//! and keeps serving the last one it has when a later retrieval does not.
 
 #![warn(missing_docs)]
 
+pub mod artifact;
 pub mod config;
+pub mod deployment;
 pub mod error;
-pub mod flow;
-pub mod oauth;
-pub mod platform;
+pub mod metrics;
+pub mod origin;
 pub mod routes;
 pub mod state;
-pub mod types;
 
 use std::sync::Arc;
 
-use error::{
-    Error,
-    Result,
-};
-use state::{
-    AppState,
-    Runtime,
-};
+use error::Result;
+use state::AppState;
 
-/// Build the shared [`AppState`] from parsed configuration. Parses the
-/// addresses that must be well-formed for any proof to verify, so a typo
-/// fails at startup rather than on the first claim.
-///
-/// This holds no key material of any kind: the service signs nothing.
-pub async fn build_state(cfg: &config::Config) -> Result<Arc<AppState>> {
-    let notary_address = libid_crypto::hex_to_address(&cfg.notary_address)?;
-    let verifier_contract = libid_crypto::hex_to_address(&cfg.verifier_contract_address)?;
+/// A deployment that has started: the state its routes read, and the
+/// refresher that keeps the callback document current.
+pub struct Bridge {
+    /// What the routes read.
+    pub state: Arc<AppState>,
+    /// What keeps the callback document current.
+    pub refresher: artifact::upstream::Refresher,
+}
 
-    if cfg.base_url.is_empty() {
-        return Err(Error::Config {
-            detail: "BASE_URL must be set — GitHub redirects the browser to \
-                     {BASE_URL}/auth/github/callback"
-                .into(),
+impl Bridge {
+    /// Check the deployment written in `settings` and build what the routes
+    /// read. Everything that must be well-formed for a request to succeed is
+    /// checked here, at startup; the error is the first thing that was not.
+    ///
+    /// No network request is made. The callback artifact is retrieved by the
+    /// refresher, so a Distribution that is unreachable delays the callback
+    /// document and stops nothing.
+    pub fn start(settings: &config::Settings) -> Result<Bridge> {
+        let deployment = deployment::Deployment::checked(settings)?;
+        let upstream = artifact::upstream::Upstream::new(&deployment.ccdp_origin);
+        let (sender, callback) = tokio::sync::watch::channel(None);
+        let (failed, failure) = tokio::sync::watch::channel(None);
+        let metrics = Arc::new(metrics::Metrics::new());
+        let state = Arc::new(AppState {
+            callback,
+            allowed_origins: deployment.allowed_origins.clone(),
+            ceremony_config: deployment.ceremony_config(),
+            failure,
+            metrics: metrics.clone(),
         });
+        let refresher = artifact::upstream::Refresher::new(
+            upstream,
+            deployment.allowed_origins,
+            sender,
+            failed,
+            metrics,
+        );
+        Ok(Bridge { state, refresher })
     }
+}
 
-    let app_url = if cfg.app_url.is_empty() {
-        None
-    } else {
-        Some(cfg.app_url.clone())
-    };
-
-    let github_oauth = oauth::OAuthCredentials {
-        client_id: cfg.gh_oauth_client_id.clone(),
-        client_secret: cfg.gh_oauth_client_secret.clone(),
-        redirect_uri: format!(
-            "{}/auth/github/callback",
-            cfg.base_url.trim_end_matches('/')
-        ),
-    };
-
-    Ok(Arc::new(AppState {
-        runtime: Runtime {
-            base_url: cfg.base_url.clone(),
-            app_url,
-            notary_url: cfg.notary_url.clone(),
-            notary_address,
-            chain_id: cfg.chain_id,
-            verifier_contract,
-            challenge_ttl_secs: cfg.challenge_ttl_secs,
-        },
-        github_oauth,
-        challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        results: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-    }))
+/// Serve `bridge` on `listener` until `shutdown` resolves; in-flight requests
+/// finish first. The callback artifact is revalidated for as long as this
+/// runs.
+pub async fn serve(
+    bridge: Bridge,
+    listener: tokio::net::TcpListener,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    let app = routes::build_router(bridge.state);
+    let refreshing =
+        tokio::spawn(bridge.refresher.run(artifact::upstream::Schedule::DEPLOYED));
+    let served = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await;
+    refreshing.abort();
+    served
 }

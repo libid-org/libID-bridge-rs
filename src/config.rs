@@ -1,24 +1,37 @@
-//! Configuration, parsed from CLI args / environment variables via `clap`.
+//! What the command line says, and what the file says. Two things, because
+//! they are read from two places by two libraries and nothing belongs to
+//! both.
+//!
+//! The command line says where the process listens and which file to read.
+//! Where the process listens is not ceremony configuration and a container
+//! image sets it in the environment, so it has no place in the file. The file
+//! says everything else. The enabled platforms can be written nowhere else
+//! and a bridge with no platform could serve no ceremony, so the file is
+//! required whatever else is set, and there is no second way to spell what it
+//! holds.
 
 use clap::Parser;
-use url::Url;
+use serde::Deserialize;
 
-/// Configuration for the handles backend server.
-///
-/// Every flag has an environment-variable form; the env names are the
-/// deployment contract.
-///
-/// There is deliberately no signing key among them, and no
-/// `BACKEND_SIGNING_KEY`: this service holds no key of its own. It used to
-/// countersign every proof, which looked like a second trust root but never
-/// was one — the backend IS that signer, so a compromised backend simply
-/// signed whichever pairing it liked. See the [`crate::flow`] module docs for
-/// what the second signature did and did not buy. Nothing else here changed:
-/// `NOTARY_ADDRESS`, `CHAIN_ID` and `VERIFIER_CONTRACT_ADDRESS` still describe
-/// the notary digest, which is unaffected.
-#[derive(Debug, Parser)]
+use crate::{
+    deployment::PlatformProfile,
+    error::{
+        Error,
+        Result,
+    },
+};
+
+/// The canonical libID Distribution, which a file naming none selects.
+const DEFAULT_CCDP_ORIGIN: &str = "https://lib.id";
+
+/// What the command line says.
+#[derive(Parser, Debug)]
 #[command(name = "libid-server-rs", version, about)]
-pub struct Config {
+pub struct Cli {
+    /// Path to the TOML file the deployment is written in.
+    #[arg(long, env = "LIBID_CONFIG")]
+    pub config: Option<std::path::PathBuf>,
+
     /// Host to bind. Use 0.0.0.0 in containers.
     #[arg(long, env = "HOST", default_value = "127.0.0.1")]
     pub host: String,
@@ -26,73 +39,96 @@ pub struct Config {
     /// Port to bind.
     #[arg(long, env = "PORT", default_value = "8722")]
     pub port: u16,
-
-    /// Public base URL of THIS server. The GitHub OAuth callback URL is
-    /// derived as `{BASE_URL}/auth/github/callback` and must match the OAuth
-    /// App registration exactly.
-    #[arg(long, env = "BASE_URL", default_value = "http://127.0.0.1:8722")]
-    pub base_url: String,
-
-    /// Public URL of the web app. The Gmail fragment-relay callback bounces
-    /// the popup to `{APP_URL}/auth/gmail/callback`. Empty disables the
-    /// relay (it responds 500 with a pointed message).
-    #[arg(long, env = "APP_URL", default_value = "")]
-    pub app_url: String,
-
-    /// Comma-separated CORS allow-list. Supports `*.suffix` and `prefix*`
-    /// wildcards.
-    #[arg(long, env = "ALLOWED_ORIGINS", default_value = "http://localhost:3000")]
-    pub allowed_origins: String,
-
-    /// URL of the notary server (TCP), e.g. `tcp://notary.example:7047`.
-    #[arg(long, env = "NOTARY_URL", default_value = "tcp://127.0.0.1:7047")]
-    pub notary_url: Url,
-
-    /// Ethereum address of the notary — the only trust root in the proof.
-    /// Every proof's notary signature must recover to this address or the
-    /// flow fails before a proof is handed to the client.
-    #[arg(long, env = "NOTARY_ADDRESS")]
-    pub notary_address: String,
-
-    /// EVM chain id of the target deployment. Bound into the notary digest
-    /// as a domain separator — a proof for chain A does not verify on
-    /// chain B.
-    #[arg(long, env = "CHAIN_ID")]
-    pub chain_id: u64,
-
-    /// The contract address bound into the MPC-TLS notary digest.
-    ///
-    /// LOUD WARNING, learned the hard way: this is the address of the
-    /// contract that VERIFIES the notary signature on-chain — for the naming
-    /// deployment that is `GitHubIdentityVerifier`, NOT `IdentityNames`.
-    /// The predecessor backend called the same value
-    /// `REGISTRY_CONTRACT_ADDRESS`, which misled operators into pointing it
-    /// at the registry; every bind then reverts with a notary-signature
-    /// failure because the digest is domain-separated by
-    /// `(chainId, verifyingContract)`.
-    #[arg(long, env = "VERIFIER_CONTRACT_ADDRESS")]
-    pub verifier_contract_address: String,
-
-    /// GitHub OAuth App client ID (read-only app; no GitHub App needed).
-    #[arg(long, env = "GH_OAUTH_CLIENT_ID")]
-    pub gh_oauth_client_id: String,
-
-    /// GitHub OAuth App client secret.
-    #[arg(long, env = "GH_OAUTH_CLIENT_SECRET")]
-    pub gh_oauth_client_secret: String,
-
-    /// Seconds a challenge (and its finished result) stays available.
-    #[arg(long, env = "CHALLENGE_TTL_SECS", default_value = "300")]
-    pub challenge_ttl_secs: u64,
 }
 
-impl Config {
-    /// The comma-separated origins as a vector of patterns.
-    pub fn allowed_origin_patterns(&self) -> Vec<String> {
-        self.allowed_origins
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
+impl Cli {
+    /// What this process was invoked with.
+    pub fn resolve() -> Result<Cli> {
+        Cli::resolve_from(std::env::args_os())
     }
+
+    /// The same, from an explicit argv.
+    pub fn resolve_from<I, T>(argv: I) -> Result<Cli>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        Cli::parsed_by(<Cli as clap::CommandFactory>::command(), argv)
+    }
+
+    /// The same, parsing with `command`: which environment variables reach a
+    /// flag is that command's to say.
+    pub fn parsed_by<I, T>(command: clap::Command, argv: I) -> Result<Cli>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        <Cli as clap::FromArgMatches>::from_arg_matches(&command.get_matches_from(argv))
+            .map_err(|e| Error::Config {
+                detail: e.to_string(),
+            })
+    }
+
+    /// The deployment this invocation names, read from its file.
+    pub fn settings(&self) -> Result<Settings> {
+        let Some(path) = self.config.as_ref() else {
+            return Err(Error::Config {
+                detail: "no configuration file; name one with --config or \
+                         LIBID_CONFIG. The deployment is written in it."
+                    .into(),
+            });
+        };
+        Settings::read(path)
+    }
+}
+
+/// What the file says.
+///
+/// An unknown key is refused. The bind address and port are not keys: a
+/// container image sets them in the environment, so a file naming them would
+/// be read and not applied.
+#[derive(Deserialize, Debug, Default, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct Settings {
+    /// The application origins admitted to read the public ceremony
+    /// configuration. Nonempty, each in canonical form and read as written.
+    #[serde(default)]
+    pub allowed_app_origins: Vec<String>,
+
+    /// The CCDP Distribution this bridge selects: the canonical origin
+    /// serving the Callback artifact and everything the browser runs after
+    /// it. A file naming none selects the canonical libID Distribution.
+    #[serde(default = "default_ccdp_origin")]
+    pub ccdp_origin: String,
+
+    /// The enabled platforms, as `[[platforms]]` tables: each names a
+    /// platform, its public client id, the ceremony versions it advertises
+    /// and, for `github`, the public client credential.
+    ///
+    /// ```toml
+    /// [[platforms]]
+    /// id = "github"
+    /// client_id = "Iv1.0123456789abcdef"
+    /// versions = [1]
+    /// client_credential = "..."
+    /// ```
+    #[serde(default)]
+    pub platforms: Vec<PlatformProfile>,
+}
+
+impl Settings {
+    /// The deployment written in the file at `path`.
+    pub fn read(path: &std::path::Path) -> Result<Settings> {
+        let refuse = |detail: String| Error::Config {
+            detail: format!("{}: {detail}", path.display()),
+        };
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| refuse(format!("cannot be read: {e}")))?;
+        toml::from_str(&text).map_err(|e| refuse(e.message().to_owned()))
+    }
+}
+
+/// The canonical Distribution, for a file that names none.
+fn default_ccdp_origin() -> String {
+    DEFAULT_CCDP_ORIGIN.to_owned()
 }

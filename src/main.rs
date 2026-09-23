@@ -1,12 +1,9 @@
-//! Binary entrypoint: parse config, build state, serve.
-
-use clap::Parser;
-use tracing::info;
+//! Binary entrypoint: resolve the configuration, build the state, serve.
 
 use libid_server_rs::{
-    build_state,
-    config::Config,
-    routes,
+    config::Cli,
+    serve,
+    Bridge,
 };
 
 #[tokio::main]
@@ -18,23 +15,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let cfg = Config::parse();
-    let allowed_origins = cfg.allowed_origin_patterns();
-    let addr = format!("{}:{}", cfg.host, cfg.port);
+    let cli = Cli::resolve()?;
+    // No network request happens here: a Distribution that is unreachable
+    // delays the callback document and stops nothing.
+    let bridge = Bridge::start(&cli.settings()?)?;
 
-    let state = build_state(&cfg).await?;
-    let app = routes::build_router()
-        .with_state(state)
-        .layer(routes::cors_layer(allowed_origins));
+    let listener =
+        tokio::net::TcpListener::bind(format!("{}:{}", cli.host, cli.port)).await?;
+    tracing::info!("libid-server-rs listening on {}", listener.local_addr()?);
 
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    info!("libid-server-rs listening on {}", listener.local_addr()?);
-
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-            info!("shutting down");
-        })
-        .await?;
+    serve(bridge, listener, async {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("shutting down");
+    })
+    .await?;
     Ok(())
 }

@@ -38,10 +38,14 @@
 # the trust boundary, and the operator writing one asserts control of that
 # namespace.
 #
-# A Callback published before origin-pattern support matches a pattern against
-# no peer, so the ceremony never fails and never becomes ready. Publish the
-# CCDP Distribution named below with pattern support first, then configure the
-# pattern.
+# A Callback published before origin-pattern support refuses a member that is
+# not a URL, raising invalidCallbackInputs and rendering its failure text for
+# every ceremony the deployment serves. Publish the CCDP Distribution named
+# below with pattern support first, then configure the pattern.
+#
+# A suffix of one label is refused, so *.localhost is not a local shortcut.
+# Name each loopback origin: http://localhost and http://127.0.0.1 are exact
+# members at any port.
 allowed_app_origins = ["https://app.example", "https://wallet.example"]
 
 # The CCDP Distribution: the origin serving the Callback artifact and

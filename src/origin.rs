@@ -132,9 +132,9 @@ impl fmt::Display for Origin {
 /// Its matching is the browser's byte for byte, and its grammar is the
 /// browser's narrowed in the one place [`Pattern::listed`] names
 /// (`ts/packages/popup/src/message.ts`, `SUBDOMAIN_PATTERN` and
-/// `isAllowedOrigin`). A member the bridge publishes and the browser reads
-/// differently yields a ceremony that never becomes ready rather than an
-/// error, so the two sides do not get to drift.
+/// `isAllowedOrigin`). The two sides admit the same origins under the same
+/// members, save for the byte filter [`Origin::parse`] applies to every origin
+/// this bridge reads, which refuses a few the browser admits.
 ///
 /// No public suffix list is consulted. A pattern places the whole subdomain
 /// namespace of its suffix, at every depth, inside the trust boundary, and

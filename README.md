@@ -253,9 +253,15 @@ waiting for a peer to match it.
 | `https://X.handles.link` | refused — not canonical |
 
 That table is the browser's, from `SUBDOMAIN_PATTERN` and `isAllowedOrigin` in
-`ts/packages/popup/src/message.ts`. The bridge reproduces it byte for byte: a
-member the two sides read differently yields a ceremony that never becomes
-ready rather than an error.
+`ts/packages/popup/src/message.ts`. The bridge reproduces it byte for byte, so
+the two sides admit the same origins under the same members.
+
+One narrowing is the bridge's own and is not in that table. A canonical origin
+carrying a byte outside `alnum - _ . : [ ] /` is refused, both as a member and
+as a request `Origin`, so `https://a~b.handles.link` is refused here and
+admitted by the browser under `*.handles.link`. The filter exists because the
+CCDP origin is spliced into a `Content-Security-Policy`, and it applies to
+every origin this bridge reads.
 
 Nothing is normalised while matching. A browser stamps an origin lowercase and
 in punycode, and a pattern whose suffix is in any other form is refused at
@@ -267,7 +273,7 @@ member and its own index in the list:
 | refused | why |
 |---|---|
 | `*` | an allowlist this bridge publishes names the origins and the suffixes it serves |
-| a suffix of one label — `*.com`, `*.link` | a whole top-level domain is not an allowlist |
+| a suffix of one label — `*.com`, `*.link`, `*.localhost` | a whole top-level domain is not an allowlist |
 
 Refusing narrows admission, so it cannot make the two sides disagree over an
 origin either one lets through, and an operator reads a startup refusal where
@@ -284,10 +290,15 @@ an exact origin, and the callback document's policy names that origin alone,
 so no pattern reaches a `Content-Security-Policy`.
 
 **A pattern needs a Callback that understands one.** A Callback published
-before origin-pattern support reads the list by the exact-origin rule and
-matches a pattern against no peer, so the ceremony does not fail — it never
-becomes ready. Publish the CCDP Distribution that carries pattern support
+before origin-pattern support reads the list by the exact-origin rule, which
+refuses a member that is not a URL. It raises `invalidCallbackInputs` and
+renders its failure text, before any connection exists, for every ceremony the
+deployment serves. Publish the CCDP Distribution that carries pattern support
 first, then configure the pattern.
+
+A local deployment reaches for `*.localhost` and is refused: its suffix is one
+label. Name each loopback origin instead — `http://localhost` and
+`http://127.0.0.1` are exact members at any port.
 
 ### Per platform
 

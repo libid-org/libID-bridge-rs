@@ -175,6 +175,11 @@ mod root {
                 vec!["--allowed-app-origins", "http://app.example"],
             ),
             (
+                "a CCDP origin written as an origin pattern, which names no \
+                 Distribution and which a policy could not carry",
+                vec!["--ccdp-origin", "https://*.handles.link"],
+            ),
+            (
                 "a CCDP origin whose host carries a CSP directive separator",
                 vec!["--ccdp-origin", "https://a;b.example"],
             ),

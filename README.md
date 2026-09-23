@@ -226,12 +226,15 @@ An allowlist member may be an **origin pattern**: `https://*.` and then the
 host whose direct subdomains it admits, as in `https://*.handles.link`. It
 admits one nonempty label under that host, and both ends are anchored.
 
-The suffix is a host and nothing more: at least two labels, lowercase ASCII,
-no port, no trailing dot, no empty label and no second `*`. A member carrying
-a `*` that is not a well-formed pattern — `https://*handles.link`,
-`https://*.handles.link:8443` — is refused at startup rather than read as an
-exact origin: no browser stamps such an origin, so admitting the spelling
-would keep the typo until a ceremony hung waiting for a peer to match it.
+The suffix is a host and nothing more: a name rather than an address, at
+least two labels, lowercase ASCII, no port, no trailing dot, no empty label
+and no second `*`. There is no address pattern and so no loopback pattern —
+`https://*.127.0.0.1` is refused, because an address has no subdomains. A
+member carrying a `*` that is not a well-formed pattern —
+`https://*handles.link`, `https://*.handles.link:8443` — is refused at startup
+rather than read as an exact origin: no browser stamps such an origin, so
+admitting the spelling would keep the typo until a ceremony hung waiting for a
+peer to match it.
 
 | Origin | `https://*.handles.link` |
 |---|---|

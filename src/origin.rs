@@ -5,11 +5,18 @@
 //! [`Admitted`]: an exact origin, or an origin pattern admitting the direct
 //! subdomains of one host. Everything else — the Distribution this bridge
 //! dials, the origin its policy names — is an [`Origin`] and nothing else.
+//!
+//! What a request arrived under is an [`Observed`], read from the `Origin`
+//! header once and carrying the proof that it is canonical. Membership takes
+//! one of those and nothing else.
 
 use std::fmt;
 
 use serde::Serialize;
-use url::Url;
+use url::{
+    Host,
+    Url,
+};
 
 use crate::error::{
     Error,
@@ -138,9 +145,14 @@ impl Pattern {
 
     /// `spelling` as written, well formed: the scheme is `https`, and the
     /// suffix is the host of a canonical origin — which [`Origin::listed`]
-    /// decides, so that one validator answers for both member kinds —
-    /// carrying at least one `.`, no second `*`, no port, no trailing `.`
-    /// and no empty label. A refusal names `field`.
+    /// decides, so that one validator answers for both member kinds — naming
+    /// a host rather than an address, and carrying at least one `.`, no
+    /// second `*`, no port, no trailing `.` and no empty label.
+    ///
+    /// A refusal names `field` and the first thing actually wrong with the
+    /// spelling. The checks read off the spelling run ahead of the parser,
+    /// which folds a default port away and would otherwise leave a suffix
+    /// carrying one reported as an uncanonical host.
     pub fn listed(field: &str, spelling: &str) -> Result<Pattern> {
         let refuse = |why: &str| Error::Config {
             detail: format!(
@@ -152,14 +164,14 @@ impl Pattern {
         let Some(suffix) = spelling.strip_prefix(Pattern::PREFIX) else {
             return Err(refuse("is not an origin pattern"));
         };
-        if !suffix.contains('.') {
-            return Err(refuse("names a suffix of one label"));
+        if suffix.is_empty() {
+            return Err(refuse("names no suffix"));
         }
         if suffix.contains('*') {
             return Err(refuse("names a suffix carrying a second *"));
         }
-        if Origin::listed(field, &format!("https://{suffix}")).is_err() {
-            return Err(refuse("names a suffix that is not a canonical host"));
+        if names_an_address(suffix) {
+            return Err(refuse("names an address rather than a host"));
         }
         // A URL parser keeps a port, an empty label and a trailing `.`, and
         // reports the result canonical, so the three are read off the
@@ -174,11 +186,17 @@ impl Pattern {
         if suffix.ends_with('.') {
             return Err(refuse("names a suffix carrying a trailing dot"));
         }
+        if !suffix.contains('.') {
+            return Err(refuse("names a suffix of one label"));
+        }
+        if Origin::listed(field, &format!("https://{suffix}")).is_err() {
+            return Err(refuse("names a suffix that is not a canonical host"));
+        }
         Ok(Pattern(spelling.to_owned()))
     }
 
-    /// Whether this pattern admits `origin`, which [`Admitted::admits`] has
-    /// already found canonical.
+    /// Whether this pattern admits `origin`, the spelling of an
+    /// [`Observed`] and so already canonical.
     ///
     /// It does when `origin` is spelled `https://` and then a host carrying
     /// no `:` and no `/`, which ends in `.` and this pattern's suffix, with
@@ -222,6 +240,33 @@ impl fmt::Display for Pattern {
     }
 }
 
+/// An origin as a browser stamped it: the value of one `Origin` header,
+/// found canonical.
+///
+/// It is the only thing membership is tested against, so the canonicality
+/// precondition cannot be skipped and is decided once for a request rather
+/// than once for each member tested against it. A member's own spelling is
+/// not canonical, so it cannot be offered as an observed origin, reach the
+/// literal comparison against an exact member and become a bound origin.
+#[derive(Clone, Copy, Debug)]
+pub struct Observed<'a>(&'a str);
+
+impl<'a> Observed<'a> {
+    /// `spelling` where it is already in the form a browser stamps, which is
+    /// the form [`Origin::listed`] holds an exact member to; `None`
+    /// otherwise, and only whether it holds is read.
+    pub fn stamped(spelling: &'a str) -> Option<Observed<'a>> {
+        Origin::listed("Origin", spelling)
+            .is_ok()
+            .then_some(Observed(spelling))
+    }
+
+    /// The spelling.
+    pub fn as_str(&self) -> &'a str {
+        self.0
+    }
+}
+
 /// One member of an application allowlist, published as the spelling it was
 /// written in.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -259,21 +304,16 @@ impl Admitted {
         Origin::listed(field, spelling).map(Admitted::Exact)
     }
 
-    /// Whether this member admits `origin`, as a browser stamped it.
+    /// Whether this member admits `observed`.
     ///
-    /// Canonicality is decided ahead of membership of either kind. A member
-    /// spelling is not an origin a browser stamps, so a peer offering one as
-    /// its own origin is turned away by that precondition rather than matched
-    /// by the literal comparison and bound.
-    pub fn admits(&self, origin: &str) -> bool {
-        // The precondition an exact member is held to, applied to what the
-        // browser stamped; only whether it holds is read.
-        if Origin::listed("Origin", origin).is_err() {
-            return false;
-        }
+    /// Canonicality is decided ahead of membership of either kind, and
+    /// [`Observed`] is where it is decided: a member spelling is not an
+    /// origin a browser stamps, so a peer offering one as its own origin
+    /// never reaches the literal comparison and is never bound.
+    pub fn admits(&self, observed: Observed<'_>) -> bool {
         match self {
-            Admitted::Exact(exact) => exact.as_str() == origin,
-            Admitted::Pattern(pattern) => pattern.admits(origin),
+            Admitted::Exact(exact) => exact.as_str() == observed.as_str(),
+            Admitted::Pattern(pattern) => pattern.admits(observed.as_str()),
         }
     }
 
@@ -290,6 +330,20 @@ impl fmt::Display for Admitted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+/// Whether `spelling` names an IP address rather than a host: an IPv4
+/// address in any of its forms, or an IPv6 address written with or without
+/// its brackets.
+///
+/// An address has no subdomains, so no origin pattern names one, and there is
+/// no loopback pattern. A dotted quad passes every check that reads the
+/// spelling alone, because it is a canonical origin host of four labels.
+fn names_an_address(spelling: &str) -> bool {
+    // A URL carries an IPv6 address in brackets and `Host` reads one only in
+    // brackets; a suffix written without them names the same address.
+    matches!(Host::parse(spelling), Ok(Host::Ipv4(_) | Host::Ipv6(_)))
+        || matches!(Host::parse(&format!("[{spelling}]")), Ok(Host::Ipv6(_)))
 }
 
 /// Whether `url` is plaintext `http` on exactly `localhost` or `127.0.0.1`:

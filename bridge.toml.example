@@ -21,9 +21,11 @@
 #
 # https://*.handles.link admits https://app.handles.link, and neither
 # https://handles.link nor https://a.b.handles.link. The suffix is a host and
-# nothing more: at least two labels, lowercase, no port, no trailing dot, no
-# empty label and no second *. A member carrying a * that is not a well-formed
-# pattern is refused at startup rather than read as an exact origin.
+# nothing more: a name rather than an address, at least two labels, lowercase,
+# no port, no trailing dot, no empty label and no second *. There is no address
+# pattern and so no loopback pattern -- an address has no subdomains. A member
+# carrying a * that is not a well-formed pattern is refused at startup rather
+# than read as an exact origin.
 #
 # No public suffix list is consulted: a pattern places the whole
 # direct-subdomain namespace of its suffix inside the trust boundary, and the

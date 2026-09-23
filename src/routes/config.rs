@@ -26,7 +26,10 @@ use axum::{
 };
 use serde_json::json;
 
-use crate::state::AppState;
+use crate::{
+    origin::Observed,
+    state::AppState,
+};
 
 /// What `Vary` names, on every response this route writes: `Origin` and
 /// `Sec-Fetch-Site` decide the body, on refusals too.
@@ -64,11 +67,14 @@ enum Admission {
 fn admission(state: &AppState, headers: &HeaderMap) -> Option<Admission> {
     match crate::routes::Origins::of(headers) {
         crate::routes::Origins::One(origin) => {
-            let value = origin.to_str().ok()?;
+            // Canonicality is the precondition of every membership test and
+            // depends on no member, so the header is read once however long
+            // the admission set is.
+            let observed = Observed::stamped(origin.to_str().ok()?)?;
             state
                 .allowed_origins
                 .iter()
-                .any(|member| member.admits(value))
+                .any(|member| member.admits(observed))
                 .then(|| Admission::Listed(origin.clone()))
         }
         crate::routes::Origins::Several => None,

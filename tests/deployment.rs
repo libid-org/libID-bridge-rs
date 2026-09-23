@@ -143,6 +143,14 @@ mod deployment {
 mod origin {
     use libid_server_rs::origin::*;
 
+    /// Whether any of `members` admits `observed`, as the configuration route
+    /// reads one `Origin`: the spelling is found canonical once, and one that
+    /// is not is admitted by no member.
+    fn admits(members: &[Admitted], observed: &str) -> bool {
+        Observed::stamped(observed)
+            .is_some_and(|observed| members.iter().any(|m| m.admits(observed)))
+    }
+
     /// What a policy source expression can name: letters, digits, `-` and
     /// the `.` between labels, and nothing else.
     #[test]
@@ -288,23 +296,23 @@ mod origin {
     /// subdomain of it nor a near miss of it.
     #[test]
     fn an_exact_member_admits_only_itself() {
-        let member = Admitted::listed("T", "https://app.example").unwrap();
-        assert!(member.admits("https://app.example"));
+        let members = [Admitted::listed("T", "https://app.example").unwrap()];
+        assert!(admits(&members, "https://app.example"));
         for other in [
             "https://sub.app.example",
             "https://APP.example",
             "https://app.example/",
             "https://app.example:8443",
         ] {
-            assert!(!member.admits(other), "{other}");
+            assert!(!admits(&members, other), "{other}");
         }
     }
 
     /// One label under the suffix is admitted, and both ends are anchored.
     #[test]
     fn a_pattern_admits_one_label_under_its_suffix_and_nothing_else() {
-        let member = Admitted::listed("T", "https://*.handles.link").unwrap();
-        for (observed, admitted) in [
+        let members = [Admitted::listed("T", "https://*.handles.link").unwrap()];
+        for (observed, wanted) in [
             ("https://improve-account-linking.handles.link", true),
             ("https://x_y.handles.link", true),
             ("https://xn--80ak6aa92e.handles.link", true),
@@ -323,7 +331,71 @@ mod origin {
             // A browser stamps a lowercase host.
             ("https://X.handles.link", false),
         ] {
-            assert_eq!(member.admits(observed), admitted, "{observed}");
+            assert_eq!(admits(&members, observed), wanted, "{observed}");
+        }
+    }
+
+    /// No public suffix list is consulted, and none is to be added. A pattern
+    /// places the whole direct-subdomain namespace of its suffix inside the
+    /// trust boundary, and the operator writing one asserts control of it.
+    #[test]
+    fn a_public_suffix_is_a_suffix_like_any_other() {
+        let members = [Admitted::listed("T", "https://*.co.uk").unwrap()];
+        assert!(admits(&members, "https://shop.co.uk"));
+        assert!(!admits(&members, "https://co.uk"));
+    }
+
+    /// A label leading with `-` or `_` is a host a browser stamps, so a
+    /// suffix spells one like any other and the label ahead of it is admitted.
+    /// No label grammar is applied on either side: the layers must not
+    /// disagree about which hosts are plausible.
+    #[test]
+    fn a_suffix_label_may_lead_with_a_hyphen_or_an_underscore() {
+        for (spelling, observed) in [
+            ("https://*.-a.handles.link", "https://app.-a.handles.link"),
+            ("https://*._a.handles.link", "https://app._a.handles.link"),
+        ] {
+            let members = [Admitted::listed("T", spelling).unwrap()];
+            assert!(admits(&members, observed), "{observed}");
+        }
+    }
+
+    /// There is no address pattern, and so no loopback pattern: an address
+    /// has no subdomains. A dotted quad passes every check that reads the
+    /// spelling alone, because it is a canonical origin host of four labels.
+    #[test]
+    fn no_pattern_names_an_address() {
+        for spelling in [
+            "https://*.127.0.0.1",
+            "https://*.10.0.0.1",
+            "https://*.0x7f.1",
+            "https://*.2130706433",
+            "https://*.[::1]",
+            "https://*.::1",
+            "https://*.[::ffff:127.0.0.1]",
+        ] {
+            let refusal = Admitted::listed("FIELD", spelling).unwrap_err();
+            assert!(
+                refusal.to_string().contains("FIELD"),
+                "{spelling}: {refusal}"
+            );
+        }
+    }
+
+    /// A refusal names what is actually wrong, so an operator is not sent
+    /// after the wrong mistake: a URL parser folds a default port away and
+    /// reports what is left canonical, and an empty suffix has no label to
+    /// count.
+    #[test]
+    fn a_refusal_names_what_is_wrong_with_the_spelling() {
+        for (spelling, why) in [
+            ("https://*.handles.link:443", "carrying a port"),
+            ("https://*.handles.link:8443", "carrying a port"),
+            ("https://*.", "names no suffix"),
+            ("https://*.127.0.0.1", "names an address"),
+        ] {
+            let refusal = Admitted::listed("FIELD", spelling).unwrap_err().to_string();
+            assert!(refusal.contains(why), "{spelling}: {refusal}");
         }
     }
 
@@ -337,10 +409,7 @@ mod origin {
             Admitted::listed("T", "https://app.example").unwrap(),
         ];
         for observed in ["https://*.handles.link", "https://*", "https://*.*"] {
-            assert!(
-                !members.iter().any(|member| member.admits(observed)),
-                "{observed}"
-            );
+            assert!(!admits(&members, observed), "{observed}");
         }
     }
 

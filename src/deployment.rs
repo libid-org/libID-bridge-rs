@@ -46,8 +46,9 @@ impl Deployment {
         // The resolved CCDP origin joins the admitted set once; an overridden
         // `CCDP_ORIGIN` does not keep `https://lib.id` admitted unless it is
         // listed. Membership is the literal spelling: the Callback asserts
-        // the list carries this origin itself, so an origin pattern covering
-        // it is a different member and does not stand in for it.
+        // the list carries this origin itself, so a member covering it — an
+        // origin pattern, or `*` — is a different member and does not stand
+        // in for it.
         let allowed_origins: Arc<[Admitted]> = {
             let mut set = allowed_app_origins(&settings.allowed_app_origins)?;
             if !set.iter().any(|m| m.as_str() == ccdp_origin.as_str()) {

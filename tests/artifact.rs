@@ -67,14 +67,15 @@ mod artifact {
     /// the list the Callback reads is an array of strings whichever kind a
     /// member is.
     #[test]
-    fn a_pattern_member_reaches_the_island_as_its_own_spelling() {
+    fn every_member_reaches_the_island_as_its_own_spelling() {
         let members = vec![
             Admitted::Pattern(Pattern::listed("T", "*.handles.link").unwrap()),
+            Admitted::Every,
             Admitted::Exact(origin("https://ccdp.example")),
         ];
         let served = text(&composed_for(FIXTURE, &members).unwrap());
         assert!(served.contains(
-            r#"[["*.handles.link","https://ccdp.example"],"https://ccdp.example"]"#
+            r#"[["*.handles.link","*","https://ccdp.example"],"https://ccdp.example"]"#
         ));
     }
 

@@ -83,32 +83,26 @@ mod root {
             "https://app.example,*.handles_link",
         ]))
         .err()
-        .expect("the second member names a suffix of one label");
+        .expect("the second member carries an underscore");
         let text = err.to_string();
         assert!(text.contains("ALLOWED_APP_ORIGINS[1]"), "{text}");
         assert!(text.contains("*.handles_link"), "{text}");
     }
 
-    /// This bridge is narrower than the browser about what an allowlist may
-    /// name. A whole top-level domain and a bare `*` each stop the process,
-    /// naming the member and its own index: an operator reads a startup
-    /// refusal, where an admission this wide is read by nobody.
+    /// This bridge admits what the transport admits and narrows nothing of
+    /// its own: a suffix of one label and a bare `*` are members, each
+    /// joining the effective set as written and beside an exact member.
     #[tokio::test]
-    async fn a_member_wider_than_this_bridge_publishes_is_refused_by_its_own_index() {
-        for (member, why) in [
-            ("*.com", "a suffix of one label"),
-            ("*", "admits every origin"),
-        ] {
-            let err = Bridge::start(&common::config(&[
+    async fn a_member_as_wide_as_the_transport_accepts_is_a_member() {
+        for member in ["*.com", "*"] {
+            let state = started(&[
                 "--allowed-app-origins",
                 &format!("https://app.example,{member}"),
-            ]))
-            .err()
-            .unwrap_or_else(|| panic!("{member} is wider than this bridge publishes"));
-            let text = err.to_string();
-            assert!(text.contains("ALLOWED_APP_ORIGINS[1]"), "{member}: {text}");
-            assert!(text.contains(member), "{member}: {text}");
-            assert!(text.contains(why), "{member}: {text}");
+            ])
+            .await;
+            let members: Vec<&str> =
+                state.allowed_origins.iter().map(|m| m.as_str()).collect();
+            assert_eq!(members[..2], ["https://app.example", member], "{member}");
         }
     }
 
@@ -175,10 +169,6 @@ mod root {
             (
                 "a duplicate origin pattern",
                 vec!["--allowed-app-origins", "*.handles.link,*.handles.link"],
-            ),
-            (
-                "an origin pattern whose suffix is one label",
-                vec!["--allowed-app-origins", "*.localhost"],
             ),
             (
                 "an origin pattern whose suffix is not lowercase DNS labels",

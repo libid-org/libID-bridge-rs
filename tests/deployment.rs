@@ -261,8 +261,43 @@ mod origin {
         );
     }
 
-    /// A `*` makes a member an origin pattern, and one that is not well
-    /// formed is refused by name rather than read as an origin.
+    /// `*` is a member admitting every origin, written as it stands and
+    /// published as that spelling.
+    #[test]
+    fn a_star_admits_every_origin() {
+        let member = Admitted::listed("T", "*").unwrap();
+        assert!(matches!(member, Admitted::Every));
+        assert_eq!(member.as_str(), "*");
+        assert_eq!(member.to_string(), "*");
+        assert_eq!(serde_json::to_string(&member).unwrap(), r#""*""#);
+
+        let members = [member];
+        for observed in [
+            "https://anything.example",
+            "https://a.b.c.handles.link",
+            "https://app.example:8443",
+            "http://localhost:3000",
+            "http://127.0.0.1:8722",
+        ] {
+            assert!(admits(&members, observed), "{observed}");
+        }
+    }
+
+    /// A suffix of one label is a suffix like any other.
+    #[test]
+    fn a_suffix_of_one_label_is_a_suffix_like_any_other() {
+        for (spelling, under, apex) in [
+            ("*.com", "https://shop.com", "https://com"),
+            ("*.localhost", "https://a.localhost", "https://localhost"),
+        ] {
+            let members = [Admitted::listed("T", spelling).unwrap()];
+            assert!(admits(&members, under), "{under}");
+            assert!(!admits(&members, apex), "{apex}");
+        }
+    }
+
+    /// A member beginning `*.` is an origin pattern, and one that is not
+    /// well formed is refused by name rather than read as an origin.
     #[test]
     fn a_malformed_pattern_is_refused_rather_than_read_as_an_origin() {
         for spelling in [
@@ -292,9 +327,6 @@ mod origin {
             // One `*`, in the one position a pattern spells it.
             "*.*.handles.link",
             "*handles.link",
-            // A whole top-level domain is not an allowlist.
-            "*.link",
-            "*.localhost",
         ] {
             let refusal = Admitted::listed("FIELD", spelling).unwrap_err();
             assert!(
@@ -401,13 +433,11 @@ mod origin {
     #[test]
     fn a_refusal_names_what_is_wrong_with_the_spelling() {
         for (spelling, why) in [
-            ("*", "admits every origin"),
             ("*.handles.link:443", "outside the lowercase DNS alphabet"),
             ("*.HANDLES.link", "outside the lowercase DNS alphabet"),
             ("*.-a.handles.link", "begins or ends with a hyphen"),
             ("*.", "an empty label"),
             ("*.127.0.0.1", "does not begin with a letter"),
-            ("*.com", "a suffix of one label"),
             (
                 "https://*.handles.link",
                 "carries a * and is not an origin pattern",
@@ -419,13 +449,14 @@ mod origin {
     }
 
     /// A member's own spelling is not an origin a browser stamps. Offered as
-    /// one it is refused, by the pattern that spells it and by an exact
-    /// member alongside it, so it never becomes a bound origin.
+    /// one it is refused whichever members the allowlist carries, `*` among
+    /// them, so it never becomes a bound origin.
     #[test]
     fn a_member_spelling_is_never_an_observed_origin() {
         let members = [
             Admitted::listed("T", "*.handles.link").unwrap(),
             Admitted::listed("T", "https://app.example").unwrap(),
+            Admitted::listed("T", "*").unwrap(),
         ];
         for observed in ["*.handles.link", "*", "*.*", "https://*.handles.link"] {
             assert!(!admits(&members, observed), "{observed}");

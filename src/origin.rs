@@ -2,10 +2,9 @@
 //! admits, publishes or dials is checked into, once, at startup.
 //!
 //! An application allowlist is written in the wider vocabulary of
-//! [`Admitted`]: an exact origin, or an origin pattern admitting the
-//! subdomains of one host suffix. Everything else — the Distribution this
-//! bridge dials, the origin its policy names — is an [`Origin`] and nothing
-//! else.
+//! [`Admitted`]: an exact origin, an origin pattern admitting the subdomains
+//! of one host suffix, or `*`. Everything else — the Distribution this bridge
+//! dials, the origin its policy names — is an [`Origin`] and nothing else.
 //!
 //! What a request arrived under is an [`Observed`], read from the `Origin`
 //! header once and carrying the proof that it is canonical. Membership takes
@@ -13,7 +12,10 @@
 
 use std::fmt;
 
-use serde::Serialize;
+use serde::{
+    Serialize,
+    Serializer,
+};
 use url::Url;
 
 use crate::error::{
@@ -129,16 +131,13 @@ impl fmt::Display for Origin {
 /// `https://app.handles.link` and `https://a.b.handles.link`, and not
 /// `https://handles.link`.
 ///
-/// Its matching is the browser's byte for byte, and its grammar is the
-/// browser's narrowed in the one place [`Pattern::listed`] names
+/// Its grammar and its matching are the browser's, byte for byte
 /// (`ts/packages/popup/src/message.ts`, `SUBDOMAIN_PATTERN` and
-/// `isAllowedOrigin`). The two sides admit the same origins under the same
-/// members, save for the byte filter [`Origin::parse`] applies to every origin
-/// this bridge reads, which refuses a few the browser admits.
+/// `isAllowedOrigin`), save for the byte filter [`Origin::parse`] applies to
+/// every origin this bridge reads.
 ///
 /// No public suffix list is consulted. A pattern places the whole subdomain
-/// namespace of its suffix, at every depth, inside the trust boundary, and
-/// the operator writing one asserts control of that namespace.
+/// namespace of its suffix, at every depth, inside the trust boundary.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct Pattern(String);
@@ -148,20 +147,11 @@ impl Pattern {
     /// and is refused where it is not a well-formed one.
     pub const PREFIX: &'static str = "*.";
 
-    /// The fewest labels a configured suffix carries.
-    const LEAST_LABELS: usize = 2;
-
     /// `spelling` as written, well formed: [`Pattern::PREFIX`] and then one
     /// or more DNS labels, each lowercase alphanumeric with hyphens only
     /// inside it, the last of them beginning with a letter. So no scheme, no
     /// port, no path, no uppercase, no underscore, no trailing dot, no empty
     /// label, no second `*`.
-    ///
-    /// The suffix carries at least [`Pattern::LEAST_LABELS`] labels, which
-    /// the browser does not ask for. It is the one place this bridge is the
-    /// narrower of the two: a whole top-level domain is not an allowlist, and
-    /// a narrower bridge admits a subset of what the browser admits, so the
-    /// two cannot disagree over an origin either one lets through.
     ///
     /// A refusal names `field` and the first thing actually wrong with the
     /// spelling.
@@ -179,18 +169,10 @@ impl Pattern {
         // Splitting the empty suffix yields one empty label, which the walk
         // refuses, so an empty suffix needs no case of its own.
         let mut labels = suffix.split('.').peekable();
-        let mut count = 0usize;
         while let Some(label) = labels.next() {
-            count += 1;
             if let Some(fault) = label_fault(label, labels.peek().is_none()) {
                 return Err(refuse(fault));
             }
-        }
-        if count < Pattern::LEAST_LABELS {
-            return Err(refuse(
-                "names a suffix of one label, and a whole top-level domain is \
-                 not an allowlist",
-            ));
         }
         Ok(Pattern(spelling.to_owned()))
     }
@@ -261,35 +243,37 @@ impl<'a> Observed<'a> {
 
 /// One member of an application allowlist, published as the spelling it was
 /// written in.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(untagged)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Admitted {
     /// A canonical origin, admitting itself and nothing else.
     Exact(Origin),
     /// An origin pattern, admitting the subdomains of its suffix.
     Pattern(Pattern),
+    /// `*`, admitting every origin.
+    Every,
+}
+
+impl Serialize for Admitted {
+    /// Every kind serializes as its own spelling, so an allowlist is an array
+    /// of strings.
+    fn serialize<S: Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
 }
 
 impl Admitted {
-    /// `spelling` as written. A member beginning with [`Pattern::PREFIX`] is
-    /// an origin pattern and is refused where it is not a well-formed one,
-    /// rather than read as an origin; a member carrying a `*` anywhere else
-    /// is refused too; every other member is an exact canonical origin. A
-    /// refusal names `field`.
-    ///
-    /// A bare `*` is a member the browser reads as every origin. It is
-    /// refused here: an allowlist this bridge publishes names what it
-    /// serves. Refusing it narrows admission, so the browser is never asked
-    /// to admit something the bridge would not.
+    /// `spelling` as written. A bare `*` is the member admitting every
+    /// origin. A member beginning with [`Pattern::PREFIX`] is an origin
+    /// pattern and is refused where it is not a well-formed one, rather than
+    /// read as an origin; a member carrying a `*` anywhere else is refused
+    /// too; every other member is an exact canonical origin. A refusal names
+    /// `field`.
     pub fn listed(field: &str, spelling: &str) -> Result<Admitted> {
         if spelling == "*" {
-            return Err(Error::Config {
-                detail: format!(
-                    "{field} * admits every origin, and an allowlist this \
-                     bridge publishes names the origins and the suffixes it \
-                     serves"
-                ),
-            });
+            return Ok(Admitted::Every);
         }
         if spelling.starts_with(Pattern::PREFIX) {
             return Pattern::listed(field, spelling).map(Admitted::Pattern);
@@ -312,7 +296,7 @@ impl Admitted {
 
     /// Whether this member admits `observed`.
     ///
-    /// Canonicality is decided ahead of membership of either kind, and
+    /// Canonicality is decided ahead of membership of every kind, and
     /// [`Observed`] is where it is decided: a member spelling is not an
     /// origin a browser stamps, so a peer offering one as its own origin
     /// never reaches the literal comparison and is never bound.
@@ -320,6 +304,7 @@ impl Admitted {
         match self {
             Admitted::Exact(exact) => exact.as_str() == observed.as_str(),
             Admitted::Pattern(pattern) => pattern.admits(observed.as_str()),
+            Admitted::Every => true,
         }
     }
 
@@ -328,6 +313,7 @@ impl Admitted {
         match self {
             Admitted::Exact(exact) => exact.as_str(),
             Admitted::Pattern(pattern) => pattern.as_str(),
+            Admitted::Every => "*",
         }
     }
 }

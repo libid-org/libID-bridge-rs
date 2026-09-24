@@ -2,15 +2,9 @@
 //! taking the settings it reads, and the GitHub rungs what the deployment
 //! under test published as [`Published`].
 
-use std::{
-    path::{
-        Path,
-        PathBuf,
-    },
-    time::{
-        Duration,
-        Instant,
-    },
+use std::time::{
+    Duration,
+    Instant,
 };
 
 use base64::Engine;
@@ -390,29 +384,4 @@ pub async fn a_real_x_authorization_yields_two_sessions_the_notary_attested(
     );
 
     grant.closed().await;
-}
-
-/// Turn the cookie list a browser exported to `export` into the
-/// `X_TEST_ALICE_COOKIES` value, so the session a person signed in for is the
-/// one the rung restores.
-pub fn a_browser_export_becomes_the_x_secret(export: &Path) {
-    let json = std::fs::read_to_string(export).unwrap_or_else(|e| {
-        panic!("{} is a cookie export this reads: {e}", export.display())
-    });
-    println!(
-        "X_TEST_ALICE_COOKIES={}",
-        browser::x::secret_from_export(&json)
-    );
-}
-
-/// Export the session of the X profile `profile`: a profile with no sign-in
-/// opens a Chrome for a person to sign in once; after that the export needs
-/// nobody. Written as JSON to `out` when there is one, or printed as the
-/// `X_TEST_ALICE_COOKIES` value otherwise.
-pub async fn a_fresh_x_session_is_exported_for_the_secret(
-    profile: PathBuf,
-    out: Option<&Path>,
-) {
-    let cookies = browser::x::Export { profile }.fresh_cookies().await;
-    browser::cookies::deliver(&cookies, out, "X_TEST_ALICE_COOKIES");
 }

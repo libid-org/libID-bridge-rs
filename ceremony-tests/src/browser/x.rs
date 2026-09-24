@@ -404,9 +404,8 @@ impl Platform for Authorization<'_> {
             assert!(
                 headed(),
                 "the saved X session holds no x.com cookie: renew \
-                 X_TEST_ALICE_COOKIES or X_TEST_ALICE_COOKIES_FILE from an \
-                 export, `cargo test --test ceremony -- --ignored --nocapture \
-                 a_fresh_x_session` in ceremony-tests/"
+                 X_TEST_ALICE_COOKIES or X_TEST_ALICE_COOKIES_FILE from \
+                 `cargo run --bin ceremony -- export x` in ceremony-tests/"
             );
             self.sign_in(session).await;
         }

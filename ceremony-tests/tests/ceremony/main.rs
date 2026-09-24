@@ -1,6 +1,6 @@
 //! The live ceremony suite: the rungs of `ceremony-tests`, each under the
 //! name CI selects it by, with this repository's bridge as the deployment
-//! under test, and the exports and Chrome checks that need no deployment. Run
+//! under test, and the Chrome checks that need no deployment. Run
 //! from `ceremony-tests/`, where relative paths in its settings resolve. Each
 //! test loads the settings sections its rung reads, and a missing variable
 //! fails it, naming every one absent; `ceremony_tests::settings::VARIABLES`
@@ -76,26 +76,6 @@ async fn a_real_x_authorization_yields_two_sessions_the_notary_attested() {
     .await
 }
 
-/// Run by name, ignored otherwise; the crate's README gives the command.
-#[tokio::test]
-#[ignore]
-async fn a_browser_export_becomes_the_x_secret() {
-    let export = settings::load(settings::x_conversion);
-    rungs::a_browser_export_becomes_the_x_secret(&export)
-}
-
-/// Run by name, ignored otherwise; the crate's README gives the command.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore]
-async fn a_fresh_x_session_is_exported_for_the_secret() {
-    let tooling = settings::tooling();
-    rungs::a_fresh_x_session_is_exported_for_the_secret(
-        tooling.x_profile.clone(),
-        tooling.x_export_out.as_deref(),
-    )
-    .await
-}
-
 /// The Google rung, under the module path CI selects with `--exact`.
 mod google {
     use super::*;
@@ -129,26 +109,6 @@ mod browser {
 
     pub mod google {
         mod tests {
-            #[tokio::test(flavor = "multi_thread")]
-            #[ignore = "reads a profile a person signed in to; explicit run"]
-            async fn a_fresh_google_session_is_exported_for_the_secret() {
-                use ceremony_tests::settings::{
-                    self,
-                    both,
-                };
-                let (app, account) = settings::load(|get| {
-                    both(settings::google_app(get), settings::google_account(get))
-                });
-                let tooling = settings::tooling();
-                ceremony_tests::browser::google::export_fresh_session(
-                    &app,
-                    &account,
-                    tooling.google_profile.clone(),
-                    tooling.google_export_out.as_deref(),
-                )
-                .await
-            }
-
             #[tokio::test]
             #[ignore = "requires Chrome and local sockets; no account or external network"]
             async fn chrome_preserves_the_redirect_fragment() {

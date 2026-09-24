@@ -531,6 +531,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chromiumoxide",
+ "clap",
  "dotenvy",
  "futures-util",
  "http-body-util",

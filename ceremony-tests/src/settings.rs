@@ -63,7 +63,6 @@ pub const VARIABLES: &[(&str, &str, Need)] = {
             "google-session",
             InsteadOf("GOOGLE_TEST_ALICE_COOKIES"),
         ),
-        ("X_COOKIE_EXPORT", "x-conversion", Required),
         (ENV_FILE, "tooling", Optional),
         ("CHROME", "tooling", Optional),
         ("BROWSER_HEAD", "tooling", Optional),
@@ -72,8 +71,6 @@ pub const VARIABLES: &[(&str, &str, Need)] = {
         ("PROFILE_SIGN_IN", "tooling", Optional),
         ("X_PROFILE", "tooling", Optional),
         ("GOOGLE_PROFILE", "tooling", Optional),
-        ("X_COOKIE_EXPORT_OUT", "tooling", Optional),
-        ("GOOGLE_COOKIE_EXPORT_OUT", "tooling", Optional),
     ]
 };
 
@@ -326,13 +323,6 @@ pub fn google_session(get: &Lookup) -> Result<GoogleSession, Missing> {
     .map(GoogleSession)
 }
 
-/// A cookie list a browser exported, to convert into the X session setting.
-pub fn x_conversion(get: &Lookup) -> Result<PathBuf, Missing> {
-    let mut r = Reader::new(get, "x-conversion");
-    let export = r.required("X_COOKIE_EXPORT");
-    r.done(PathBuf::from(export))
-}
-
 /// A saved session as a setting carries it, named by the variable it came
 /// from; `browser::cookies::saved` decodes it.
 #[derive(Debug, PartialEq, Eq)]
@@ -343,8 +333,8 @@ pub enum SavedSession {
     File { var: &'static str, path: PathBuf },
 }
 
-/// How the browser runs, what it leaves behind to diagnose a run, and where
-/// the exports read and write; nothing here is required.
+/// How the browser runs, what it leaves behind to diagnose a run, and the
+/// profiles the exports read; nothing here is required.
 pub struct Tooling {
     pub chrome: Option<PathBuf>,
     pub headed: bool,
@@ -353,8 +343,6 @@ pub struct Tooling {
     pub profile_sign_in: bool,
     pub x_profile: PathBuf,
     pub google_profile: PathBuf,
-    pub x_export_out: Option<PathBuf>,
-    pub google_export_out: Option<PathBuf>,
 }
 
 fn tooling_from(get: &Lookup) -> Tooling {
@@ -369,8 +357,6 @@ fn tooling_from(get: &Lookup) -> Tooling {
         x_profile: path("X_PROFILE").unwrap_or_else(|| ".env.x-profile".into()),
         google_profile: path("GOOGLE_PROFILE")
             .unwrap_or_else(|| ".env.google-profile".into()),
-        x_export_out: path("X_COOKIE_EXPORT_OUT"),
-        google_export_out: path("GOOGLE_COOKIE_EXPORT_OUT"),
     }
 }
 
@@ -449,7 +435,6 @@ mod tests {
             asked("google-app", google_app),
             asked("google-account", google_account),
             asked("google-session", google_session),
-            asked("x-conversion", x_conversion),
             asked("tooling", |get| Ok::<_, Missing>(tooling_from(get))),
         ]
         .concat()

@@ -48,8 +48,9 @@ rand = "0.9"
 tempfile = "3"
 futures-util = "0.3"
 
-# ── settings ────────────────────────────────────────────────────────────
+# ── settings, and the `ceremony` command ────────────────────────────────
 dotenvy = "0.15"
+clap = { version = "4", features = ["derive"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # ── the redirect fixture Chrome is checked against ──────────────────────

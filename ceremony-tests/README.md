@@ -30,9 +30,10 @@ cargo test --test ceremony -- --test-threads=1
 ```
 
 One rung at a time: X's authorization code lives thirty seconds, and rungs
-run side by side contend for Chrome and the notary. The exports and the Chrome
-checks are ignored in that run and selected by name, as below; the library's
-own tests are `cargo test --lib`.
+run side by side contend for Chrome and the notary. The Google rung and the
+Chrome checks are ignored in that run and selected by name, as below; the
+library's own tests are `cargo test --lib`. The exports that renew the saved
+sessions are tasks of the crate's `ceremony` command, below.
 
 ### Settings
 
@@ -42,9 +43,10 @@ where an exported variable wins; an empty value is an absent one.
 `src/settings.rs` defines them, in `settings::VARIABLES`: each belongs to one
 section, and a test loads the sections its rung reads and fails, naming every
 required variable absent from them, before it starts. A missing setting never
-skips a rung. `cargo test --test ceremony settings_sync` holds the table
-below, and the gate and job environments of `ceremony.yml`, to that
-definition.
+skips a rung. `cargo run --bin ceremony -- settings` lists each variable as
+set, missing or unset, never its value, and `cargo test --test ceremony
+settings_sync` holds the table below, and the gate and job environments of
+`ceremony.yml`, to that definition.
 
 | Section | Read by | In CI |
 |---|---|---|
@@ -53,7 +55,6 @@ definition.
 | x-app, x-account, x-session | the X authorization | `x`, gated by `x` |
 | google-app, google-account | the Google authorization and the Google export | `google` |
 | google-session | the Google authorization | `google`, with no gate: it runs on a dispatch alone and fails on a missing setting |
-| x-conversion | the X converter | none |
 | tooling | the browser and the exports; nothing in it is required | `x` sets `X_CHALLENGE_TRACE` |
 
 | Variable | Section | Need | Meaning |
@@ -69,13 +70,13 @@ definition.
 | `X_TEST_ALICE_USERNAME` | x-account | required | The X test account's handle, which the identity session must return. |
 | `X_TEST_ALICE_EMAIL` | x-account | optional | Its e-mail address, typed when X asks for it on a sign-in it examines. |
 | `X_TEST_ALICE_PASSWORD` | x-account | optional | Its password, typed on a sign-in in a visible Chrome; a person types it where it is absent. |
-| `X_TEST_ALICE_COOKIES` | x-session | required | The saved session the rung restores, as the base64 the X export prints; a headless run has no other way in. |
-| `X_TEST_ALICE_COOKIES_FILE` | x-session | instead of `X_TEST_ALICE_COOKIES` | The same session as the JSON file the X export writes; keep it under a gitignored `.env*` name. |
+| `X_TEST_ALICE_COOKIES` | x-session | required | The saved session the rung restores, as the base64 `ceremony export x` prints; a headless run has no other way in. |
+| `X_TEST_ALICE_COOKIES_FILE` | x-session | instead of `X_TEST_ALICE_COOKIES` | The same session as the JSON file `ceremony export x --out` writes; keep it under a gitignored `.env*` name. |
 | `GOOGLE_OAUTH_CLIENT_ID` | google-app | required | The Google OAuth client id; no client secret. |
 | `LIBID_TEST_GOOGLE_REDIRECT_URI` | google-app | required | The registered redirect URI, without a query or fragment. |
 | `GOOGLE_TEST_ALICE_EMAIL` | google-account | required | The Google test account's verified e-mail address, which the ID token must carry. |
 | `GOOGLE_TEST_ALICE_PASSWORD` | google-account | optional | Its password, for one sign-in attempt when Google rejects the saved session; account verification stays interactive. |
-| `GOOGLE_TEST_ALICE_COOKIES` | google-session | required | The saved session the rung restores, as the base64 the Google export prints. |
+| `GOOGLE_TEST_ALICE_COOKIES` | google-session | required | The saved session the rung restores, as the base64 `ceremony export google` prints. |
 | `GOOGLE_TEST_ALICE_COOKIES_FILE` | google-session | instead of `GOOGLE_TEST_ALICE_COOKIES` | The same session as a JSON cookie export, a list or Playwright's storage state; keep it under a gitignored `.env*` name. |
 | `CEREMONY_ENV_FILE` | tooling | optional | The settings file, when it is not the `.env.test` found from the working directory upward. |
 | `CHROME` | tooling | optional | The Chrome binary, when it is not on the `PATH`. |
@@ -83,11 +84,8 @@ definition.
 | `BROWSER_TRACE` | tooling | optional | A directory; the driver writes a numbered screenshot and a dump of the page's controls and text into it at each step. |
 | `X_CHALLENGE_TRACE` | tooling | optional | A directory for a screenshot taken only when X's security verification times out; CI keeps it for one day, and logs carry structural indicators, never page text or OAuth URLs. |
 | `PROFILE_SIGN_IN` | tooling | optional | Set to make an export open the sign-in window even when the profile holds a session the platform honours. |
-| `X_PROFILE` | tooling | optional | The Chrome profile the X export reads, `.env.x-profile` by default. |
-| `GOOGLE_PROFILE` | tooling | optional | The Chrome profile the Google export reads, `.env.google-profile` by default. |
-| `X_COOKIE_EXPORT_OUT` | tooling | optional | Where the X export writes its JSON; without it the base64 value is printed. |
-| `GOOGLE_COOKIE_EXPORT_OUT` | tooling | optional | Where the Google export writes its JSON; without it the base64 value is printed. |
-| `X_COOKIE_EXPORT` | x-conversion | required | The cookies a browser exported, which the converter turns into the X session setting. |
+| `X_PROFILE` | tooling | optional | The Chrome profile `ceremony export x` reads, `.env.x-profile` by default. |
+| `GOOGLE_PROFILE` | tooling | optional | The Chrome profile `ceremony export google` reads, `.env.google-profile` by default. |
 
 Three GitHub rungs need no account: a refused code and a refused credential
 each fail the token session with GitHub's own answer, past a real session to
@@ -113,20 +111,19 @@ cookies with nobody present; a session X no longer honours, however fresh its
 cookies look, brings the window back once, as does `PROFILE_SIGN_IN=1`:
 
 ```sh
-X_COOKIE_EXPORT_OUT=.env.x-cookies.json \
-  cargo test --test ceremony a_fresh_x_session -- --ignored --nocapture
+cargo run --bin ceremony -- export x --out .env.x-cookies.json
 ```
 
-With `X_COOKIE_EXPORT_OUT` the JSON is written there whole or not at all and
-nothing else is printed; without it the base64 `X_TEST_ALICE_COOKIES` value is
-printed instead.
+With `--out` the JSON is written there whole or not at all, readable by its
+owner alone, and nothing else is printed; without it the base64
+`X_TEST_ALICE_COOKIES` value is printed instead.
 
 A session from the browser a person already uses serves as well: export its
 `x.com` cookies, as a list or as Playwright's `storageState`, to a file under
 a gitignored `.env*` name -- it holds a working session -- and convert:
 
 ```sh
-X_COOKIE_EXPORT=.env.x-export.json cargo test --test ceremony a_browser_export -- --ignored --nocapture
+cargo run --bin ceremony -- convert x .env.x-export.json
 ```
 
 In CI (`ceremony.yml`) pull requests run the crate's formatting, lints,
@@ -180,14 +177,13 @@ test account; a Chrome with no automation attached is the only kind Google
 lets a person sign in through:
 
 ```sh
-GOOGLE_COOKIE_EXPORT_OUT=.env.google-cookies.json \
-  cargo test --test ceremony \
-  browser::google::tests::a_fresh_google_session_is_exported_for_the_secret -- --ignored --exact --nocapture
+cargo run --bin ceremony -- export google --out .env.google-cookies.json
 ```
 
-With `GOOGLE_COOKIE_EXPORT_OUT` the JSON is written there whole or not at all
-and nothing else is printed; without it the base64 `GOOGLE_TEST_ALICE_COOKIES`
-value is printed instead.
+It reads the google-app and google-account sections. With `--out` the JSON is
+written there whole or not at all, readable by its owner alone, and nothing
+else is printed; without it the base64 `GOOGLE_TEST_ALICE_COOKIES` value is
+printed instead.
 
 The browser's fragment handling, and the one client identity the disguised
 Chrome presents in its headers and to a page's scripts, are checked without an

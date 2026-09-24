@@ -4,15 +4,19 @@
 /// directory upward.
 pub const ENV_FILE: &str = "CEREMONY_ENV_FILE";
 
+/// Read the settings file into the environment, once per process: the
+/// authorize loops read variables several times a second, and each read
+/// after the first finds them already set.
 fn load() {
-    match std::env::var(ENV_FILE) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| match std::env::var(ENV_FILE) {
         Ok(path) => {
             dotenvy::from_path(path).ok();
         }
         Err(_) => {
             dotenvy::from_filename(".env.test").ok();
         }
-    }
+    });
 }
 
 /// The variable `name`, from the environment or from the settings file. An

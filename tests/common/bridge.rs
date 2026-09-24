@@ -33,17 +33,6 @@ use super::ScratchFile;
 /// How long a started bridge has to say where it listens.
 const STARTUP_BUDGET: Duration = Duration::from_secs(30);
 
-/// The log filter the binary runs with: the test's own `RUST_LOG`, with the
-/// bridge's own events kept at `info` where that filter does not name the
-/// bridge, because the address it listens on is one of them.
-fn log_filter() -> String {
-    match std::env::var("RUST_LOG") {
-        Ok(filter) if filter.contains("libid_bridge_rs") => filter,
-        Ok(filter) if !filter.is_empty() => format!("{filter},libid_bridge_rs=info"),
-        _ => "info".into(),
-    }
-}
-
 /// The binary's command on an environment carrying nothing but the loopback
 /// port to bind and the log filter, and no configuration file.
 fn unconfigured() -> Command {
@@ -55,7 +44,7 @@ fn unconfigured() -> Command {
         // Where a test's bridge listens is not a key of its file.
         .env("HOST", "127.0.0.1")
         .env("PORT", "0")
-        .env("RUST_LOG", log_filter())
+        .env("RUST_LOG", "info")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command
@@ -143,11 +132,7 @@ impl Bridge {
             Err(RecvTimeoutError::Timeout) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                panic!(
-                    "the binary printed no address within {STARTUP_BUDGET:?}; the filter it \
-                     ran with, {:?}, may leave out its info events",
-                    log_filter()
-                )
+                panic!("the binary printed no address within {STARTUP_BUDGET:?}")
             }
         };
         Bridge {

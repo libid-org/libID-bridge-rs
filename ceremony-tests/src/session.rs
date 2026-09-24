@@ -50,8 +50,9 @@ fn transcript(detail: String) -> libid_tlsn::Error {
 }
 
 /// The `error` member of a JSON body in `recv`, when the platform answered
-/// with one.
+/// with one, in any whitespace spelling.
 fn platform_error(recv: &[u8]) -> Option<String> {
+    let recv = normalized_json(recv);
     let delimiter = b"\"error\":\"";
     let at =
         recv.windows(delimiter.len()).position(|w| w == delimiter)? + delimiter.len();
@@ -165,10 +166,46 @@ pub fn count(haystack: &[u8], needle: &[u8]) -> usize {
         .count()
 }
 
+/// `data` with every run of JSON whitespace that touches `:` `,` `{` `}` `[`
+/// or `]` removed, as the verifier's `CeremonyFields.normalizeJsonBytes`
+/// removes it before any reader matches its compact template: a member
+/// revealed as a pretty-printing service served it reads as the compact one.
+/// Stateless like the verifier's, with no notion of being inside a string.
+pub fn normalized_json(data: &[u8]) -> Vec<u8> {
+    fn whitespace(b: u8) -> bool {
+        matches!(b, b' ' | b'\t' | b'\n' | b'\r')
+    }
+    fn structural(b: u8) -> bool {
+        matches!(b, b':' | b',' | b'{' | b'}' | b'[' | b']')
+    }
+    let mut out = Vec::with_capacity(data.len());
+    let mut i = 0;
+    while i < data.len() {
+        if !whitespace(data[i]) {
+            out.push(data[i]);
+            i += 1;
+            continue;
+        }
+        let run_end = data[i..]
+            .iter()
+            .position(|&b| !whitespace(b))
+            .map_or(data.len(), |n| i + n);
+        let touches = out.last().is_some_and(|&b| structural(b))
+            || data.get(run_end).is_some_and(|&b| structural(b));
+        if !touches {
+            out.extend_from_slice(&data[i..run_end]);
+        }
+        i = run_end;
+    }
+    out
+}
+
 /// The value of `range` when it is exactly the JSON string member
 /// `delimiter` opens: the delimiter, a value with no quote in it, and the
-/// closing quote, nothing before and nothing after.
+/// closing quote, nothing before and nothing after. `range` is read
+/// [normalized](normalized_json).
 fn string_member(range: &[u8], delimiter: &[u8]) -> Option<String> {
+    let range = normalized_json(range);
     let value = range
         .strip_prefix(delimiter)?
         .strip_suffix(b"\"")
@@ -178,8 +215,10 @@ fn string_member(range: &[u8], delimiter: &[u8]) -> Option<String> {
 
 /// The digits of `range` when it is exactly the bare integer member
 /// `delimiter` opens: the delimiter, the digits, and the one `,` or `}` that
-/// closes the number, nothing before and nothing after.
+/// closes the number, nothing before and nothing after. `range` is read
+/// [normalized](normalized_json).
 fn integer_member(range: &[u8], delimiter: &[u8]) -> Option<String> {
+    let range = normalized_json(range);
     let rest = range.strip_prefix(delimiter)?;
     let (terminator, digits) = rest.split_last()?;
     if digits.is_empty()
@@ -276,7 +315,7 @@ pub fn check_token(
         .filter(|c| {
             record.received.revealed.iter().any(|r| {
                 r.start as usize + r.bytes.len() == c.start as usize
-                    && r.bytes.ends_with(b"\"access_token\":\"")
+                    && normalized_json(&r.bytes).ends_with(b"\"access_token\":\"")
             })
         })
         .collect();
@@ -530,5 +569,47 @@ pub mod fixtures {
             range: start..start + value.len(),
             value: value.into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        integer_member,
+        normalized_json,
+        string_member,
+    };
+
+    /// The verifier's own vectors, from libid-contracts'
+    /// `CeremonyFields.t.sol`: a pretty-printed member reads as its compact
+    /// spelling, and only whitespace touching a structural byte goes.
+    #[test]
+    fn whitespace_goes_where_the_verifier_removes_it() {
+        assert_eq!(
+            normalized_json(b"{\n  \"login\" \t: \"alice\",\r\n  \"id\" : 123 \n}"),
+            b"{\"login\":\"alice\",\"id\":123}"
+        );
+        assert_eq!(normalized_json(b"{\"id\":123 }"), b"{\"id\":123}");
+        assert_eq!(normalized_json(b"{\"id\":123 4}"), b"{\"id\":123 4}");
+        assert_eq!(
+            normalized_json(b"{\"login\":\x0b\"alice\"}"),
+            b"{\"login\":\x0b\"alice\"}",
+            "a vertical tab is not JSON whitespace"
+        );
+    }
+
+    /// A member revealed with whitespace inside is the member; digits split
+    /// by whitespace are not an integer.
+    #[test]
+    fn a_spaced_member_is_one_member() {
+        assert_eq!(
+            string_member(b"\"login\" : \"octocat\"", b"\"login\":\"").as_deref(),
+            Some("octocat")
+        );
+        assert_eq!(
+            integer_member(b"\"id\": 583231\n}", b"\"id\":").as_deref(),
+            Some("583231")
+        );
+        assert_eq!(integer_member(b"\"id\":123 4}", b"\"id\":"), None);
     }
 }

@@ -254,6 +254,55 @@ mod tests {
         assert_eq!(count(&body, b"node_id"), 0, "the node id stays committed");
     }
 
+    /// GitHub pretty-printing both answers: each member is revealed with the
+    /// whitespace the wire carried, as libid-transcript lays it out, and read
+    /// as the verifier reads it, with that whitespace removed.
+    #[tokio::test]
+    async fn pretty_printed_answers_are_read_as_the_verifier_reads_them() {
+        const PRETTY_TOKEN: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: application/json; charset=utf-8\r\n\r\n{\n  \"access_token\" : \"SECRETBEARER\",\n  \"token_type\": \"bearer\"\n}";
+        const PRETTY_ID: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: application/json; charset=utf-8\r\n\r\n{\n  \"login\": \"Alice\",\n  \"id\": 583231\n}";
+
+        let sent = wire(token_request(&FIELDS)).await;
+        let layout = Layout::token_request(&sent, &TOKEN_SESSION).unwrap();
+        let recv_layout = Layout::token_response(PRETTY_TOKEN).unwrap();
+        assert!(
+            recv_layout
+                .reveal
+                .iter()
+                .any(|r| PRETTY_TOKEN[r.clone()].ends_with(b"\"access_token\" : \"")),
+            "the layout reveals the spaced delimiter as served"
+        );
+        check_token(
+            &record("github.com", &sent, PRETTY_TOKEN, &layout, &recv_layout),
+            sent.len(),
+            PRETTY_TOKEN.len(),
+            &bearer_in(PRETTY_TOKEN, "SECRETBEARER"),
+            &FIELDS,
+        );
+
+        let sent = wire(identity_request("SECRETBEARER")).await;
+        let layout = Layout::identity_request(&sent).unwrap();
+        let recv_layout =
+            Layout::identity_response(PRETTY_ID, &IDENTITY_SESSION).unwrap();
+        assert!(
+            recv_layout
+                .reveal
+                .iter()
+                .any(|r| &PRETTY_ID[r.clone()] == b"\"id\": 583231\n}"),
+            "the layout reveals the id with the whitespace before its brace"
+        );
+        let signed = record("api.github.com", &sent, PRETTY_ID, &layout, &recv_layout);
+        let (id, login) = check_identity(
+            &signed,
+            sent.len(),
+            PRETTY_ID.len(),
+            "SECRETBEARER",
+            "alice",
+        );
+        assert_eq!(id, "583231");
+        assert_eq!(login, "Alice");
+    }
+
     /// A revealed range that carries more than its member is refused: the id
     /// range stretched over the next member exposes the node id, and the
     /// check names the range rather than reading the id out of it.

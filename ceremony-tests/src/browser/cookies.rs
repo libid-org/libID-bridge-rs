@@ -34,10 +34,12 @@ pub struct Stored {
     /// one.
     #[serde(alias = "Domain")]
     pub domain: String,
-    #[serde(alias = "Path", default = "root")]
+    /// Empty where the export named none; read through [`Stored::path`].
+    #[serde(alias = "Path", default)]
     pub path: String,
-    #[serde(alias = "Secure", default = "yes")]
-    pub secure: bool,
+    /// Absent where the export named none, and then set as secure.
+    #[serde(alias = "Secure", default)]
+    pub secure: Option<bool>,
     #[serde(alias = "httpOnly", default)]
     pub http_only: bool,
     #[serde(alias = "sameSite", default, deserialize_with = "same_site")]
@@ -51,14 +53,6 @@ pub struct Stored {
         skip_serializing_if = "Option::is_none"
     )]
     pub partition_key: Option<CookiePartitionKey>,
-}
-
-fn root() -> String {
-    "/".into()
-}
-
-fn yes() -> bool {
-    true
 }
 
 /// `sameSite` in any case, `no_restriction` as `None`; anything else, and
@@ -104,7 +98,7 @@ impl Stored {
             value: c.value,
             domain: c.domain,
             path: c.path,
-            secure: c.secure,
+            secure: Some(c.secure),
             http_only: c.http_only,
             same_site: c.same_site,
             expires: c.expires,
@@ -120,8 +114,17 @@ impl Stored {
             |c: &Stored| c.partition_key.as_ref().map(|k| k.top_level_site.clone());
         self.name == other.name
             && self.domain == other.domain
-            && self.path == other.path
+            && self.path() == other.path()
             && site(self) == site(other)
+    }
+
+    /// The cookie's path, `/` where the export named none.
+    pub fn path(&self) -> &str {
+        if self.path.is_empty() {
+            "/"
+        } else {
+            &self.path
+        }
     }
 
     /// The cookie's host, without the leading dot.
@@ -139,12 +142,8 @@ impl Stored {
         if self.domain.starts_with('.') {
             param.domain = Some(self.domain.clone());
         }
-        param.path = Some(if self.path.is_empty() {
-            "/".into()
-        } else {
-            self.path.clone()
-        });
-        param.secure = Some(self.secure);
+        param.path = Some(self.path().to_owned());
+        param.secure = Some(self.secure.unwrap_or(true));
         param.http_only = Some(self.http_only);
         param.same_site = self.same_site.clone();
         param.partition_key = self.partition_key.clone();
@@ -331,6 +330,26 @@ mod tests {
         assert_eq!(playwright[0].expires, -1.0, "a session cookie is kept");
     }
 
+    /// An export that names no path or `secure` sets the cookie on `/`,
+    /// secure, and matches the cookie Chrome then reports.
+    #[test]
+    fn a_cookie_without_path_or_secure_is_set_on_root_and_secure() {
+        let list = parse(
+            br#"[{"name":"SID","value":"fake","domain":".google.com"}]"#,
+            google,
+        )
+        .unwrap();
+        let param = list[0].param();
+        assert_eq!(param.path.as_deref(), Some("/"));
+        assert_eq!(param.secure, Some(true));
+        let held = Stored {
+            path: "/".into(),
+            secure: Some(true),
+            ..list[0].clone()
+        };
+        assert!(list[0].same_slot(&held));
+    }
+
     #[test]
     fn an_expired_cookie_is_left_out() {
         let list = parse(
@@ -399,7 +418,7 @@ mod tests {
             value: "fake".into(),
             domain: ".x.com".into(),
             path: "/".into(),
-            secure: true,
+            secure: Some(true),
             http_only: true,
             same_site: Some(CookieSameSite::Lax),
             expires: 0.0,

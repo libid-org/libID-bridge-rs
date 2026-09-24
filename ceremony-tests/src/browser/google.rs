@@ -160,7 +160,7 @@ impl Platform for Authorization {
             .cookies
             .iter()
             .filter(|set| !held.iter().any(|c| c.same_slot(set)))
-            .map(|c| format!("{}@{}{}", c.name, c.domain, c.path))
+            .map(|c| format!("{}@{}{}", c.name, c.domain, c.path()))
             .collect();
         assert!(
             refused.is_empty(),

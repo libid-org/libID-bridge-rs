@@ -34,19 +34,60 @@ run side by side contend for Chrome and the notary. The exports and the Chrome
 checks are ignored in that run and selected by name, as below; the library's
 own tests are `cargo test --lib`.
 
+### Settings
+
 The suite reads its settings from the environment, or from a gitignored
 `.env.test` found from this directory upward (the repository root's serves),
-where an exported variable wins; a missing variable fails the run.
+where an exported variable wins; an empty value is an absent one.
+`src/settings.rs` defines them, in `settings::VARIABLES`: each belongs to one
+section, and a test loads the sections its rung reads and fails, naming every
+required variable absent from them, before it starts. A missing setting never
+skips a rung. `cargo test --test ceremony settings_sync` holds the table
+below, and the gate and job environments of `ceremony.yml`, to that
+definition.
 
-| Variable | Rungs | Meaning |
+| Section | Read by | In CI |
 |---|---|---|
-| `GH_OAUTH_CLIENT_ID`, `GH_OAUTH_CLIENT_SECRET` | GitHub | The OAuth App. The host configures the deployment under test with both, which publishes the secret as `clientCredential`; the host reads them back into `rungs::Published` and the suite sends them in the token request. |
-| `LIBID_TEST_PUBLIC_ORIGIN` | GitHub | The bridge origin the App's callback URL is registered under; the host derives `/auth/callback` from it as the application would. |
-| `CEREMONY_ENV_FILE` | all | The settings file, when it is not the `.env.test` found from the working directory upward. |
-| `GH_TEST_ALICE_USERNAME`, `GH_TEST_ALICE_PASSWORD` | GitHub authorization | The test account. |
-| `GH_TEST_ALICE_TOTP_SECRET` | GitHub authorization | The base32 key of the account's authenticator app; the browser answers the TOTP prompt with it. An account without one is asked to verify the device by mail, which a headless run cannot answer. |
-| `BROWSER_HEAD=1` | authorization | A visible Chrome. |
-| `CHROME` | authorization | The Chrome binary, when it is not on the `PATH`. |
+| github-app | every GitHub rung but the bearer's: the host configures the bridge under test with it | `refusals` and `full`, gated by `go` |
+| github-account | the GitHub authorization | `full`, gated by `account` |
+| x-app, x-account, x-session | the X authorization | `x`, gated by `x` |
+| google-app, google-account | the Google authorization and the Google export | `google` |
+| google-session | the Google authorization | `google`, with no gate: it runs on a dispatch alone and fails on a missing setting |
+| x-conversion | the X converter | none |
+| tooling | the browser and the exports; nothing in it is required | `x` sets `X_CHALLENGE_TRACE` |
+
+| Variable | Section | Need | Meaning |
+|---|---|---|---|
+| `GH_OAUTH_CLIENT_ID` | github-app | required | The GitHub OAuth App's client id; the host configures the bridge under test with it. |
+| `GH_OAUTH_CLIENT_SECRET` | github-app | required | The App's client secret, which the bridge publishes as `clientCredential` and the token session sends. |
+| `LIBID_TEST_PUBLIC_ORIGIN` | github-app | required | The bridge origin the App's callback URL is registered under; the host derives `/auth/callback` from it. |
+| `GH_TEST_ALICE_USERNAME` | github-account | required | The GitHub test account's login. |
+| `GH_TEST_ALICE_PASSWORD` | github-account | required | Its password. |
+| `GH_TEST_ALICE_TOTP_SECRET` | github-account | required | The base32 key of its authenticator app; without one GitHub verifies the device by mail, which a headless run cannot answer. |
+| `X_OAUTH_CLIENT_ID` | x-app | required | The X app, a public PKCE client. |
+| `LIBID_TEST_X_REDIRECT_URI` | x-app | required | The redirect URI registered on that app, byte for byte. |
+| `X_TEST_ALICE_USERNAME` | x-account | required | The X test account's handle, which the identity session must return. |
+| `X_TEST_ALICE_EMAIL` | x-account | optional | Its e-mail address, typed when X asks for it on a sign-in it examines. |
+| `X_TEST_ALICE_PASSWORD` | x-account | optional | Its password, typed on a sign-in in a visible Chrome; a person types it where it is absent. |
+| `X_TEST_ALICE_COOKIES` | x-session | required | The saved session the rung restores, as the base64 the X export prints; a headless run has no other way in. |
+| `X_TEST_ALICE_COOKIES_FILE` | x-session | instead of `X_TEST_ALICE_COOKIES` | The same session as the JSON file the X export writes; keep it under a gitignored `.env*` name. |
+| `GOOGLE_OAUTH_CLIENT_ID` | google-app | required | The Google OAuth client id; no client secret. |
+| `LIBID_TEST_GOOGLE_REDIRECT_URI` | google-app | required | The registered redirect URI, without a query or fragment. |
+| `GOOGLE_TEST_ALICE_EMAIL` | google-account | required | The Google test account's verified e-mail address, which the ID token must carry. |
+| `GOOGLE_TEST_ALICE_PASSWORD` | google-account | optional | Its password, for one sign-in attempt when Google rejects the saved session; account verification stays interactive. |
+| `GOOGLE_TEST_ALICE_COOKIES` | google-session | required | The saved session the rung restores, as the base64 the Google export prints. |
+| `GOOGLE_TEST_ALICE_COOKIES_FILE` | google-session | instead of `GOOGLE_TEST_ALICE_COOKIES` | The same session as a JSON cookie export, a list or Playwright's storage state; keep it under a gitignored `.env*` name. |
+| `CEREMONY_ENV_FILE` | tooling | optional | The settings file, when it is not the `.env.test` found from the working directory upward. |
+| `CHROME` | tooling | optional | The Chrome binary, when it is not on the `PATH`. |
+| `BROWSER_HEAD` | tooling | optional | Set for a visible Chrome, left on a page a person completes. |
+| `BROWSER_TRACE` | tooling | optional | A directory; the driver writes a numbered screenshot and a dump of the page's controls and text into it at each step. |
+| `X_CHALLENGE_TRACE` | tooling | optional | A directory for a screenshot taken only when X's security verification times out; CI keeps it for one day, and logs carry structural indicators, never page text or OAuth URLs. |
+| `PROFILE_SIGN_IN` | tooling | optional | Set to make an export open the sign-in window even when the profile holds a session the platform honours. |
+| `X_PROFILE` | tooling | optional | The Chrome profile the X export reads, `.env.x-profile` by default. |
+| `GOOGLE_PROFILE` | tooling | optional | The Chrome profile the Google export reads, `.env.google-profile` by default. |
+| `X_COOKIE_EXPORT_OUT` | tooling | optional | Where the X export writes its JSON; without it the base64 value is printed. |
+| `GOOGLE_COOKIE_EXPORT_OUT` | tooling | optional | Where the Google export writes its JSON; without it the base64 value is printed. |
+| `X_COOKIE_EXPORT` | x-conversion | required | The cookies a browser exported, which the converter turns into the X session setting. |
 
 Three GitHub rungs need no account: a refused code and a refused credential
 each fail the token session with GitHub's own answer, past a real session to
@@ -60,22 +101,7 @@ Two rungs run the X ceremony, in which the bridge takes no part. One needs
 no account: an identity read with a bearer X did not issue fails with X's
 own answer, past a real session to `api.x.com`. The other signs in as the X
 test account in Chrome and authorizes the app, then runs the two sessions
-the same way. It reads its own variables:
-
-| Variable | Meaning |
-|---|---|
-| `X_OAUTH_CLIENT_ID` | The X app, a public PKCE client. |
-| `LIBID_TEST_X_REDIRECT_URI` | The redirect URI registered on that app, byte for byte. |
-| `X_TEST_ALICE_USERNAME`, `X_TEST_ALICE_PASSWORD` | The X test account. |
-| `X_TEST_ALICE_EMAIL` | Its e-mail address, typed when X asks for it on a sign-in it examines. |
-| `X_TEST_ALICE_COOKIES` | The saved session the rung restores, as the base64 the export prints. An unattended run has no other way in. |
-| `X_TEST_ALICE_COOKIES_FILE` | The same session as the JSON file the export writes; `X_TEST_ALICE_COOKIES` wins where both are set. Keep it under a gitignored `.env*` name. |
-| `X_PROFILE` | The Chrome profile the export reads, `.env.x-profile` by default; gitignored. |
-| `PROFILE_SIGN_IN` | Set to make an export open the sign-in window even when the profile holds a session the platform honours. |
-| `X_COOKIE_EXPORT_OUT` | Where the export writes its JSON; without it the base64 value is printed. |
-| `X_COOKIE_EXPORT` | The cookies a browser exported, for the converter below. |
-| `X_CHALLENGE_TRACE` | Optional directory for a screenshot only when X security verification times out. CI retains this diagnostic for one day; logs contain structural indicators, not page text or OAuth URLs. |
-| `BROWSER_TRACE` | Optional: a directory; the driver writes a numbered screenshot and a dump of the page's controls and text into it at each step. |
+the same way. The X export reads no X setting, only its profile.
 
 The session comes from a dedicated Chrome profile, `X_PROFILE`. The first
 export opens a visible Chrome on that profile with no automation attached, on
@@ -125,14 +151,9 @@ An optional password permits one sign-in attempt when the session is rejected;
 account-verification prompts require interactive renewal. Google can refuse
 automation even with a saved session.
 
-| Setting | Meaning |
-|---|---|
-| `GOOGLE_OAUTH_CLIENT_ID` | The real Google OAuth client ID; no client secret. |
-| `LIBID_TEST_GOOGLE_REDIRECT_URI` | Exact registered redirect URI without a query or fragment. |
-| `GOOGLE_TEST_ALICE_EMAIL` | The expected verified email. |
-| `GOOGLE_TEST_ALICE_PASSWORD` | Optional local sign-in fallback. Each login step is submitted at most once; account verification remains interactive. |
-| `GOOGLE_TEST_ALICE_COOKIES_FILE` | Local JSON cookie export (a list or Playwright storage state). Keep it under a gitignored `.env*` filename. Only Google domains are installed. |
-| `GOOGLE_TEST_ALICE_COOKIES` | CI alternative: base64 of that JSON export. Takes precedence over the file. |
+It reads the google-app, google-account and google-session sections; the
+saved session installs cookies for Google's hosts alone, and each sign-in step
+is submitted at most once.
 
 ```sh
 cargo test --locked --test ceremony \
@@ -149,8 +170,8 @@ generation, trusted on-chain modulus membership, or claim submission.
 
 Dispatch `ceremony.yml` with `google=true` to run this on a hosted runner. Set
 client ID, email, and base64 cookies as repository secrets, and the redirect URI
-as a repository variable with the names above. Missing settings fail the live
-job. The Google rung is ignored in ordinary runs until explicitly selected.
+as a repository variable with the names above. The job has no gate: a
+missing setting fails it rather than skipping it. The Google rung is ignored in ordinary runs until explicitly selected.
 
 The session the rung restores comes from a dedicated Chrome profile,
 `GOOGLE_PROFILE` (`.env.google-profile`, gitignored), exactly as X's does,

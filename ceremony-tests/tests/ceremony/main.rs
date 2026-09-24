@@ -7,6 +7,7 @@
 //! lists them all.
 
 mod host;
+mod settings_sync;
 
 use ceremony_tests::{
     rungs::{

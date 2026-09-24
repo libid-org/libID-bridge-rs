@@ -6,7 +6,8 @@ name: Live ceremony
 # configuration. Six jobs, each working in ceremony-tests/:
 #
 #   * suite (pull requests): the crate's formatting, lints and hermetic
-#     tests, and the Chrome checks against loopback fixtures;
+#     tests, the check that its settings, this workflow and its README
+#     agree, and the Chrome checks against loopback fixtures;
 #   * gate: which jobs' settings this run can read;
 #   * refusals (pull requests): the rungs that need no account;
 #   * full (nightly, and dispatched with `full`): every rung but X's, the
@@ -112,6 +113,9 @@ jobs:
       - name: Hermetic tests
         run: cargo test --locked --lib
 
+      - name: Settings, workflow and README agree
+        run: cargo test --locked --test ceremony settings_sync
+
       - name: Chrome against loopback fixtures
         run: >
           cargo test --locked --test ceremony -- --ignored --exact
@@ -121,13 +125,17 @@ jobs:
   # ---------------------------------------------------------------------------
   # Gate: whether each job's settings are available to this run. They are not
   # on a pull request from a fork, and not in a repository without them. `go`
-  # is the GitHub App -- its client id, and its client secret, the credential
-  # the bridge publishes -- and the public origin its callback is registered
-  # under; `account` the GitHub test account; `x` the X app, its redirect URI,
-  # and the account and its saved session. Each is every setting its rungs
-  # read as required. A pull-request or scheduled job whose settings are absent is
-  # skipped, and says so here as a notice; a dispatched job runs and fails on
-  # a missing setting.
+  # is the github-app section -- the App's client id, its client secret, the
+  # credential the bridge publishes, and the public origin its callback is
+  # registered under; `account` the github-account section, the test account
+  # and its TOTP secret; `x` the x-app, x-account and x-session sections, the
+  # X app, its redirect URI, the account and its saved session. Each is every
+  # variable its sections require, under the variable's own name
+  # (ceremony-tests/src/settings.rs; the settings_sync test holds this job to
+  # it). Google has no gate: its job runs on a dispatch alone and fails on a
+  # missing setting. A pull-request or scheduled job whose settings are
+  # absent is skipped, and says so here as a notice; a dispatched job runs and
+  # fails on a missing setting.
   # ---------------------------------------------------------------------------
   gate:
     name: Secrets available
@@ -144,16 +152,16 @@ jobs:
       - name: Which settings this run can read
         id: check
         env:
-          GH_APP: ${{ secrets.GH_OAUTH_CLIENT_ID }}
-          SECRET: ${{ secrets.GH_OAUTH_CLIENT_SECRET }}
-          PUBLIC_ORIGIN: ${{ vars.LIBID_TEST_PUBLIC_ORIGIN }}
-          GH_USERNAME: ${{ secrets.GH_TEST_ALICE_USERNAME }}
-          GH_PASSWORD: ${{ secrets.GH_TEST_ALICE_PASSWORD }}
-          X_APP: ${{ secrets.X_OAUTH_CLIENT_ID }}
-          X_REDIRECT: ${{ vars.LIBID_TEST_X_REDIRECT_URI }}
-          X_USERNAME: ${{ secrets.X_TEST_ALICE_USERNAME }}
-          X_PASSWORD: ${{ secrets.X_TEST_ALICE_PASSWORD }}
-          X_COOKIES: ${{ secrets.X_TEST_ALICE_COOKIES }}
+          GH_OAUTH_CLIENT_ID: ${{ secrets.GH_OAUTH_CLIENT_ID }}
+          GH_OAUTH_CLIENT_SECRET: ${{ secrets.GH_OAUTH_CLIENT_SECRET }}
+          LIBID_TEST_PUBLIC_ORIGIN: ${{ vars.LIBID_TEST_PUBLIC_ORIGIN }}
+          GH_TEST_ALICE_USERNAME: ${{ secrets.GH_TEST_ALICE_USERNAME }}
+          GH_TEST_ALICE_PASSWORD: ${{ secrets.GH_TEST_ALICE_PASSWORD }}
+          GH_TEST_ALICE_TOTP_SECRET: ${{ secrets.GH_TEST_ALICE_TOTP_SECRET }}
+          X_OAUTH_CLIENT_ID: ${{ secrets.X_OAUTH_CLIENT_ID }}
+          LIBID_TEST_X_REDIRECT_URI: ${{ vars.LIBID_TEST_X_REDIRECT_URI }}
+          X_TEST_ALICE_USERNAME: ${{ secrets.X_TEST_ALICE_USERNAME }}
+          X_TEST_ALICE_COOKIES: ${{ secrets.X_TEST_ALICE_COOKIES }}
         run: |
           set -euo pipefail
 
@@ -174,11 +182,11 @@ jobs:
             echo true
           }
 
-          available go "$(all_set "$GH_APP" "$SECRET" "$PUBLIC_ORIGIN")" \
+          available go "$(all_set "$GH_OAUTH_CLIENT_ID" "$GH_OAUTH_CLIENT_SECRET" "$LIBID_TEST_PUBLIC_ORIGIN")" \
             "GH_OAUTH_CLIENT_ID, GH_OAUTH_CLIENT_SECRET or LIBID_TEST_PUBLIC_ORIGIN is absent: the refusal and GitHub rungs are skipped"
-          available account "$(all_set "$GH_USERNAME" "$GH_PASSWORD")" \
-            "The GitHub test account is absent: a scheduled GitHub authorization is skipped"
-          available x "$(all_set "$X_APP" "$X_REDIRECT" "$X_USERNAME" "$X_PASSWORD" "$X_COOKIES")" \
+          available account "$(all_set "$GH_TEST_ALICE_USERNAME" "$GH_TEST_ALICE_PASSWORD" "$GH_TEST_ALICE_TOTP_SECRET")" \
+            "The GitHub test account or its TOTP secret is absent: a scheduled GitHub authorization is skipped"
+          available x "$(all_set "$X_OAUTH_CLIENT_ID" "$LIBID_TEST_X_REDIRECT_URI" "$X_TEST_ALICE_USERNAME" "$X_TEST_ALICE_COOKIES")" \
             "The X app, its redirect URI, the account or its saved session is absent: the weekly X rung is skipped"
 
   # ---------------------------------------------------------------------------
@@ -287,7 +295,6 @@ jobs:
           X_OAUTH_CLIENT_ID: ${{ secrets.X_OAUTH_CLIENT_ID }}
           LIBID_TEST_X_REDIRECT_URI: ${{ vars.LIBID_TEST_X_REDIRECT_URI }}
           X_TEST_ALICE_USERNAME: ${{ secrets.X_TEST_ALICE_USERNAME }}
-          X_TEST_ALICE_PASSWORD: ${{ secrets.X_TEST_ALICE_PASSWORD }}
           X_TEST_ALICE_EMAIL: ${{ secrets.X_TEST_ALICE_EMAIL }}
           X_TEST_ALICE_COOKIES: ${{ secrets.X_TEST_ALICE_COOKIES }}
           X_CHALLENGE_TRACE: ${{ runner.temp }}/x-challenge

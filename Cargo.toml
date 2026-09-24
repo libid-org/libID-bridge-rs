@@ -1,10 +1,10 @@
 [package]
-name = "libid-server-rs"
+name = "libid-bridge-rs"
 version = "0.4.0"
 edition = "2021"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/libid-org/libID-server-rs"
+repository = "https://github.com/libid-org/libID-bridge-rs"
 description = "libID OAuth Bridge: publishes the ceremony configuration and serves the callback document."
 publish = false
 

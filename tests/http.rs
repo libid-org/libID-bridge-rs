@@ -17,7 +17,7 @@ use axum::{
     },
 };
 use http_body_util::BodyExt;
-use libid_server_rs::{
+use libid_bridge_rs::{
     routes,
     state::AppState,
 };

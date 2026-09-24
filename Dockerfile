@@ -20,7 +20,10 @@ RUN apt-get update \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /build/target/release/libid-server-rs /usr/local/bin/libid-server-rs
+COPY --from=builder /build/target/release/libid-bridge-rs /usr/local/bin/libid-bridge-rs
+
+# Preserve explicit entrypoint overrides used with earlier images.
+RUN ln -s libid-bridge-rs /usr/local/bin/libid-server-rs
 
 # The bridge writes no file and binds no privileged port.
 RUN useradd --system --no-create-home --shell /usr/sbin/nologin libid
@@ -36,4 +39,4 @@ EXPOSE 8722
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -fsS "http://127.0.0.1:${PORT}/health" || exit 1
 
-ENTRYPOINT ["libid-server-rs"]
+ENTRYPOINT ["libid-bridge-rs"]

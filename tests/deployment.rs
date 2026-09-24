@@ -5,7 +5,7 @@
 mod common;
 
 mod deployment {
-    use libid_server_rs::{
+    use libid_bridge_rs::{
         deployment::*,
         error::{
             Error,
@@ -59,7 +59,7 @@ mod deployment {
         )
         .unwrap();
         let ccdp_origin =
-            libid_server_rs::origin::Origin::parse("CCDP_ORIGIN", "https://lib.id")
+            libid_bridge_rs::origin::Origin::parse("CCDP_ORIGIN", "https://lib.id")
                 .unwrap();
         let record: Value = serde_json::from_slice(
             &CeremonyConfig {
@@ -141,7 +141,7 @@ mod deployment {
 }
 
 mod origin {
-    use libid_server_rs::origin::*;
+    use libid_bridge_rs::origin::*;
 
     /// Whether any of `members` admits `observed`, as the configuration route
     /// reads one `Origin`: the spelling is found canonical once, and one that
@@ -519,7 +519,7 @@ mod origin {
 
 mod config {
     use clap::CommandFactory as _;
-    use libid_server_rs::{
+    use libid_bridge_rs::{
         config::{
             Cli,
             Settings,
@@ -538,7 +538,7 @@ mod config {
     /// flag: what this test passes is what is read, whatever the machine
     /// running it exports.
     fn invoked(flags: &[&str]) -> Result<Cli> {
-        let mut argv = vec!["libid-server-rs".to_owned()];
+        let mut argv = vec!["libid-bridge-rs".to_owned()];
         argv.extend(flags.iter().map(|f| (*f).to_owned()));
         Cli::parsed_by(Cli::command().mut_args(|a| a.env(None::<&str>)), argv)
     }
@@ -565,7 +565,7 @@ mod config {
             cfg.allowed_app_origins,
             ["https://app.example", "https://wallet.example"]
         );
-        let platforms = libid_server_rs::deployment::platforms(cfg.platforms)
+        let platforms = libid_bridge_rs::deployment::platforms(cfg.platforms)
             .expect("the records the table describes");
         assert_eq!(platforms.len(), 1);
         assert_eq!(platforms[0].client_id, "Iv1.0123456789abcdef");
@@ -590,7 +590,7 @@ mod config {
             "#,
         )
         .expect("a table with no credential is still a table");
-        let err = libid_server_rs::deployment::platforms(without.platforms)
+        let err = libid_bridge_rs::deployment::platforms(without.platforms)
             .expect_err("github's ceremony sends one");
         assert!(err.to_string().contains("client_credential"), "{err}");
 
@@ -604,7 +604,7 @@ mod config {
             "#,
         )
         .expect("a table carrying one is still a table");
-        let err = libid_server_rs::deployment::platforms(spurious.platforms)
+        let err = libid_bridge_rs::deployment::platforms(spurious.platforms)
             .expect_err("x's ceremony sends none");
         assert!(err.to_string().contains("sends none"), "{err}");
     }
@@ -621,7 +621,7 @@ mod config {
             "#,
         )
         .expect("a file this deployment can read");
-        let platforms = libid_server_rs::deployment::platforms(cfg.platforms)
+        let platforms = libid_bridge_rs::deployment::platforms(cfg.platforms)
             .expect("the records the table describes");
         assert_eq!(platforms.len(), 1);
         assert_eq!(platforms[0].id, PlatformId::X);
@@ -672,7 +672,7 @@ mod config {
         let cfg = resolved("allowed_app_origins = [\"https://app.example\"]\n")
             .expect("readable");
         assert!(cfg.platforms.is_empty());
-        let err = libid_server_rs::deployment::platforms(cfg.platforms)
+        let err = libid_bridge_rs::deployment::platforms(cfg.platforms)
             .expect_err("no platform");
         assert!(err.to_string().contains("[[platforms]]"), "{err}");
     }
@@ -689,7 +689,7 @@ mod config {
             cfg.allowed_app_origins,
             ["https://app.example", "https://wallet.example"]
         );
-        let platforms = libid_server_rs::deployment::platforms(cfg.platforms)
+        let platforms = libid_bridge_rs::deployment::platforms(cfg.platforms)
             .expect("the example's platform table");
         let github = platforms
             .iter()

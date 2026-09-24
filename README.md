@@ -1,4 +1,4 @@
-# libID-server-rs
+# libID-bridge-rs
 
 The OAuth Bridge of a libID ceremony.
 
@@ -274,11 +274,17 @@ either ceremony beyond the configuration and the callback document.
 docker run --rm -p 8722:8722 \
   -v ./bridge.toml:/etc/libid/bridge.toml:ro \
   -e LIBID_CONFIG=/etc/libid/bridge.toml \
-  ghcr.io/libid-org/libid-server-rs:latest
+  ghcr.io/libid-org/libid-server-rs:0.4.0
 ```
 
-Images are published on every GitHub release as
-`ghcr.io/libid-org/libid-server-rs:<version>` and `:latest`. The image sets
+Starting with the first release after the rename, images are published as
+`ghcr.io/libid-org/libid-bridge-rs:<version>` and `:latest`. The same images
+are also published under `ghcr.io/libid-org/libid-server-rs` for existing
+deployments. Earlier releases remain at their original image paths; the
+example above pins the existing 0.4.0 release until a renamed image is released.
+The container also retains the old executable name as a compatibility symlink.
+
+The image sets
 `HOST=0.0.0.0` and `PORT=8722` and carries a `/health` healthcheck on that
 port; `-e PORT=` moves both.
 

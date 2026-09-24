@@ -26,7 +26,7 @@ const DEFAULT_CCDP_ORIGIN: &str = "https://lib.id";
 
 /// What the command line says.
 #[derive(Parser, Debug)]
-#[command(name = "libid-server-rs", version, about)]
+#[command(name = "libid-bridge-rs", version, about)]
 pub struct Cli {
     /// Path to the TOML file the deployment is written in.
     #[arg(long, env = "LIBID_CONFIG")]

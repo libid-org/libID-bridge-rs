@@ -5,7 +5,7 @@
 mod common;
 
 mod artifact {
-    use libid_server_rs::{
+    use libid_bridge_rs::{
         artifact::{
             policy::ArtifactError,
             *,
@@ -144,7 +144,7 @@ mod artifact {
 }
 
 mod policy {
-    use libid_server_rs::artifact::policy::*;
+    use libid_bridge_rs::artifact::policy::*;
 
     /// The hashes of a `script-src` are read in the order the policy names
     /// them, whichever directive order it uses.

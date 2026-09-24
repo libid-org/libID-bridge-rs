@@ -40,7 +40,7 @@ fn config_file(platforms: &str) -> ScratchFile {
 /// the loopback port to bind and the log filter in its environment, and its
 /// output captured.
 fn binary(config: &std::path::Path) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_libid-server-rs"))
+    Command::new(env!("CARGO_BIN_EXE_libid-bridge-rs"))
         .env_clear()
         // The coverage profile path, when this test runs under one.
         .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|v| ("LLVM_PROFILE_FILE", v)))
@@ -218,7 +218,7 @@ fn a_configuration_the_binary_cannot_serve_stops_it() {
 /// file it was not given rather than the platforms the file would carry.
 #[test]
 fn a_run_with_no_configuration_file_names_it() {
-    let output = Command::new(env!("CARGO_BIN_EXE_libid-server-rs"))
+    let output = Command::new(env!("CARGO_BIN_EXE_libid-bridge-rs"))
         .env_clear()
         .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|v| ("LLVM_PROFILE_FILE", v)))
         .env("HOST", "127.0.0.1")

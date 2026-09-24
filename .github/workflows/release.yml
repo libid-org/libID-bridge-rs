@@ -2,8 +2,8 @@ name: Release
 
 # Publishing a GitHub Release tagged `v<version>` runs the full checks and
 # then builds + pushes the container image to
-#   ghcr.io/libid-org/libid-server-rs:<version>
-#   ghcr.io/libid-org/libid-server-rs:latest
+#   ghcr.io/libid-org/libid-bridge-rs:<version>
+#   ghcr.io/libid-org/libid-bridge-rs:latest
 # using the built-in GITHUB_TOKEN — no long-lived registry credential.
 #
 # Every third-party action is pinned by commit SHA, with the tag in a
@@ -23,7 +23,9 @@ env:
   CARGO_INCREMENTAL: 0
   RUST_VERSION: 1.97.1
   NIGHTLY: nightly-2026-08-10
-  IMAGE: ghcr.io/libid-org/libid-server-rs
+  IMAGE: ghcr.io/libid-org/libid-bridge-rs
+  # Keep existing deployments following the old image name working.
+  LEGACY_IMAGE: ghcr.io/libid-org/libid-server-rs
 
 jobs:
   # The same gate as CI: nothing ships from a tree that does not pass the
@@ -94,6 +96,8 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:${{ steps.version.outputs.version }}
             ${{ env.IMAGE }}:latest
+            ${{ env.LEGACY_IMAGE }}:${{ steps.version.outputs.version }}
+            ${{ env.LEGACY_IMAGE }}:latest
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}

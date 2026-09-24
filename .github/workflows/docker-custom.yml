@@ -59,7 +59,9 @@ jobs:
           tag="custom-$(git rev-parse --short=7 HEAD)"
           if [ -n "$SUFFIX" ]; then
             if ! [[ "$SUFFIX" =~ ^[A-Za-z0-9._-]+$ ]]; then
-              echo "::error::tag-suffix '$SUFFIX' must match [A-Za-z0-9._-]+"
+              # The value is not echoed: a newline in it would start a
+              # workflow command of its own.
+              echo "::error::tag-suffix must match [A-Za-z0-9._-]+"
               exit 1
             fi
             tag="$tag-$SUFFIX"

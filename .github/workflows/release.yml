@@ -53,6 +53,10 @@ jobs:
           TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
+          # A release is vX.Y.Z: a pre-release or build-metadata version would
+          # be pushed as `:latest`, and `+` is not a docker tag character.
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "::error::release tag '$TAG' is not vX.Y.Z"; exit 1; }
           version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)"
           if [ "$TAG" != "v$version" ]; then
             echo "::error::release tag '$TAG' does not match 'v$version'"

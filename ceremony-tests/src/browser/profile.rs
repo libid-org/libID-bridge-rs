@@ -2,10 +2,7 @@
 //! cookies it holds, and the one sign-in a platform lets a person complete
 //! only in a Chrome with nothing attached to it.
 
-use std::path::{
-    Path,
-    PathBuf,
-};
+use std::path::Path;
 
 use chromiumoxide::{
     cdp::browser_protocol::{
@@ -24,22 +21,10 @@ use super::{
     Session,
     POLL,
 };
-use crate::env::optional;
-
-/// Set to open the sign-in window even when the profile holds a session the
-/// platform honours: a renewal on demand.
-pub const SIGN_IN: &str = "PROFILE_SIGN_IN";
+use crate::settings::tooling;
 
 /// How long a probe waits for the platform to show the session signed in.
 pub const PROBE: std::time::Duration = std::time::Duration::from_secs(20);
-
-/// The profile directory `var` names, or `default`, relative to the directory
-/// the tests run from.
-pub fn named(var: &str, default: &str) -> PathBuf {
-    optional(var)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(default))
-}
 
 /// The cookies Chrome holds in `session`, whichever page is open, for the
 /// hosts `keep` admits (given without a leading dot).
@@ -58,7 +43,7 @@ pub async fn held(session: &Session, keep: impl Fn(&str) -> bool) -> Vec<Cookie>
 /// The session in the platform's profile: its cookies for the hosts `keep`
 /// admits, read under CDP once `signed_in` has found the platform honouring
 /// the session in that same Chrome. A profile the platform does not honour,
-/// and a profile with [`SIGN_IN`] set, gets a session from a person, in a
+/// and any profile when `PROFILE_SIGN_IN` is set, gets a session from a person, in a
 /// Chrome launched with nothing attached to it, and is read again once the
 /// window closes.
 pub async fn session(
@@ -76,7 +61,7 @@ pub async fn session(
         let _ = session.close().await;
         (honoured, cookies)
     };
-    let renew = optional(SIGN_IN).is_some();
+    let renew = tooling().profile_sign_in;
     let (mut honoured, mut cookies) = if renew {
         (false, Vec::new())
     } else {
@@ -131,8 +116,11 @@ fn sign_in_without_automation(profile: &Path, name: &str, url: &str) {
     for stale in ["SingletonLock", "SingletonSocket", "SingletonCookie"] {
         let _ = std::fs::remove_file(profile.join(stale));
     }
-    let chrome = default_executable(DetectionOptions::default())
-        .expect("Chrome; install one, or name it in CHROME");
+    let chrome = match &tooling().chrome {
+        Some(chrome) => chrome.clone(),
+        None => default_executable(DetectionOptions::default())
+            .expect("Chrome; install one, or name it in CHROME"),
+    };
     eprintln!("Sign in to the {name} test account in the window that opens, then close the window.");
     let status = std::process::Command::new(chrome)
         .arg(format!("--user-data-dir={}", profile.display()))

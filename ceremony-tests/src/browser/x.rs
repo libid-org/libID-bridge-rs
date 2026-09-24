@@ -34,13 +34,13 @@ use super::{
     Session,
     POLL,
 };
-use crate::env::{
-    optional,
-    required,
+use crate::settings::{
+    XAccount,
+    XSession,
 };
 
 /// A cookie list exported from a browser, as the `X_TEST_ALICE_COOKIES`
-/// value: base64 of the shape [`Account::from_env`] reads.
+/// value: base64 of the shape [`cookies::saved`] reads.
 ///
 /// The input is what a browser or its extensions hand out -- a bare list, or
 /// an object carrying one under `cookies` -- with the field names either
@@ -87,41 +87,92 @@ const PASSWORD: &str = "input[name='password']";
 /// The field X asks the e-mail address into on a sign-in it examines.
 const CHALLENGE: &str = "input[data-testid='ocfEnterTextTextInput']";
 
-/// The X test account: its credentials, the e-mail address X may ask for,
-/// and the session cookies it was last exported with.
+/// The X test account: its handle, the password and e-mail address a
+/// sign-in may type, and the session cookies it was last exported with.
 pub struct Account {
     username: String,
-    password: String,
+    password: Option<String>,
     email: Option<String>,
     cookies: Vec<Stored>,
 }
 
 impl Account {
-    /// The account `prefix` names: `{prefix}_USERNAME` and `{prefix}_PASSWORD`
-    /// are required; `{prefix}_EMAIL` and the saved session, `{prefix}_COOKIES`
-    /// (base64 of the list an export prints) or `{prefix}_COOKIES_FILE` (the
-    /// JSON it writes), are optional.
-    pub fn from_env(prefix: &str) -> Account {
+    /// The account, with its saved session's `x.com` cookies.
+    pub fn new(account: &XAccount, session: &XSession) -> Account {
         Account {
-            cookies: cookies::from_env(prefix, x_host).unwrap_or_default(),
-            ..Account::for_export(prefix)
-        }
-    }
-
-    /// The account's credentials alone, for an export that creates the
-    /// session; the saved one stays unread.
-    pub fn for_export(prefix: &str) -> Account {
-        Account {
-            username: required(&format!("{prefix}_USERNAME")),
-            password: required(&format!("{prefix}_PASSWORD")),
-            email: optional(&format!("{prefix}_EMAIL")),
-            cookies: Vec::new(),
+            username: account.username.clone(),
+            password: account.password.clone(),
+            email: account.email.clone(),
+            cookies: cookies::saved(&session.0, x_host),
         }
     }
 
     /// The account's handle.
     pub fn username(&self) -> &str {
         &self.username
+    }
+}
+
+/// Whether the page shows a signed-in X.
+async fn page_signed_in(session: &Session) -> bool {
+    let text = session.body_text().await;
+    SIGNED_IN.iter().all(|mark| text.contains(mark))
+}
+
+/// Wait up to `patience` for a signed-in X page.
+async fn page_signed_in_within(session: &Session, patience: Duration) -> bool {
+    within(patience, POLL, async || page_signed_in(session).await).await
+}
+
+/// The export of the session a person signed in to in `profile`, a Chrome
+/// profile kept between exports.
+pub struct Export {
+    pub profile: std::path::PathBuf,
+}
+
+impl Export {
+    /// The session of the export profile: every x.com cookie Chrome holds
+    /// there. A profile with no session gets one from a person, in a Chrome
+    /// launched with nothing attached to it, on X's own sign-in page; every
+    /// later export reads the profile with nobody present, until the session
+    /// lapses.
+    pub async fn fresh_cookies(&self) -> Vec<Stored> {
+        // X honours a session only where its home timeline opens on it; a
+        // lapsed one lands on the sign-in page.
+        let honoured = async |session: &Session| {
+            profile::held(session, x_host)
+                .await
+                .iter()
+                .any(|c| c.name == "auth_token")
+                && {
+                    session.navigate("https://x.com/home").await;
+                    page_signed_in_within(session, profile::PROBE).await
+                }
+        };
+        profile::session(self, "X", "https://x.com/i/flow/login", x_host, honoured)
+            .await
+            .into_iter()
+            .map(Stored::held)
+            .collect()
+    }
+}
+
+impl Platform for Export {
+    fn profile(&self) -> Option<std::path::PathBuf> {
+        Some(self.profile.clone())
+    }
+
+    fn presented_as_person(&self) -> bool {
+        true
+    }
+
+    fn state(&self) -> &str {
+        "export"
+    }
+
+    /// An export reads the profile's cookies and authorizes nothing.
+    async fn authorize(&self, _: &mut Session) -> String {
+        unreachable!("an export authorizes nothing")
     }
 }
 
@@ -133,8 +184,6 @@ pub struct Authorization<'a> {
     pub redirect_uri: &'a str,
     pub state: &'a str,
     pub code_challenge: &'a str,
-    /// The profile a person signed in to, for an export; the rung keeps none.
-    pub profile: Option<std::path::PathBuf>,
 }
 
 impl Authorization<'_> {
@@ -154,42 +203,6 @@ impl Authorization<'_> {
         )
         .expect("the authorization endpoint is a URL")
         .into()
-    }
-
-    /// The session of the export profile: every x.com cookie Chrome holds
-    /// there. A profile with no session gets one from a person, in a Chrome
-    /// launched with nothing attached to it, on X's own sign-in page; every
-    /// later export reads the profile with nobody present, until the session
-    /// lapses.
-    pub async fn fresh_cookies(&self) -> Vec<Stored> {
-        // X honours a session only where its home timeline opens on it; a
-        // lapsed one lands on the sign-in page.
-        let honoured = async |session: &Session| {
-            profile::held(session, x_host)
-                .await
-                .iter()
-                .any(|c| c.name == "auth_token")
-                && {
-                    session.navigate("https://x.com/home").await;
-                    Self::signed_in_within(session, profile::PROBE).await
-                }
-        };
-        profile::session(self, "X", "https://x.com/i/flow/login", x_host, honoured)
-            .await
-            .into_iter()
-            .map(Stored::held)
-            .collect()
-    }
-
-    /// Whether the page shows a signed-in X.
-    async fn signed_in(session: &Session) -> bool {
-        let text = session.body_text().await;
-        SIGNED_IN.iter().all(|mark| text.contains(mark))
-    }
-
-    /// Wait up to `patience` for a signed-in X page.
-    async fn signed_in_within(session: &Session, patience: Duration) -> bool {
-        within(patience, POLL, async || Self::signed_in(session).await).await
     }
 
     /// Install the saved session on the blank page, each cookie on both
@@ -303,7 +316,7 @@ impl Authorization<'_> {
                 ),
             }
         }
-        if Self::signed_in(session).await {
+        if page_signed_in(session).await {
             return;
         }
 
@@ -318,15 +331,22 @@ impl Authorization<'_> {
             "X shows the password field. {}",
             session.diagnosis().await
         );
-        move_to(session, PASSWORD, &mut jitter).await;
-        pause(&mut jitter, 200..400).await;
-        type_like_a_person(session, PASSWORD, &self.account.password, &mut jitter).await;
-        pause(&mut jitter, 400..800).await;
-        session.trace("password-typed").await;
-        click_by_text(session, &["Log in", "Continue"]).await;
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        session.trace("after-log-in").await;
-        self.refusal_check(session).await;
+        match self.account.password.as_deref() {
+            Some(password) => {
+                move_to(session, PASSWORD, &mut jitter).await;
+                pause(&mut jitter, 200..400).await;
+                type_like_a_person(session, PASSWORD, password, &mut jitter).await;
+                pause(&mut jitter, 400..800).await;
+                session.trace("password-typed").await;
+                click_by_text(session, &["Log in", "Continue"]).await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                session.trace("after-log-in").await;
+                self.refusal_check(session).await;
+            }
+            // A sign-in runs in a visible Chrome only, and without
+            // X_TEST_ALICE_PASSWORD the person at it types the password.
+            None => eprintln!("X asks for the password: type it in the window"),
+        }
 
         within(
             Duration::from_secs(30),
@@ -339,7 +359,7 @@ impl Authorization<'_> {
         } else {
             Duration::from_secs(20)
         };
-        let signed_in = Self::signed_in_within(session, patience).await;
+        let signed_in = page_signed_in_within(session, patience).await;
         session.trace("signed-in").await;
         assert!(
             signed_in,
@@ -366,10 +386,6 @@ impl Authorization<'_> {
 }
 
 impl Platform for Authorization<'_> {
-    fn profile(&self) -> Option<std::path::PathBuf> {
-        self.profile.clone()
-    }
-
     fn presented_as_person(&self) -> bool {
         true
     }
@@ -387,10 +403,10 @@ impl Platform for Authorization<'_> {
             // answer for what it asks. The saved session is the way in.
             assert!(
                 headed(),
-                "no saved X session supplied: set X_TEST_ALICE_COOKIES or \
-                 X_TEST_ALICE_COOKIES_FILE from an export, `cargo test \
-                 --test ceremony -- --ignored --nocapture a_fresh_x_session` \
-                 in ceremony-tests/"
+                "the saved X session holds no x.com cookie: renew \
+                 X_TEST_ALICE_COOKIES or X_TEST_ALICE_COOKIES_FILE from an \
+                 export, `cargo test --test ceremony -- --ignored --nocapture \
+                 a_fresh_x_session` in ceremony-tests/"
             );
             self.sign_in(session).await;
         }
@@ -514,13 +530,13 @@ async fn challenge_diagnostics(session: &Session) {
         readyState: document.readyState
     })"#).await;
     eprintln!("X challenge diagnostics: {summary}");
-    if let Some(dir) = crate::env::optional("X_CHALLENGE_TRACE") {
-        let _ = std::fs::create_dir_all(&dir);
+    if let Some(dir) = &crate::settings::tooling().challenge_trace {
+        let _ = std::fs::create_dir_all(dir);
         let _ = session
             .page
             .save_screenshot(
                 ScreenshotParams::builder().build(),
-                std::path::Path::new(&dir).join("x-challenge.png"),
+                dir.join("x-challenge.png"),
             )
             .await;
     }

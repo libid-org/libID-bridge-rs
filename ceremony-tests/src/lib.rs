@@ -5,7 +5,6 @@
 //! under test, and every dependency is declared.
 
 pub mod browser;
-pub mod deployment;
 pub mod env;
 pub mod github;
 pub mod google;
@@ -13,12 +12,8 @@ pub mod notary;
 pub mod prover;
 pub mod rungs;
 pub mod session;
+pub mod settings;
 pub mod x;
-
-pub use deployment::{
-    Deployment,
-    Published,
-};
 
 /// The time since the Unix epoch, by the system clock.
 pub fn unix_now() -> std::time::Duration {

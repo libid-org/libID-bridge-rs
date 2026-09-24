@@ -10,7 +10,7 @@ use super::{
     Session,
     POLL,
 };
-use crate::env::required;
+use crate::settings::GitHubAccount;
 
 /// The six-digit TOTP codes for `secret`, as an authenticator app shows
 /// them: SHA-1, 30-second steps. `secret` is the base32 key as GitHub
@@ -34,47 +34,17 @@ fn totp_code(secret: &str, time: u64) -> String {
     totp(secret).generate(time)
 }
 
-/// The GitHub test account: its credentials, and its TOTP secret when it
-/// has one.
-pub struct Account {
-    username: String,
-    password: String,
-    totp_secret: Option<String>,
-}
-
-impl Account {
-    /// The account `prefix` names: `{prefix}_USERNAME` and `{prefix}_PASSWORD`
-    /// are required; `{prefix}_TOTP_SECRET` (the base32 key of its
-    /// authenticator app) is optional.
-    pub fn from_env(prefix: &str) -> Account {
-        Account {
-            username: required(&format!("{prefix}_USERNAME")),
-            password: required(&format!("{prefix}_PASSWORD")),
-            totp_secret: crate::env::optional(&format!("{prefix}_TOTP_SECRET")),
-        }
-    }
-
-    /// The account's login, as GitHub spells it.
-    pub fn username(&self) -> &str {
-        &self.username
-    }
-
-    /// The current TOTP code for this account.
-    fn totp(&self) -> String {
-        let secret = self
-            .totp_secret
-            .as_deref()
-            .expect("GitHub asked for a TOTP code: set the account's _TOTP_SECRET");
-        totp(secret)
-            .generate_current()
-            .expect("a clock at or after the epoch")
-    }
+/// The current TOTP code for `secret`.
+fn current_totp(secret: &str) -> String {
+    totp(secret)
+        .generate_current()
+        .expect("a clock at or after the epoch")
 }
 
 /// GitHub's authorization request, as the client builds it, and the account
 /// that grants it.
 pub struct Authorization<'a> {
-    pub account: &'a Account,
+    pub account: &'a GitHubAccount,
     pub client_id: &'a str,
     pub redirect_uri: &'a str,
     pub state: &'a str,
@@ -175,7 +145,9 @@ impl Platform for Authorization<'_> {
                 if totp_step_submitted != Some(step)
                     && session.page.find_element("#app_totp").await.is_ok()
                 {
-                    session.fill("#app_totp", &self.account.totp()).await;
+                    session
+                        .fill("#app_totp", &current_totp(&self.account.totp_secret))
+                        .await;
                     session.click("button[type=submit]").await;
                     totp_step_submitted = Some(step);
                 }

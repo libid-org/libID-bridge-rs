@@ -8,6 +8,11 @@ use super::{
         Session,
     },
     env,
+    settings::{
+        GoogleAccount,
+        GoogleApp,
+        GoogleSession,
+    },
 };
 use base64::{
     engine::general_purpose::URL_SAFE_NO_PAD,
@@ -255,10 +260,14 @@ async fn jwks() -> Vec<u8> {
 /// A real Google authorization from the saved session, and the ID token it
 /// returns verified against Google's keys: signature, state, nonce,
 /// audience, expiry, subject and the verified account.
-pub async fn a_real_google_authorization_returns_a_verified_id_token() {
+pub async fn a_real_google_authorization_returns_a_verified_id_token(
+    app: &GoogleApp,
+    account: &GoogleAccount,
+    session: &GoogleSession,
+) {
     env::logging();
     let (state, nonce) = binding();
-    let authorization = Authorization::from_env(state, nonce);
+    let authorization = Authorization::new(app, account, session, state, nonce);
     // Resolve keys before asking the browser for evidence.
     let keys = jwks().await;
     let mut session = Session::open(&authorization).await;

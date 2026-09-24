@@ -11,13 +11,13 @@ It is a workspace of its own, with its own `Cargo.lock` and the `[patch]`
 tables its `tlsn` and `mpz` revisions need: the server's builds resolve none
 of the git dependencies the prover and the notary pull in.
 
-The deployment under test is behind one interface, `Deployment`: where the
-OAuth App redirects to, and what the deployment publishes for a ceremony to
-start from. A host implements it -- this repository's does in
-`tests/ceremony/host.rs`, over the bridge binary it builds from the
-repository's manifest and starts -- and calls the rungs of
-`ceremony_tests::rungs` from tests of its own. The X and Google rungs take no
-deployment.
+The deployment under test reaches the GitHub rungs as one value,
+`rungs::Published`: what the deployment publishes for a ceremony to start
+from, and where the OAuth App redirects to. A host builds it -- this
+repository's does in `tests/ceremony/host.rs`, from the bridge binary it
+builds from the repository's manifest and starts -- and calls the rungs of
+`ceremony_tests::rungs` from tests of its own, handing each the settings it
+reads. The X and Google rungs take no deployment.
 
 ## Running
 
@@ -40,7 +40,7 @@ where an exported variable wins; a missing variable fails the run.
 
 | Variable | Rungs | Meaning |
 |---|---|---|
-| `GH_OAUTH_CLIENT_ID`, `GH_OAUTH_CLIENT_SECRET` | GitHub | The OAuth App. The host configures the deployment under test with both, which publishes the secret as `clientCredential`; the suite reads them back through `Deployment::published` and sends them in the token request. |
+| `GH_OAUTH_CLIENT_ID`, `GH_OAUTH_CLIENT_SECRET` | GitHub | The OAuth App. The host configures the deployment under test with both, which publishes the secret as `clientCredential`; the host reads them back into `rungs::Published` and the suite sends them in the token request. |
 | `LIBID_TEST_PUBLIC_ORIGIN` | GitHub | The bridge origin the App's callback URL is registered under; the host derives `/auth/callback` from it as the application would. |
 | `CEREMONY_ENV_FILE` | all | The settings file, when it is not the `.env.test` found from the working directory upward. |
 | `GH_TEST_ALICE_USERNAME`, `GH_TEST_ALICE_PASSWORD` | GitHub authorization | The test account. |

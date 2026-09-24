@@ -14,13 +14,17 @@ use super::{
     Session,
     POLL,
 };
-use crate::env::{
-    optional,
-    required,
+use crate::settings::{
+    GoogleAccount,
+    GoogleApp,
+    GoogleSession,
 };
 use chromiumoxide::cdp::browser_protocol::network::Cookie as Held;
 use std::{
-    path::PathBuf,
+    path::{
+        Path,
+        PathBuf,
+    },
     time::{
         Duration,
         Instant,
@@ -40,10 +44,16 @@ pub struct Authorization {
 }
 
 impl Authorization {
-    pub fn from_env(state: String, nonce: String) -> Self {
-        let cookies = cookies::from_env("GOOGLE_TEST_ALICE", google_host).expect(
-            "GOOGLE_TEST_ALICE_COOKIES (base64 JSON) or GOOGLE_TEST_ALICE_COOKIES_FILE",
-        );
+    /// The authorization the rung drives: the saved session restored, and
+    /// the account's password for one sign-in should Google reject it.
+    pub fn new(
+        app: &GoogleApp,
+        account: &GoogleAccount,
+        session: &GoogleSession,
+        state: String,
+        nonce: String,
+    ) -> Self {
+        let cookies = cookies::saved(&session.0, google_host);
         assert!(
             cookies.iter().any(|c| c.name == "SID"
                 || c.name == "__Secure-1PSID"
@@ -51,24 +61,33 @@ impl Authorization {
             "the Google cookie export carries no session cookie"
         );
         Self {
-            password: optional("GOOGLE_TEST_ALICE_PASSWORD"),
+            client_id: app.client_id.clone(),
+            redirect_uri: app.redirect_uri.clone(),
+            state,
+            nonce,
+            email: account.email.clone(),
+            password: account.password.clone(),
             cookies,
             profile: None,
-            ..Self::for_export(state, nonce)
         }
     }
 
-    /// The client settings alone, for a session a person is about to create.
-    pub fn for_export(state: String, nonce: String) -> Self {
+    /// The client and the account alone, for a session a person is about
+    /// to create in `profile`.
+    pub fn for_export(
+        app: &GoogleApp,
+        account: &GoogleAccount,
+        profile: PathBuf,
+    ) -> Self {
         Self {
-            client_id: required("GOOGLE_OAUTH_CLIENT_ID"),
-            redirect_uri: required("LIBID_TEST_GOOGLE_REDIRECT_URI"),
-            state,
-            nonce,
-            email: required("GOOGLE_TEST_ALICE_EMAIL"),
+            client_id: app.client_id.clone(),
+            redirect_uri: app.redirect_uri.clone(),
+            state: "export".into(),
+            nonce: "export".into(),
+            email: account.email.clone(),
             password: None,
             cookies: Vec::new(),
-            profile: Some(profile::named("GOOGLE_PROFILE", ".env.google-profile")),
+            profile: Some(profile),
         }
     }
 
@@ -319,19 +338,19 @@ pub async fn watch_fragment(session: &Session, uri: &str) -> super::Redirect {
         .await
 }
 
-/// Export the session of `GOOGLE_PROFILE` (`.env.google-profile`): a profile
-/// with no sign-in opens a Chrome for a person to sign in once; after that the
-/// export needs nobody. Written as JSON to `GOOGLE_COOKIE_EXPORT_OUT` when that
-/// names a path, so the value never crosses a terminal, or printed as the
-/// `GOOGLE_TEST_ALICE_COOKIES` value otherwise.
-pub async fn export_fresh_session() {
-    let authorization = Authorization::for_export("export".into(), "export".into());
+/// Export the session of `profile`: a profile with no sign-in opens a Chrome
+/// for a person to sign in once; after that the export needs nobody. Written
+/// as JSON to `out` when there is one, so the value never crosses a
+/// terminal, or printed as the `GOOGLE_TEST_ALICE_COOKIES` value otherwise.
+pub async fn export_fresh_session(
+    app: &GoogleApp,
+    account: &GoogleAccount,
+    profile: PathBuf,
+    out: Option<&Path>,
+) {
+    let authorization = Authorization::for_export(app, account, profile);
     let cookies = authorization.fresh_cookies().await;
-    cookies::deliver(
-        &cookies,
-        "GOOGLE_COOKIE_EXPORT_OUT",
-        "GOOGLE_TEST_ALICE_COOKIES",
-    );
+    cookies::deliver(&cookies, out, "GOOGLE_TEST_ALICE_COOKIES");
 }
 
 /// Chrome reports the fragment of a redirect it lands on, through the request

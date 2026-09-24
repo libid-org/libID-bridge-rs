@@ -1,6 +1,11 @@
 //! A saved session: the cookies of a signed-in browser as an export carries
 //! them, as a test setting holds them, and as Chrome takes them back.
 
+use std::path::{
+    Path,
+    PathBuf,
+};
+
 use base64::Engine;
 use chromiumoxide::cdp::browser_protocol::network::{
     Cookie as Held,
@@ -15,7 +20,7 @@ use serde::{
 };
 
 use super::Session;
-use crate::env::optional;
+use crate::settings::SavedSession;
 
 /// One cookie of a saved session, in any spelling an export uses: each field
 /// under its snake_case or camelCase name, `expirationDate` for `expires`,
@@ -184,20 +189,23 @@ pub fn parse(
         .collect())
 }
 
-/// The saved session `prefix` names, for the hosts `keep` admits:
-/// `{prefix}_COOKIES`, the base64 an export prints, or else
-/// `{prefix}_COOKIES_FILE`, the JSON it writes; `None` where neither is set.
-pub fn from_env(prefix: &str, keep: impl Fn(&str) -> bool) -> Option<Vec<Stored>> {
-    let export = if let Some(encoded) = optional(&format!("{prefix}_COOKIES")) {
-        base64::engine::general_purpose::STANDARD
-            .decode(encoded.trim())
-            .unwrap_or_else(|e| panic!("{prefix}_COOKIES is base64: {e}"))
-    } else {
-        let path = optional(&format!("{prefix}_COOKIES_FILE"))?;
-        std::fs::read(&path)
-            .unwrap_or_else(|e| panic!("{prefix}_COOKIES_FILE, {path}: {e}"))
+/// The cookies of a saved session for the hosts `keep` admits, a failure to
+/// read it naming the setting it came from.
+pub fn saved(session: &SavedSession, keep: impl Fn(&str) -> bool) -> Vec<Stored> {
+    let (var, export) = match session {
+        SavedSession::Encoded { var, value } => (
+            var,
+            base64::engine::general_purpose::STANDARD
+                .decode(value.trim())
+                .unwrap_or_else(|e| panic!("{var} is base64: {e}")),
+        ),
+        SavedSession::File { var, path } => (
+            var,
+            std::fs::read(path)
+                .unwrap_or_else(|e| panic!("{var}, {}: {e}", path.display())),
+        ),
     };
-    Some(parse(&export, keep).unwrap_or_else(|e| panic!("{prefix}_COOKIES: {e}")))
+    parse(&export, keep).unwrap_or_else(|e| panic!("{var}: {e}"))
 }
 
 /// Set `cookies` in `session`, on the blank page. Chrome refuses a cookie it
@@ -225,16 +233,18 @@ fn json(cookies: &[Stored]) -> Vec<u8> {
     serde_json::to_vec(cookies).expect("a cookie list serializes")
 }
 
-/// Deliver an export: as JSON at the path `out_var` names, whole or not at
-/// all, so a failed export never empties the file a rung reads and the value
-/// never crosses a terminal; or printed as the `{secret}=` value otherwise.
-pub fn deliver(cookies: &[Stored], out_var: &str, secret: &str) {
-    match optional(out_var) {
+/// Deliver an export: as JSON at `out`, whole or not at all, so a failed
+/// export never empties the file a rung reads and the value never crosses a
+/// terminal; or printed as the `{secret}=` value where there is no `out`.
+pub fn deliver(cookies: &[Stored], out: Option<&Path>, secret: &str) {
+    match out {
         Some(path) => {
-            let staged = format!("{path}.tmp");
+            let mut staged = path.as_os_str().to_owned();
+            staged.push(".tmp");
+            let staged = PathBuf::from(staged);
             write_private(&staged, &json(cookies));
-            std::fs::rename(&staged, &path).expect("place the export");
-            println!("wrote {} cookies to {path}", cookies.len());
+            std::fs::rename(&staged, path).expect("place the export");
+            println!("wrote {} cookies to {}", cookies.len(), path.display());
         }
         None => println!("{secret}={}", encoded(cookies)),
     }
@@ -242,7 +252,7 @@ pub fn deliver(cookies: &[Stored], out_var: &str, secret: &str) {
 
 /// `bytes` into a new file at `path` that its owner alone may read: the
 /// export is a live session. A file left there by an earlier run is replaced.
-fn write_private(path: &str, bytes: &[u8]) {
+fn write_private(path: &Path, bytes: &[u8]) {
     use std::io::Write;
     let _ = std::fs::remove_file(path);
     let mut options = std::fs::OpenOptions::new();
@@ -265,13 +275,12 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("export.json");
-        let path = path.to_str().unwrap();
-        std::fs::write(path, b"left by an earlier run").unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        write_private(path, b"[]");
-        let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        std::fs::write(&path, b"left by an earlier run").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        deliver(&[], Some(&path), "UNUSED");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
-        assert_eq!(std::fs::read(path).unwrap(), b"[]");
+        assert_eq!(std::fs::read(&path).unwrap(), b"[]");
     }
 
     fn google(host: &str) -> bool {

@@ -9,7 +9,7 @@ edition = "2021"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/libid-org/libID-server-rs"
-description = "The live ceremony suite: real MPC-TLS sessions through a notary of its own against github.com, api.x.com and accounts.google.com, driven from a Chrome, with the deployment under test behind the `Deployment` interface."
+description = "The live ceremony suite: real MPC-TLS sessions through a notary of its own against github.com, api.x.com and accounts.google.com, driven from a Chrome, with what the deployment under test publishes handed to the rungs as a value."
 publish = false
 
 [dependencies]

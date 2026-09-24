@@ -226,6 +226,9 @@ impl Session {
         if headed() {
             config = config.with_head();
         }
+        if let Some(chrome) = &crate::settings::tooling().chrome {
+            config = config.chrome_executable(chrome);
+        }
         let config = platform.configure(config);
         let (browser, mut handler) = Browser::launch(
             config
@@ -362,12 +365,12 @@ impl Session {
     /// text) into the directory `BROWSER_TRACE` names, numbered in order,
     /// when it is set.
     pub async fn trace(&self, label: &str) {
-        let Some(dir) = crate::env::optional("BROWSER_TRACE") else {
+        let Some(dir) = &crate::settings::tooling().trace else {
             return;
         };
         let n = self.traced.fetch_add(1, Ordering::Relaxed);
-        let stem = std::path::Path::new(&dir).join(format!("{n:02}-{label}"));
-        let _ = std::fs::create_dir_all(&dir);
+        let stem = dir.join(format!("{n:02}-{label}"));
+        let _ = std::fs::create_dir_all(dir);
         let _ = self
             .page
             .save_screenshot(
@@ -452,7 +455,7 @@ impl Session {
 /// Whether Chrome is visible: `BROWSER_HEAD` is set. A visible Chrome is
 /// left on a page a person completes, device verification included.
 pub fn headed() -> bool {
-    crate::env::optional("BROWSER_HEAD").is_some()
+    crate::settings::tooling().headed
 }
 
 /// One query parameter of `url`, percent-decoded.

@@ -1,9 +1,16 @@
-//! The rungs: one ceremony step each, against the real platform, with the
-//! deployment under test behind [`Deployment`] where a rung needs one.
+//! The rungs: one ceremony step each, against the real platform, each
+//! taking the settings it reads, and the GitHub rungs what the deployment
+//! under test published as [`Published`].
 
-use std::time::{
-    Duration,
-    Instant,
+use std::{
+    path::{
+        Path,
+        PathBuf,
+    },
+    time::{
+        Duration,
+        Instant,
+    },
 };
 
 use base64::Engine;
@@ -19,10 +26,7 @@ use crate::{
         self,
         Grant,
     },
-    env::{
-        self,
-        required,
-    },
+    env,
     github,
     notary::Notary,
     prover::{
@@ -35,11 +39,24 @@ use crate::{
         Exchange,
         Identity,
     },
+    settings::{
+        GitHubAccount,
+        XAccount,
+        XApp,
+        XSession,
+    },
     unix_now,
     x,
-    Deployment,
-    Published,
 };
+
+/// What the deployment under test publishes for a GitHub ceremony to start
+/// from, read the way an application reads it, and the callback URL the
+/// OAuth App registers.
+pub struct Published {
+    pub client_id: String,
+    pub credential: String,
+    pub redirect_uri: String,
+}
 
 /// A code GitHub refuses: twenty hex characters, the shape of a real one.
 const SPENT_CODE: &str = "0123456789abcdef0123";
@@ -151,18 +168,17 @@ fn assert_bearer(bearer: &str) {
 /// `client_secret` fails with GitHub's own `answer`, after MPC-TLS against
 /// github.com completed.
 async fn github_refuses_the_token_session(
-    deployment: &impl Deployment,
+    published: &Published,
     client_secret: impl FnOnce(&Published) -> &str,
     answer: &str,
 ) {
     let notary = Notary::attesting().await;
-    let published = deployment.published().await;
     let request = github::token_request(&github::TokenFields {
         client_id: &published.client_id,
         code: SPENT_CODE,
-        redirect_uri: &deployment.redirect_uri(),
+        redirect_uri: &published.redirect_uri,
         code_verifier: &s256("placeholder"),
-        client_secret: client_secret(&published),
+        client_secret: client_secret(published),
     });
     refused_after_the_handshake(
         "GitHub",
@@ -176,10 +192,10 @@ async fn github_refuses_the_token_session(
 /// dialled, MPC-TLS completed against github.com and GitHub answered. The
 /// client id and the credential are the ones the bridge published.
 pub async fn a_refused_code_fails_the_token_session_with_githubs_answer(
-    deployment: &impl Deployment,
+    published: &Published,
 ) {
     github_refuses_the_token_session(
-        deployment,
+        published,
         |published| &published.credential,
         "bad_verification_code",
     )
@@ -189,11 +205,9 @@ pub async fn a_refused_code_fails_the_token_session_with_githubs_answer(
 /// A credential GitHub refuses fails the token session with GitHub's own
 /// answer, `incorrect_client_credentials`. The client id is the published
 /// one: a placeholder id is answered `404` by GitHub, a different path.
-pub async fn a_credential_github_refuses_fails_the_token_session(
-    deployment: &impl Deployment,
-) {
+pub async fn a_credential_github_refuses_fails_the_token_session(published: &Published) {
     github_refuses_the_token_session(
-        deployment,
+        published,
         |_| "not-this-deployments-credential",
         "incorrect_client_credentials",
     )
@@ -220,20 +234,19 @@ pub async fn a_bearer_github_refuses_fails_the_identity_session() {
 /// the suite's notary, and both records are checked against the rules the
 /// Platform Verifier applies. One authorization per run.
 pub async fn a_real_github_authorization_yields_two_sessions_the_notary_attested(
-    deployment: &impl Deployment,
+    published: &Published,
+    account: &GitHubAccount,
 ) {
     let mut notary = Notary::attesting().await;
-    let published = deployment.published().await;
-    let account = browser::github::Account::from_env("GH_TEST_ALICE");
-    let redirect_uri = deployment.redirect_uri();
+    let redirect_uri = &published.redirect_uri;
     let state = fresh_state();
     let code_verifier = fresh_verifier();
     let code_challenge = s256(&code_verifier);
 
     let grant = Grant::obtained(&browser::github::Authorization {
-        account: &account,
+        account,
         client_id: &published.client_id,
-        redirect_uri: &redirect_uri,
+        redirect_uri,
         state: &state,
         code_challenge: &code_challenge,
     })
@@ -244,7 +257,7 @@ pub async fn a_real_github_authorization_yields_two_sessions_the_notary_attested
     let fields = github::TokenFields {
         client_id: &published.client_id,
         code: &code,
-        redirect_uri: &redirect_uri,
+        redirect_uri,
         code_verifier: &code_verifier,
         client_secret: &published.credential,
     };
@@ -274,7 +287,7 @@ pub async fn a_real_github_authorization_yields_two_sessions_the_notary_attested
         identity.session.sent_len,
         identity.session.recv_len,
         bearer,
-        account.username(),
+        &account.username,
         &github::IDENTITY_SESSION,
     );
     bearer_commitments_open(&exchange, &token_record, &identity, &identity_record);
@@ -301,30 +314,33 @@ pub async fn a_bearer_x_refuses_fails_the_identity_session() {
 /// records are checked against the rules the Platform Verifier applies. The
 /// code lives thirty seconds, so everything that can be built before the
 /// browser step is.
-pub async fn a_real_x_authorization_yields_two_sessions_the_notary_attested() {
+pub async fn a_real_x_authorization_yields_two_sessions_the_notary_attested(
+    app: &XApp,
+    account: &XAccount,
+    session: &XSession,
+) {
     env::logging();
     let mut notary = Notary::attesting().await;
-    let account = browser::x::Account::from_env("X_TEST_ALICE");
-    let client_id = required("X_OAUTH_CLIENT_ID");
-    let redirect_uri = required("LIBID_TEST_X_REDIRECT_URI");
+    let account = browser::x::Account::new(account, session);
+    let client_id = &app.client_id;
+    let redirect_uri = &app.redirect_uri;
     let state = fresh_state();
     let code_verifier = fresh_verifier();
     let code_challenge = s256(&code_verifier);
 
     let grant = Grant::obtained(&browser::x::Authorization {
         account: &account,
-        client_id: &client_id,
-        redirect_uri: &redirect_uri,
+        client_id,
+        redirect_uri,
         state: &state,
         code_challenge: &code_challenge,
-        profile: None,
     })
     .await;
     let seen = Instant::now();
 
     let exchange = Exchange::notarized(
         &notary,
-        x::token_request(&client_id, &grant.code, &redirect_uri, &code_verifier),
+        x::token_request(client_id, &grant.code, redirect_uri, &code_verifier),
     )
     .await
     .unwrap_or_else(|failed| {
@@ -376,37 +392,27 @@ pub async fn a_real_x_authorization_yields_two_sessions_the_notary_attested() {
     grant.closed().await;
 }
 
-/// Turn a cookie list exported from a browser into the
+/// Turn the cookie list a browser exported to `export` into the
 /// `X_TEST_ALICE_COOKIES` value, so the session a person signed in for is the
-/// one the rung restores:
-/// `X_COOKIE_EXPORT=.env.x-export.json cargo test --test ceremony --
-/// --ignored --nocapture a_browser_export`, from `ceremony-tests/`.
-pub async fn a_browser_export_becomes_the_x_secret() {
-    let path = required("X_COOKIE_EXPORT");
-    let export = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("{path} is a cookie export this test reads: {e}"));
+/// one the rung restores.
+pub fn a_browser_export_becomes_the_x_secret(export: &Path) {
+    let json = std::fs::read_to_string(export).unwrap_or_else(|e| {
+        panic!("{} is a cookie export this reads: {e}", export.display())
+    });
     println!(
         "X_TEST_ALICE_COOKIES={}",
-        browser::x::secret_from_export(&export)
+        browser::x::secret_from_export(&json)
     );
 }
 
-/// Export the session of `X_PROFILE` (`.env.x-profile`): a profile with no
-/// sign-in opens a Chrome for a person to sign in once; after that the export
-/// needs nobody. Written as JSON to `X_COOKIE_EXPORT_OUT` when that names a
-/// path, or printed as the `X_TEST_ALICE_COOKIES` value otherwise. Run by
-/// name, ignored otherwise: `cargo test --test ceremony -- --ignored
-/// --nocapture a_fresh_x_session`, from `ceremony-tests/`.
-pub async fn a_fresh_x_session_is_exported_for_the_secret() {
-    let account = browser::x::Account::for_export("X_TEST_ALICE");
-    let authorization = browser::x::Authorization {
-        account: &account,
-        client_id: &required("X_OAUTH_CLIENT_ID"),
-        redirect_uri: &required("LIBID_TEST_X_REDIRECT_URI"),
-        state: "export",
-        code_challenge: "",
-        profile: Some(browser::profile::named("X_PROFILE", ".env.x-profile")),
-    };
-    let cookies = authorization.fresh_cookies().await;
-    browser::cookies::deliver(&cookies, "X_COOKIE_EXPORT_OUT", "X_TEST_ALICE_COOKIES");
+/// Export the session of the X profile `profile`: a profile with no sign-in
+/// opens a Chrome for a person to sign in once; after that the export needs
+/// nobody. Written as JSON to `out` when there is one, or printed as the
+/// `X_TEST_ALICE_COOKIES` value otherwise.
+pub async fn a_fresh_x_session_is_exported_for_the_secret(
+    profile: PathBuf,
+    out: Option<&Path>,
+) {
+    let cookies = browser::x::Export { profile }.fresh_cookies().await;
+    browser::cookies::deliver(&cookies, out, "X_TEST_ALICE_COOKIES");
 }

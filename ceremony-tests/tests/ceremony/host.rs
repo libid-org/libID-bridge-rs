@@ -1,6 +1,6 @@
 //! The deployment under test: this repository's binary, built from its own
 //! manifest, on a configuration file naming the testnet Distribution and the
-//! App's public client id and credential from the environment.
+//! App's public client id and credential from the settings.
 
 #[path = "../../../tests/common/bridge.rs"]
 // The host uses its part of the module.
@@ -24,12 +24,9 @@ use bridge::{
     Reply,
 };
 use ceremony_tests::{
-    env::{
-        logging,
-        required,
-    },
-    Deployment,
-    Published,
+    env::logging,
+    rungs::Published,
+    settings::GitHubApp,
 };
 use libid_bridge_rs::routes::CONFIG_PATH;
 
@@ -75,27 +72,18 @@ pub fn binary() -> PathBuf {
 /// suite reads the configuration as.
 pub const APP_ORIGIN: &str = "https://app.example";
 
-/// The origin the OAuth App's callback URL is registered under: the bridge
-/// origin as the application knows it, a canonical origin with no path.
-pub fn public_origin() -> String {
-    let origin = required("LIBID_TEST_PUBLIC_ORIGIN");
-    let parsed = url::Url::parse(&origin).expect("LIBID_TEST_PUBLIC_ORIGIN parses");
+/// The callback URL the OAuth App registers: the public origin, a canonical
+/// origin with no path, followed by `/auth/callback`, as the application
+/// derives it from the bridge origin.
+fn redirect_uri(app: &GitHubApp) -> String {
+    let origin = &app.public_origin;
+    let parsed = url::Url::parse(origin).expect("LIBID_TEST_PUBLIC_ORIGIN parses");
     assert_eq!(
-        parsed.origin().ascii_serialization(),
+        &parsed.origin().ascii_serialization(),
         origin,
         "LIBID_TEST_PUBLIC_ORIGIN is a canonical origin"
     );
-    origin
-}
-
-/// The callback URL the OAuth App registers: the public origin followed by
-/// `/auth/callback`, as the application derives it from the bridge origin.
-pub fn redirect_uri() -> String {
-    format!(
-        "{}{}",
-        public_origin(),
-        libid_bridge_rs::routes::CALLBACK_PATH
-    )
+    format!("{origin}{}", libid_bridge_rs::routes::CALLBACK_PATH)
 }
 
 /// A running bridge.
@@ -107,33 +95,25 @@ impl Host {
     /// The binary on a configuration naming the testnet Distribution and the
     /// App, its client secret in the github table as the credential to
     /// publish.
-    pub async fn attesting() -> Host {
+    pub async fn attesting(app: &GitHubApp) -> Host {
         logging();
         let config = format!(
             "allowed_app_origins = [\"{APP_ORIGIN}\"]\n\
              ccdp_origin = \"{}\"\n\
              [[platforms]]\nid = \"github\"\nclient_id = \"{}\"\nversions = [1]\n\
              client_credential = \"{}\"\n",
-            CCDP_ORIGIN,
-            required("GH_OAUTH_CLIENT_ID"),
-            required("GH_OAUTH_CLIENT_SECRET"),
+            CCDP_ORIGIN, app.client_id, app.client_secret,
         );
         let bridge = tokio::task::spawn_blocking(move || Bridge::started(&config))
             .await
             .expect("the bridge starts");
         Host { bridge }
     }
-}
-
-impl Deployment for Host {
-    fn redirect_uri(&self) -> String {
-        redirect_uri()
-    }
 
     /// The github entry of the configuration the bridge publishes, read over
-    /// TCP from the admitted application origin: the client id and the
-    /// credential the configuration named.
-    async fn published(&self) -> Published {
+    /// TCP from the admitted application origin, checked to be the client id
+    /// and the credential `app` configured, with the App's callback URL.
+    pub async fn published(&self, app: &GitHubApp) -> Published {
         let address = self.bridge.address;
         let reply = tokio::task::spawn_blocking(move || {
             Reply::to(address, "GET", CONFIG_PATH, &[("origin", APP_ORIGIN)], "")
@@ -150,9 +130,10 @@ impl Deployment for Host {
                 .as_str()
                 .expect("the public credential")
                 .to_owned(),
+            redirect_uri: redirect_uri(app),
         };
-        assert_eq!(published.client_id, required("GH_OAUTH_CLIENT_ID"));
-        assert_eq!(published.credential, required("GH_OAUTH_CLIENT_SECRET"));
+        assert_eq!(published.client_id, app.client_id);
+        assert_eq!(published.credential, app.client_secret);
         published
     }
 }

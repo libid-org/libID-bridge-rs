@@ -535,6 +535,7 @@ dependencies = [
  "futures-util",
  "http-body-util",
  "hyper",
+ "hyper-rustls",
  "hyper-util",
  "libid-bridge-rs",
  "libid-ceremony",
@@ -547,11 +548,9 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
- "tokio-rustls",
  "totp-rs",
  "tracing-subscriber",
  "url",
- "webpki-root-certs",
 ]
 
 [[package]]
@@ -2865,7 +2864,6 @@ version = "0.23.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6725596c3f2c3a0aef021139e145d4eafe314a6623e4680ca83852b2c67ab2ba"
 dependencies = [
- "log",
  "once_cell",
  "ring",
  "rustls-pki-types",

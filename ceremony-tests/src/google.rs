@@ -223,45 +223,21 @@ fn verify(
 /// Fetch only the fixed Google JWKS endpoint over verified TLS, with a bound
 /// and a deadline. The signed token is never sent to a validation service.
 async fn jwks() -> Vec<u8> {
+    let https = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_webpki_roots()
+        .https_only()
+        .enable_http1()
+        .build();
+    let client =
+        hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+            .build::<_, http_body_util::Empty<bytes::Bytes>>(https);
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        use tokio_rustls::{
-            rustls::{
-                pki_types::ServerName,
-                ClientConfig,
-                RootCertStore,
-            },
-            TlsConnector,
-        };
-        let mut roots = RootCertStore::empty();
-        roots
-            .add_parsable_certificates(webpki_root_certs::TLS_SERVER_ROOT_CERTS.to_vec());
-        let tls = TlsConnector::from(std::sync::Arc::new(
-            ClientConfig::builder()
-                .with_root_certificates(roots)
-                .with_no_client_auth(),
-        ));
-        let socket = tokio::net::TcpStream::connect(("www.googleapis.com", 443))
-            .await
-            .expect("connect Google JWKS");
-        let stream = tls
-            .connect(ServerName::try_from("www.googleapis.com").unwrap(), socket)
-            .await
-            .expect("Google JWKS TLS");
-        let (mut sender, connection) =
-            hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
-                .await
-                .expect("JWKS HTTP");
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
-        let request = hyper::Request::builder()
-            .uri("/oauth2/v3/certs")
-            .header("host", "www.googleapis.com")
-            .header("connection", "close")
-            .body(http_body_util::Empty::<bytes::Bytes>::new())
-            .unwrap();
-        let response = sender
-            .send_request(request)
+        let response = client
+            .get(
+                "https://www.googleapis.com/oauth2/v3/certs"
+                    .parse()
+                    .expect("the JWKS URL"),
+            )
             .await
             .expect("Google JWKS response");
         assert_eq!(response.status(), 200, "Google JWKS status");
@@ -310,6 +286,20 @@ pub async fn a_real_google_authorization_returns_a_verified_id_token() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fetch reaches Google over verified TLS and returns a key set the
+    /// verifier reads: RSA keys, each with an id.
+    #[tokio::test]
+    #[ignore = "reaches www.googleapis.com"]
+    async fn the_jwks_is_googles_rsa_key_set() {
+        let keys: Keys = serde_json::from_slice(&jwks().await).expect("a JWKS");
+        assert!(!keys.keys.is_empty());
+        assert!(keys
+            .keys
+            .iter()
+            .all(|k| k.kty == "RSA" && !k.kid.is_empty()));
+    }
+
     #[test]
     fn fragment_rejects_confused_or_malformed_responses() {
         let base = "https://bridge.example/auth/callback";

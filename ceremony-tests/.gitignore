@@ -1,3 +1,4 @@
+/target
 # Settings, sessions, profiles and exports the suite reads or writes when run
 # from this directory; the root's rules are anchored there and do not reach here.
 /.env*

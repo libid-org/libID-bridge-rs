@@ -3,37 +3,40 @@
 The live ceremony suite: a Chrome that authorizes as a person at GitHub, X and
 Google, a notary of its own built from `libid-tlsn`, the prover that runs the
 notarized sessions, and what each platform's records must contain -- the rules
-the Platform Verifier applies on chain. It reaches nowhere into the crate under
-test and declares every dependency, so it lifts out of this repository as a
-unit.
+the Platform Verifier applies on chain. The library reaches nowhere into the
+crate under test and declares every dependency, so it lifts out of this
+repository as a unit.
+
+It is a workspace of its own, with its own `Cargo.lock` and the `[patch]`
+tables its `tlsn` and `mpz` revisions need: the server's builds resolve none
+of the git dependencies the prover and the notary pull in.
 
 The deployment under test is behind one interface, `Deployment`: where the
 OAuth App redirects to, and what the deployment publishes for a ceremony to
-start from. A host implements it -- this repository's does over the bridge
-binary it starts, in `tests/ceremony/host.rs` -- and calls the rungs of
+start from. A host implements it -- this repository's does in
+`tests/ceremony/host.rs`, over the bridge binary it builds from the
+repository's manifest and starts -- and calls the rungs of
 `ceremony_tests::rungs` from tests of its own. The X and Google rungs take no
 deployment.
 
 ## Running
 
-From this repository, with the host's bridge as the deployment:
+Every command runs from this directory, `ceremony-tests/`: it is where the
+test target and its settings live, and relative paths in the settings -- the
+profiles, cookie files, exports and traces -- resolve against it.
 
 ```sh
-cargo test --features live-ceremony --test ceremony -- --test-threads=1
+cargo test --test ceremony -- --test-threads=1
 ```
 
 One rung at a time: X's authorization code lives thirty seconds, and rungs
-run side by side contend for Chrome and the notary.
+run side by side contend for Chrome and the notary. The exports and the Chrome
+checks are ignored in that run and selected by name, as below; the library's
+own tests are `cargo test --lib`.
 
-The checks that need no deployment run from the crate alone:
-
-```sh
-cargo test -p ceremony-tests
-```
-
-with the Chrome fixture and the exports selected by name, as below. The suite reads its settings from the
-environment, or from a gitignored `.env.test` where an exported variable
-wins; a missing variable fails the run.
+The suite reads its settings from the environment, or from a gitignored
+`.env.test` found from this directory upward (the repository root's serves),
+where an exported variable wins; a missing variable fails the run.
 
 | Variable | Rungs | Meaning |
 |---|---|---|
@@ -85,7 +88,7 @@ cookies look, brings the window back once, as does `PROFILE_SIGN_IN=1`:
 
 ```sh
 X_COOKIE_EXPORT_OUT=.env.x-cookies.json \
-  cargo test -p ceremony-tests --test selfcheck a_fresh_x_session -- --ignored --nocapture
+  cargo test --test ceremony a_fresh_x_session -- --ignored --nocapture
 ```
 
 With `X_COOKIE_EXPORT_OUT` the JSON is written there whole or not at all and
@@ -93,14 +96,17 @@ nothing else is printed; without it the base64 `X_TEST_ALICE_COOKIES` value is
 printed instead.
 
 A session from the browser a person already uses serves as well: export its
-`x.com` cookies, as a list or as Playwright's `storageState`, and convert:
+`x.com` cookies, as a list or as Playwright's `storageState`, to a file under
+a gitignored `.env*` name -- it holds a working session -- and convert:
 
 ```sh
-X_COOKIE_EXPORT=x.com.json cargo test -p ceremony-tests --test selfcheck a_browser_export -- --ignored --nocapture
+X_COOKIE_EXPORT=.env.x-export.json cargo test --test ceremony a_browser_export -- --ignored --nocapture
 ```
 
-In CI (`ceremony.yml`) pull requests run the rungs that need no account; the
-nightly and dispatched runs add the GitHub authorization, one rung at a time.
+In CI (`ceremony.yml`) pull requests run the crate's formatting, lints,
+library tests and Chrome checks, and the rungs that need no account; the
+nightly runs, and a dispatch with the `full` input set, add the GitHub
+authorization, one rung at a time.
 The X authorization runs weekly and on a dispatch with the `x` input set, and
 only from the saved session: an unattended run never opens X's sign-in pages,
 because X examines a fresh sign-in and has questions a test cannot answer. A
@@ -129,7 +135,7 @@ automation even with a saved session.
 | `GOOGLE_TEST_ALICE_COOKIES` | CI alternative: base64 of that JSON export. Takes precedence over the file. |
 
 ```sh
-cargo test --locked --features live-ceremony --test ceremony \
+cargo test --locked --test ceremony \
   google::a_real_google_authorization_returns_a_verified_id_token -- --ignored --exact
 ```
 
@@ -148,12 +154,13 @@ job. The Google rung is ignored in ordinary runs until explicitly selected.
 
 The session the rung restores comes from a dedicated Chrome profile,
 `GOOGLE_PROFILE` (`.env.google-profile`, gitignored), exactly as X's does,
-the check being that the account page opens on the session; a Chrome with no
-automation attached is the only kind Google lets a person sign in through:
+the check being that the account page opens on the session and names the
+test account; a Chrome with no automation attached is the only kind Google
+lets a person sign in through:
 
 ```sh
 GOOGLE_COOKIE_EXPORT_OUT=.env.google-cookies.json \
-  cargo test -p ceremony-tests --test selfcheck \
+  cargo test --test ceremony \
   browser::google::tests::a_fresh_google_session_is_exported_for_the_secret -- --ignored --exact --nocapture
 ```
 
@@ -161,23 +168,24 @@ With `GOOGLE_COOKIE_EXPORT_OUT` the JSON is written there whole or not at all
 and nothing else is printed; without it the base64 `GOOGLE_TEST_ALICE_COOKIES`
 value is printed instead.
 
-The browser's fragment handling can be checked without an account against a
-local redirect fixture:
+The browser's fragment handling, and the one client identity the disguised
+Chrome presents in its headers and to a page's scripts, are checked without an
+account against loopback fixtures:
 
 ```sh
-cargo test -p ceremony-tests --test selfcheck \
-  browser::google::tests::chrome_preserves_the_redirect_fragment -- --ignored --exact
+cargo test --test ceremony -- --ignored --exact \
+  browser::google::tests::chrome_preserves_the_redirect_fragment \
+  browser::person::chrome_tells_one_story
 ```
 
 ## Lifting the crate out
 
-Everything the crate needs is declared in its own `Cargo.toml`, with one
-exception Cargo allows only a workspace root: the `[patch]` tables that pin
-the `tlsn` and `mpz` revisions `libid-tlsn` is built against. A repository
-taking this crate copies both tables from this repository's root `Cargo.toml`
-into its own root manifest, keeping the revisions the pinned `libid-tlsn` tag
-names. Relative paths in the settings -- the Google profile, cookie files,
-traces -- resolve against the directory the tests run from.
+Everything the library needs is declared in its own `Cargo.toml`, the
+`[patch]` tables that pin the `tlsn` and `mpz` revisions `libid-tlsn` is
+built against included. A repository taking this crate into a workspace of
+its own moves those tables to that workspace's root manifest, which is the
+only place Cargo reads them, keeping the revisions the pinned `libid-tlsn` tag
+names. `tests/ceremony` is this repository's host and stays behind.
 
 The two platforms that restore a saved session share its shape: a cookie list
 as a browser exports it, parsed by `browser::cookies` for the hosts the

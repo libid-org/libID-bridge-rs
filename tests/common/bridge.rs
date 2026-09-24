@@ -1,5 +1,7 @@
 //! The bridge as a process: the binary started on a configuration file, and
-//! plain HTTP/1.1 requests to it over TCP.
+//! plain HTTP/1.1 requests to it over TCP. The binary is the one the
+//! including module's `binary()` names: this package's own for its tests,
+//! and the one the live ceremony suite builds for its host.
 
 use std::{
     io::{
@@ -28,15 +30,13 @@ use std::{
     time::Duration,
 };
 
-use super::ScratchFile;
-
 /// How long a started bridge has to say where it listens.
 const STARTUP_BUDGET: Duration = Duration::from_secs(30);
 
 /// The binary's command on an environment carrying nothing but the loopback
 /// port to bind and the log filter, and no configuration file.
 fn unconfigured() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_libid-bridge-rs"));
+    let mut command = Command::new(super::binary());
     command
         .env_clear()
         // The coverage profile path, when the test runs under one.
@@ -237,5 +237,33 @@ impl Reply {
             .iter()
             .find(|(n, _)| *n == name)
             .map(|(_, v)| v.as_str())
+    }
+}
+
+/// A file for the duration of a test, removed when the test lets go of it.
+pub struct ScratchFile(std::path::PathBuf);
+
+impl ScratchFile {
+    /// `contents`, in a file of this process's own.
+    pub fn holding(contents: &str) -> ScratchFile {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "libid-{}-{}.toml",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::write(&path, contents).expect("a scratch configuration file");
+        ScratchFile(path)
+    }
+
+    /// Where it is.
+    pub fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
     }
 }

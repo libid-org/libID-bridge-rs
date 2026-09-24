@@ -406,9 +406,9 @@ impl Platform for Authorization<'_> {
             assert!(
                 headed(),
                 "no saved X session supplied: set X_TEST_ALICE_COOKIES or \
-                 X_TEST_ALICE_COOKIES_FILE from an export, `cargo test -p \
-                 ceremony-tests --test selfcheck -- --ignored --nocapture \
-                 a_fresh_x_session`"
+                 X_TEST_ALICE_COOKIES_FILE from an export, `cargo test \
+                 --test ceremony -- --ignored --nocapture a_fresh_x_session` \
+                 in ceremony-tests/"
             );
             self.sign_in(session).await;
         }

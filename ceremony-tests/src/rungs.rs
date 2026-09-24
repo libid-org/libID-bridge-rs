@@ -382,8 +382,8 @@ pub async fn a_real_x_authorization_yields_two_sessions_the_notary_attested() {
 /// Turn a cookie list exported from a browser into the
 /// `X_TEST_ALICE_COOKIES` value, so the session a person signed in for is the
 /// one the rung restores:
-/// `X_COOKIE_EXPORT=x.com.json cargo test --features live-ceremony --test
-/// ceremony -- --ignored --nocapture a_browser_export`.
+/// `X_COOKIE_EXPORT=.env.x-export.json cargo test --test ceremony --
+/// --ignored --nocapture a_browser_export`, from `ceremony-tests/`.
 pub async fn a_browser_export_becomes_the_x_secret() {
     let path = required("X_COOKIE_EXPORT");
     let export = std::fs::read_to_string(&path)
@@ -398,8 +398,8 @@ pub async fn a_browser_export_becomes_the_x_secret() {
 /// sign-in opens a Chrome for a person to sign in once; after that the export
 /// needs nobody. Written as JSON to `X_COOKIE_EXPORT_OUT` when that names a
 /// path, or printed as the `X_TEST_ALICE_COOKIES` value otherwise. Run by
-/// name, ignored otherwise: `cargo test -p ceremony-tests --test selfcheck --
-/// --ignored --nocapture a_fresh_x_session`.
+/// name, ignored otherwise: `cargo test --test ceremony -- --ignored
+/// --nocapture a_fresh_x_session`, from `ceremony-tests/`.
 pub async fn a_fresh_x_session_is_exported_for_the_secret() {
     let account = browser::x::Account::for_export("X_TEST_ALICE");
     let authorization = browser::x::Authorization {

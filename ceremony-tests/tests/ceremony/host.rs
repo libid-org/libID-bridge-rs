@@ -1,8 +1,28 @@
-//! The deployment under test: the binary on a configuration file naming the
+//! The deployment under test: this repository's binary, built from its own
+//! manifest, on a configuration file naming the testnet Distribution and the
 //! App's public client id and credential from the environment.
 
-use libid_bridge_rs::routes::CONFIG_PATH;
+#[path = "../../../tests/common/bridge.rs"]
+// The host uses its part of the module.
+#[allow(dead_code)]
+mod bridge;
 
+use std::{
+    path::{
+        Path,
+        PathBuf,
+    },
+    process::{
+        Command,
+        Stdio,
+    },
+    sync::OnceLock,
+};
+
+use bridge::{
+    Bridge,
+    Reply,
+};
 use ceremony_tests::{
     env::{
         logging,
@@ -11,14 +31,45 @@ use ceremony_tests::{
     Deployment,
     Published,
 };
+use libid_bridge_rs::routes::CONFIG_PATH;
 
-use super::common::{
-    bridge::{
-        Bridge,
-        Reply,
-    },
-    Distribution,
-};
+/// The Distribution the bridge under test serves the callback document of:
+/// libID's testnet one. The rungs read the configuration alone, which the
+/// bridge answers whether or not a retrieval has succeeded.
+const CCDP_ORIGIN: &str = "https://testnet.ccdp.lib.id";
+
+/// The binary [`bridge`] starts: built once per run from the repository's
+/// manifest, into the repository's own target directory, so the bridge under
+/// test is always the checkout's.
+pub fn binary() -> PathBuf {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+            let built = Command::new(env!("CARGO"))
+                .args([
+                    "build",
+                    "--locked",
+                    "--bin",
+                    "libid-bridge-rs",
+                    "--message-format=json-render-diagnostics",
+                    "--manifest-path",
+                ])
+                .arg(root.join("Cargo.toml"))
+                .arg("--target-dir")
+                .arg(root.join("target"))
+                .stderr(Stdio::inherit())
+                .output()
+                .expect("cargo runs");
+            assert!(built.status.success(), "the bridge builds");
+            String::from_utf8_lossy(&built.stdout)
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .find_map(|message| message["executable"].as_str().map(PathBuf::from))
+                .expect("cargo names the binary it built")
+        })
+        .clone()
+}
 
 /// The application origin the bridge under test admits, and the one the
 /// suite reads the configuration as.
@@ -53,7 +104,7 @@ pub struct Host {
 }
 
 impl Host {
-    /// The binary on a configuration naming the shared Distribution and the
+    /// The binary on a configuration naming the testnet Distribution and the
     /// App, its client secret in the github table as the credential to
     /// publish.
     pub async fn attesting() -> Host {
@@ -63,7 +114,7 @@ impl Host {
              ccdp_origin = \"{}\"\n\
              [[platforms]]\nid = \"github\"\nclient_id = \"{}\"\nversions = [1]\n\
              client_credential = \"{}\"\n",
-            Distribution::shared().origin(),
+            CCDP_ORIGIN,
             required("GH_OAUTH_CLIENT_ID"),
             required("GH_OAUTH_CLIENT_SECRET"),
         );

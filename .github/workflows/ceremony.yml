@@ -1,13 +1,16 @@
 name: Live ceremony
 
-# The suite behind `--features live-ceremony`: real MPC-TLS sessions through
-# an in-process notary against github.com and api.x.com, with the bridge
-# under test publishing the configuration. Five jobs:
+# The live ceremony suite, ceremony-tests, a workspace of its own: real
+# MPC-TLS sessions through an in-process notary against github.com and
+# api.x.com, with this repository's bridge under test publishing the
+# configuration. Six jobs, each working in ceremony-tests/:
 #
+#   * suite (pull requests): the crate's formatting, lints and hermetic
+#     tests, and the Chrome checks against loopback fixtures;
 #   * gate: which jobs' settings this run can read;
 #   * refusals (pull requests): the rungs that need no account;
-#   * full (nightly and dispatched): every rung but X's, the GitHub
-#     authorization included;
+#   * full (nightly, and dispatched with `full`): every rung but X's, the
+#     GitHub authorization included;
 #   * x (weekly, and dispatched with `x`): the X authorization, from the
 #     saved X session alone;
 #   * google (dispatched with `google`): the Google identity authorization,
@@ -28,6 +31,10 @@ on:
     - cron: "47 4 * * 0"
   workflow_dispatch:
     inputs:
+      full:
+        description: "Run every rung but X's, the GitHub authorization included"
+        type: boolean
+        default: true
       x:
         description: "Run the X rung: a real X authorization and the two notarized sessions"
         type: boolean
@@ -39,8 +46,11 @@ on:
 
 concurrency:
   # Superseded pushes stop burning minutes immediately. The two schedules land
-  # on the same ref and must not cancel each other.
-  group: ceremony-${{ github.head_ref || github.ref }}-${{ github.event.schedule }}
+  # on the same ref and must not cancel each other, and a dispatch is a run of
+  # its own that no later dispatch cancels mid-authorization.
+  group: >-
+    ceremony-${{ github.event_name == 'workflow_dispatch' && github.run_id ||
+    format('{0}-{1}', github.head_ref || github.ref, github.event.schedule) }}
   cancel-in-progress: true
 
 env:
@@ -53,14 +63,69 @@ env:
   RUST_VERSION: 1.97.1
   # The Chrome the authorization rungs drive: the runner image's own.
   CHROME: /usr/bin/google-chrome
+  # Nightly is for `cargo +"$NIGHTLY" fmt` ONLY; see ci.yml.
+  NIGHTLY: nightly-2026-08-10
+
+defaults:
+  run:
+    working-directory: ceremony-tests
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Suite: what the crate can check without an account or a platform. The
+  # server's own CI leaves this crate out: its git dependencies are resolved
+  # here alone.
+  # ---------------------------------------------------------------------------
+  suite:
+    name: Suite checks
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Nightly first, stable second: this action makes the LAST toolchain it
+      # installs the default.
+      - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
+        with:
+          toolchain: ${{ env.NIGHTLY }}
+          components: rustfmt
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            ceremony-tests -> target
+            . -> target
+          key: live-ceremony
+
+      - name: Formatting (nightly rustfmt)
+        run: cargo +"$NIGHTLY" fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Hermetic tests
+        run: cargo test --locked --lib
+
+      - name: Chrome against loopback fixtures
+        run: >
+          cargo test --locked --test ceremony -- --ignored --exact
+          browser::person::chrome_tells_one_story
+          browser::google::tests::chrome_preserves_the_redirect_fragment
+
+  # ---------------------------------------------------------------------------
   # Gate: whether each job's settings are available to this run. They are not
   # on a pull request from a fork, and not in a repository without them. `go`
-  # is the GitHub App's client secret, the credential the bridge publishes;
-  # `account` the GitHub test account; `x` the X app, account and saved
-  # session. A pull-request or scheduled job whose settings are absent is
+  # is the GitHub App -- its client id, and its client secret, the credential
+  # the bridge publishes -- and the public origin its callback is registered
+  # under; `account` the GitHub test account; `x` the X app, its redirect URI,
+  # and the account and its saved session. Each is every setting its rungs
+  # read as required. A pull-request or scheduled job whose settings are absent is
   # skipped, and says so here as a notice; a dispatched job runs and fails on
   # a missing setting.
   # ---------------------------------------------------------------------------
@@ -72,14 +137,20 @@ jobs:
       go: ${{ steps.check.outputs.go }}
       account: ${{ steps.check.outputs.account }}
       x: ${{ steps.check.outputs.x }}
+    defaults:
+      run:
+        working-directory: .
     steps:
       - name: Which settings this run can read
         id: check
         env:
+          GH_APP: ${{ secrets.GH_OAUTH_CLIENT_ID }}
           SECRET: ${{ secrets.GH_OAUTH_CLIENT_SECRET }}
+          PUBLIC_ORIGIN: ${{ vars.LIBID_TEST_PUBLIC_ORIGIN }}
           GH_USERNAME: ${{ secrets.GH_TEST_ALICE_USERNAME }}
           GH_PASSWORD: ${{ secrets.GH_TEST_ALICE_PASSWORD }}
           X_APP: ${{ secrets.X_OAUTH_CLIENT_ID }}
+          X_REDIRECT: ${{ vars.LIBID_TEST_X_REDIRECT_URI }}
           X_USERNAME: ${{ secrets.X_TEST_ALICE_USERNAME }}
           X_PASSWORD: ${{ secrets.X_TEST_ALICE_PASSWORD }}
           X_COOKIES: ${{ secrets.X_TEST_ALICE_COOKIES }}
@@ -103,12 +174,12 @@ jobs:
             echo true
           }
 
-          available go "$(all_set "$SECRET")" \
-            "GH_OAUTH_CLIENT_SECRET is absent: the refusal and GitHub rungs are skipped"
+          available go "$(all_set "$GH_APP" "$SECRET" "$PUBLIC_ORIGIN")" \
+            "GH_OAUTH_CLIENT_ID, GH_OAUTH_CLIENT_SECRET or LIBID_TEST_PUBLIC_ORIGIN is absent: the refusal and GitHub rungs are skipped"
           available account "$(all_set "$GH_USERNAME" "$GH_PASSWORD")" \
             "The GitHub test account is absent: a scheduled GitHub authorization is skipped"
-          available x "$(all_set "$X_APP" "$X_USERNAME" "$X_PASSWORD" "$X_COOKIES")" \
-            "The X app, account or saved session is absent: the weekly X rung is skipped"
+          available x "$(all_set "$X_APP" "$X_REDIRECT" "$X_USERNAME" "$X_PASSWORD" "$X_COOKIES")" \
+            "The X app, its redirect URI, the account or its saved session is absent: the weekly X rung is skipped"
 
   # ---------------------------------------------------------------------------
   # Refusals: a refused code and a refused credential each fail the token
@@ -130,6 +201,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          workspaces: |
+            ceremony-tests -> target
+            . -> target
           key: live-ceremony
 
       - name: Refused code, refused credential, refused bearers
@@ -138,18 +212,18 @@ jobs:
           GH_OAUTH_CLIENT_SECRET: ${{ secrets.GH_OAUTH_CLIENT_SECRET }}
           LIBID_TEST_PUBLIC_ORIGIN: ${{ vars.LIBID_TEST_PUBLIC_ORIGIN }}
         run: >
-          cargo test --locked --features live-ceremony --test ceremony --
+          cargo test --locked --test ceremony --
           --test-threads=1 --skip github_authorization --skip x_authorization
 
   # ---------------------------------------------------------------------------
   # Full: every rung but X's, one at a time, the GitHub authorization through
-  # the test account included. Nightly and on every dispatch.
+  # the test account included. Nightly, and on a dispatch with `full`.
   # ---------------------------------------------------------------------------
   full:
     name: Every rung
     needs: gate
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && inputs.full) ||
       (github.event_name == 'schedule' && github.event.schedule != '47 4 * * 0' &&
        needs.gate.outputs.go == 'true' && needs.gate.outputs.account == 'true')
     runs-on: ubuntu-latest
@@ -163,6 +237,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          workspaces: |
+            ceremony-tests -> target
+            . -> target
           key: live-ceremony
 
       - name: Every rung, one at a time
@@ -174,7 +251,7 @@ jobs:
           GH_TEST_ALICE_PASSWORD: ${{ secrets.GH_TEST_ALICE_PASSWORD }}
           GH_TEST_ALICE_TOTP_SECRET: ${{ secrets.GH_TEST_ALICE_TOTP_SECRET }}
         run: >
-          cargo test --locked --features live-ceremony --test ceremony --
+          cargo test --locked --test ceremony --
           --test-threads=1 --skip x_authorization
 
   # ---------------------------------------------------------------------------
@@ -200,6 +277,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          workspaces: |
+            ceremony-tests -> target
+            . -> target
           key: live-ceremony
 
       - name: A real X authorization and its two notarized sessions
@@ -212,7 +292,7 @@ jobs:
           X_TEST_ALICE_COOKIES: ${{ secrets.X_TEST_ALICE_COOKIES }}
           X_CHALLENGE_TRACE: ${{ runner.temp }}/x-challenge
         run: >
-          cargo test --locked --features live-ceremony --test ceremony --
+          cargo test --locked --test ceremony --
           --test-threads=1 --nocapture x_authorization
 
       # A screenshot of X's security check, taken only when it times out; the
@@ -246,11 +326,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          workspaces: |
+            ceremony-tests -> target
+            . -> target
           key: live-ceremony
 
       - name: Chrome preserves the redirect fragment
         run: >
-          cargo test --locked --features live-ceremony --test ceremony
+          cargo test --locked --test ceremony
           browser::google::tests::chrome_preserves_the_redirect_fragment
           -- --ignored --exact
 
@@ -261,6 +344,6 @@ jobs:
           GOOGLE_TEST_ALICE_EMAIL: ${{ secrets.GOOGLE_TEST_ALICE_EMAIL }}
           GOOGLE_TEST_ALICE_COOKIES: ${{ secrets.GOOGLE_TEST_ALICE_COOKIES }}
         run: >
-          cargo test --locked --features live-ceremony --test ceremony
+          cargo test --locked --test ceremony
           google::a_real_google_authorization_returns_a_verified_id_token
           -- --ignored --exact

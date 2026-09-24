@@ -1,17 +1,14 @@
-//! The live ceremony suite, run against this bridge: the rungs of
-//! `ceremony-tests`, each under the name CI selects it by, with the bridge as
-//! the deployment under test. Built only with `--features live-ceremony`;
-//! needs `GH_OAUTH_CLIENT_ID`, `GH_OAUTH_CLIENT_SECRET` (the App's client
+//! The live ceremony suite: the rungs of `ceremony-tests`, each under the
+//! name CI selects it by, with this repository's bridge as the deployment
+//! under test, and the exports and Chrome checks that need no deployment. Run
+//! from `ceremony-tests/`, where relative paths in its settings resolve; the
+//! rungs need `GH_OAUTH_CLIENT_ID`, `GH_OAUTH_CLIENT_SECRET` (the App's client
 //! secret, which the bridge publishes as the public `clientCredential`) and
 //! `LIBID_TEST_PUBLIC_ORIGIN`, for the GitHub authorization rung the test
 //! account (`GH_TEST_ALICE_*`) and a Chrome, and for the X authorization rung
 //! `X_OAUTH_CLIENT_ID`, `LIBID_TEST_X_REDIRECT_URI` and the X test account
 //! (`X_TEST_ALICE_*`). A missing variable fails the run.
 
-#[path = "../common/mod.rs"]
-// Each suite uses its part of the module.
-#[allow(dead_code)]
-mod common;
 mod host;
 
 use ceremony_tests::rungs;
@@ -54,18 +51,14 @@ async fn a_real_x_authorization_yields_two_sessions_the_notary_attested() {
     rungs::a_real_x_authorization_yields_two_sessions_the_notary_attested().await
 }
 
-/// Run by name, ignored otherwise:
-/// `X_COOKIE_EXPORT=x.com.json cargo test --features live-ceremony --test
-/// ceremony -- --ignored --nocapture a_browser_export`.
+/// Run by name, ignored otherwise; the crate's README gives the command.
 #[tokio::test]
 #[ignore]
 async fn a_browser_export_becomes_the_x_secret() {
     rungs::a_browser_export_becomes_the_x_secret().await
 }
 
-/// Run by name, ignored otherwise:
-/// `cargo test --features live-ceremony --test ceremony -- --ignored
-/// --nocapture a_fresh_x_session`.
+/// Run by name, ignored otherwise; the crate's README gives the command.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
 async fn a_fresh_x_session_is_exported_for_the_secret() {
@@ -82,9 +75,17 @@ mod google {
     }
 }
 
-/// Two checks of the crate's browser layer, under the module paths the
+/// The checks of the crate's browser layer, under the module paths the
 /// workflow and the README select with `--exact`.
 mod browser {
+    pub mod person {
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "requires Chrome and local sockets; no account or external network"]
+        async fn chrome_tells_one_story() {
+            ceremony_tests::browser::person::chrome_tells_one_story().await
+        }
+    }
+
     pub mod google {
         mod tests {
             #[tokio::test(flavor = "multi_thread")]

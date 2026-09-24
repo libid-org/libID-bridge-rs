@@ -154,7 +154,7 @@ is submitted at most once.
 
 ```sh
 cargo test --locked --test ceremony \
-  google::a_real_google_authorization_returns_a_verified_id_token -- --ignored --exact
+  a_real_google_authorization_returns_a_verified_id_token -- --ignored --exact
 ```
 
 The rung captures the fragment through Chrome's redirect event, closes the
@@ -168,7 +168,8 @@ generation, trusted on-chain modulus membership, or claim submission.
 Dispatch `ceremony.yml` with `google=true` to run this on a hosted runner. Set
 client ID, email, and base64 cookies as repository secrets, and the redirect URI
 as a repository variable with the names above. The job has no gate: a
-missing setting fails it rather than skipping it. The Google rung is ignored in ordinary runs until explicitly selected.
+missing setting fails it rather than skipping it. The Google rung is ignored
+in ordinary runs until explicitly selected.
 
 The session the rung restores comes from a dedicated Chrome profile,
 `GOOGLE_PROFILE` (`.env.google-profile`, gitignored), exactly as X's does,
@@ -191,8 +192,8 @@ account against loopback fixtures:
 
 ```sh
 cargo test --test ceremony -- --ignored --exact \
-  browser::google::tests::chrome_preserves_the_redirect_fragment \
-  browser::person::chrome_tells_one_story
+  chrome_preserves_the_redirect_fragment \
+  chrome_tells_one_story
 ```
 
 ## Lifting the crate out

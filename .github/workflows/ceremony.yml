@@ -119,8 +119,8 @@ jobs:
       - name: Chrome against loopback fixtures
         run: >
           cargo test --locked --test ceremony -- --ignored --exact
-          browser::person::chrome_tells_one_story
-          browser::google::tests::chrome_preserves_the_redirect_fragment
+          chrome_tells_one_story
+          chrome_preserves_the_redirect_fragment
 
   # ---------------------------------------------------------------------------
   # Gate: whether each job's settings are available to this run. They are not
@@ -341,7 +341,7 @@ jobs:
       - name: Chrome preserves the redirect fragment
         run: >
           cargo test --locked --test ceremony
-          browser::google::tests::chrome_preserves_the_redirect_fragment
+          chrome_preserves_the_redirect_fragment
           -- --ignored --exact
 
       - name: Google authorization and its verified ID token
@@ -352,5 +352,5 @@ jobs:
           GOOGLE_TEST_ALICE_COOKIES: ${{ secrets.GOOGLE_TEST_ALICE_COOKIES }}
         run: >
           cargo test --locked --test ceremony
-          google::a_real_google_authorization_returns_a_verified_id_token
+          a_real_google_authorization_returns_a_verified_id_token
           -- --ignored --exact

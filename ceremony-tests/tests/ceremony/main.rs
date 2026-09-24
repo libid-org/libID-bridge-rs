@@ -76,45 +76,29 @@ async fn a_real_x_authorization_yields_two_sessions_the_notary_attested() {
     .await
 }
 
-/// The Google rung, under the module path CI selects with `--exact`.
-mod google {
-    use super::*;
-
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "requires Google client settings and saved session; explicit live run"]
-    async fn a_real_google_authorization_returns_a_verified_id_token() {
-        let ((app, account), session) = settings::load(|get| {
-            both(
-                both(settings::google_app(get), settings::google_account(get)),
-                settings::google_session(get),
-            )
-        });
-        ceremony_tests::google::a_real_google_authorization_returns_a_verified_id_token(
-            &app, &account, &session,
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Google client settings and saved session; explicit live run"]
+async fn a_real_google_authorization_returns_a_verified_id_token() {
+    let ((app, account), session) = settings::load(|get| {
+        both(
+            both(settings::google_app(get), settings::google_account(get)),
+            settings::google_session(get),
         )
-        .await
-    }
+    });
+    ceremony_tests::google::a_real_google_authorization_returns_a_verified_id_token(
+        &app, &account, &session,
+    )
+    .await
 }
 
-/// The checks of the crate's browser layer, under the module paths the
-/// workflow and the README select with `--exact`.
-mod browser {
-    pub mod person {
-        #[tokio::test(flavor = "multi_thread")]
-        #[ignore = "requires Chrome and local sockets; no account or external network"]
-        async fn chrome_tells_one_story() {
-            ceremony_tests::browser::person::chrome_tells_one_story().await
-        }
-    }
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Chrome and local sockets; no account or external network"]
+async fn chrome_tells_one_story() {
+    ceremony_tests::browser::person::chrome_tells_one_story().await
+}
 
-    pub mod google {
-        mod tests {
-            #[tokio::test]
-            #[ignore = "requires Chrome and local sockets; no account or external network"]
-            async fn chrome_preserves_the_redirect_fragment() {
-                ceremony_tests::browser::google::chrome_preserves_the_redirect_fragment()
-                    .await
-            }
-        }
-    }
+#[tokio::test]
+#[ignore = "requires Chrome and local sockets; no account or external network"]
+async fn chrome_preserves_the_redirect_fragment() {
+    ceremony_tests::browser::google::chrome_preserves_the_redirect_fragment().await
 }

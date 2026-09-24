@@ -17,25 +17,83 @@ use serde::{
 use super::Session;
 use crate::env::optional;
 
-/// One cookie of a saved session. `same_site` is absent where the browser
+/// One cookie of a saved session, in any spelling an export uses: each field
+/// under its snake_case or camelCase name, `expirationDate` for `expires`,
+/// `sameSite` in any case (see [`same_site`]), `partitionKey` as an object or
+/// a bare site (see [`partition`]). `same_site` is absent where the browser
 /// reported none; `expires` is `0` for a session cookie; `partition_key` is
 /// absent for an unpartitioned cookie, and a partitioned one is restored into
 /// its partition, not beside its unpartitioned namesake.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Stored {
+    #[serde(alias = "Name")]
     pub name: String,
+    #[serde(alias = "Value")]
     pub value: String,
     /// With a leading dot for a domain cookie; the host alone for a host-only
     /// one.
+    #[serde(alias = "Domain")]
     pub domain: String,
+    #[serde(alias = "Path", default = "root")]
     pub path: String,
+    #[serde(alias = "Secure", default = "yes")]
     pub secure: bool,
+    #[serde(alias = "httpOnly", default)]
     pub http_only: bool,
+    #[serde(alias = "sameSite", default, deserialize_with = "same_site")]
     pub same_site: Option<CookieSameSite>,
-    #[serde(default)]
+    #[serde(alias = "expirationDate", default)]
     pub expires: f64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        alias = "partitionKey",
+        default,
+        deserialize_with = "partition",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub partition_key: Option<CookiePartitionKey>,
+}
+
+fn root() -> String {
+    "/".into()
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// `sameSite` in any case, `no_restriction` as `None`; anything else, and
+/// its absence, is unspecified.
+fn same_site<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<CookieSameSite>, D::Error> {
+    let spelled: Option<String> = Option::deserialize(d)?;
+    Ok(
+        match spelled.unwrap_or_default().to_ascii_lowercase().as_str() {
+            "strict" => Some(CookieSameSite::Strict),
+            "lax" => Some(CookieSameSite::Lax),
+            "none" | "no_restriction" => Some(CookieSameSite::None),
+            _ => None,
+        },
+    )
+}
+
+/// A partition key as CDP reports it, an object naming its top-level site,
+/// or that site alone.
+fn partition<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<CookiePartitionKey>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Spelled {
+        Site(String),
+        Key(CookiePartitionKey),
+    }
+    Ok(
+        Option::<Spelled>::deserialize(d)?.map(|spelled| match spelled {
+            Spelled::Site(site) => CookiePartitionKey::new(site, false),
+            Spelled::Key(key) => key,
+        }),
+    )
 }
 
 impl Stored {
@@ -102,82 +160,32 @@ impl Stored {
 }
 
 /// The cookies of `export` for the hosts `keep` admits: a list, or
-/// Playwright's `storageState` carrying one under `cookies`; each field under
-/// its camelCase or snake_case name; `sameSite` in any spelling, absent where
-/// unspecified; `partitionKey` as CDP reports it, an object naming its
-/// top-level site, or that site alone. An expired cookie is left out, as
-/// Chrome would drop it on arrival.
+/// Playwright's `storageState` carrying one under `cookies`, each cookie as
+/// [`Stored`] reads it. An expired cookie is left out, as Chrome would drop
+/// it on arrival.
 pub fn parse(
     export: &[u8],
     keep: impl Fn(&str) -> bool,
 ) -> Result<Vec<Stored>, &'static str> {
-    let document: serde_json::Value =
-        serde_json::from_slice(export).map_err(|_| "invalid export JSON")?;
-    let list = document
-        .get("cookies")
-        .unwrap_or(&document)
-        .as_array()
-        .ok_or("expected a cookie list, or one under `cookies`")?;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Export {
+        List(Vec<Stored>),
+        State { cookies: Vec<Stored> },
+    }
+    let (Export::List(cookies) | Export::State { cookies }) =
+        serde_json::from_slice(export).map_err(|_| {
+            "expected a cookie list, or one under `cookies`, each naming its name, \
+             value and domain"
+        })?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or_default();
-    let mut cookies = Vec::new();
-    for item in list {
-        let field = |names: &[&str]| names.iter().find_map(|n| item.get(*n));
-        let text = |names: &[&str]| field(names).and_then(|v| v.as_str());
-        let (Some(name), Some(value), Some(domain)) = (
-            text(&["name", "Name"]),
-            text(&["value", "Value"]),
-            text(&["domain", "Domain"]),
-        ) else {
-            return Err("a cookie names its name, value and domain");
-        };
-        if !keep(domain.trim_start_matches('.')) {
-            continue;
-        }
-        let expires = field(&["expires", "expirationDate"])
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        if expires > 0.0 && expires < now {
-            continue;
-        }
-        let same_site = match text(&["sameSite", "same_site"]).unwrap_or_default() {
-            s if s.eq_ignore_ascii_case("strict") => Some(CookieSameSite::Strict),
-            s if s.eq_ignore_ascii_case("lax") => Some(CookieSameSite::Lax),
-            s if s.eq_ignore_ascii_case("none")
-                || s.eq_ignore_ascii_case("no_restriction") =>
-            {
-                Some(CookieSameSite::None)
-            }
-            _ => None,
-        };
-        cookies.push(Stored {
-            name: name.to_owned(),
-            value: value.to_owned(),
-            domain: domain.to_owned(),
-            path: text(&["path", "Path"]).unwrap_or("/").to_owned(),
-            secure: field(&["secure", "Secure"])
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true),
-            http_only: field(&["httpOnly", "http_only"])
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            same_site,
-            expires,
-            partition_key: match field(&["partitionKey", "partition_key"]) {
-                None | Some(serde_json::Value::Null) => None,
-                Some(serde_json::Value::String(site)) => {
-                    Some(CookiePartitionKey::new(site.clone(), false))
-                }
-                Some(key) => Some(
-                    serde_json::from_value(key.clone())
-                        .map_err(|_| "a partitionKey names its topLevelSite")?,
-                ),
-            },
-        });
-    }
-    Ok(cookies)
+    Ok(cookies
+        .into_iter()
+        .filter(|c| keep(c.host()) && (c.expires <= 0.0 || c.expires >= now))
+        .collect())
 }
 
 /// The saved session `prefix` names, for the hosts `keep` admits:
@@ -297,6 +305,30 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].same_site, Some(CookieSameSite::None));
         assert_eq!(list[0].expires, 4102444800.0);
+    }
+
+    /// The fields Cookie-Editor and Playwright write, extra ones and nulls
+    /// included, read as the same cookies.
+    #[test]
+    fn both_export_shapes_read_alike() {
+        let editor = parse(
+            br#"[{"domain":".x.com","expirationDate":4102444800,"hostOnly":false,
+                  "httpOnly":true,"name":"auth_token","path":"/","sameSite":null,
+                  "secure":true,"session":false,"storeId":null,"value":"fake"}]"#,
+            |_| true,
+        )
+        .unwrap();
+        let playwright = parse(
+            br#"{"cookies":[{"name":"auth_token","value":"fake","domain":".x.com",
+                              "path":"/","expires":-1,"httpOnly":true,"secure":true,
+                              "sameSite":"Lax"}],"origins":[]}"#,
+            |_| true,
+        )
+        .unwrap();
+        assert!(editor[0].http_only && playwright[0].http_only);
+        assert_eq!(editor[0].same_site, None);
+        assert_eq!(playwright[0].same_site, Some(CookieSameSite::Lax));
+        assert_eq!(playwright[0].expires, -1.0, "a session cookie is kept");
     }
 
     #[test]

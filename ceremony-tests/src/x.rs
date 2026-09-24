@@ -6,6 +6,7 @@ use axum::http::header;
 use libid_ceremony::attestation::AttestedData;
 use libid_transcript::ceremony::{
     profiles,
+    token_body,
     IdentitySession,
     TokenSession,
 };
@@ -36,7 +37,8 @@ pub const IDENTITY_SESSION: IdentitySession = match profiles::X.identity {
 };
 
 /// The token request the client sends: the body fields in the order the
-/// client writes them, `Host` from the profile's authority.
+/// profile's `token_fields` fixes, `grant_type` among them, and `Host` from
+/// the profile's authority.
 pub fn token_request(
     client_id: &str,
     code: &str,
@@ -44,13 +46,16 @@ pub fn token_request(
     code_verifier: &str,
 ) -> Request {
     let session = TOKEN_SESSION.session;
-    let body = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("grant_type", "authorization_code")
-        .append_pair("client_id", client_id)
-        .append_pair("code", code)
-        .append_pair("redirect_uri", redirect_uri)
-        .append_pair("code_verifier", code_verifier)
-        .finish();
+    let body = token_body(
+        &TOKEN_SESSION,
+        &[
+            ("client_id", client_id),
+            ("code", code),
+            ("redirect_uri", redirect_uri),
+            ("code_verifier", code_verifier),
+        ],
+    )
+    .expect("the four fields are the profile's, each nonempty");
     hyper::Request::builder()
         .method(session.method)
         .uri(format!("https://{}{}", session.authority, session.path))
@@ -80,7 +85,7 @@ pub fn identity_request(bearer: &str) -> Request {
 /// The token session, run through `notary`: `request` revealed whole, the
 /// response revealing the bearer's framing.
 pub async fn exchange(notary: &Notary, request: Request) -> Result<Exchange, Failed> {
-    Exchange::notarized(notary, request, &TOKEN_SESSION).await
+    Exchange::notarized(notary, request).await
 }
 
 /// The identity session, run through `notary` with `bearer`.
@@ -168,7 +173,7 @@ mod tests {
             b"grant_type=authorization_code&client_id=WHRlc3RjbGllbnQ6MTpjaQ&code=Y29kZQ&redirect_uri=http%3A%2F%2Flocalhost%3A4682%2Fauth%2Fcallback&code_verifier=iMSTNh6gQkRnBGlY1c0MUOsD7MCO4G8C7ph1_gIZs5I"
         );
 
-        let layout = Layout::token_request(&sent, &TOKEN_SESSION).unwrap();
+        let layout = Layout::token_request(&sent);
         let whole = 0..sent.len();
         assert_eq!(layout.reveal, std::slice::from_ref(&whole));
         assert!(layout.commit.is_empty());
@@ -210,12 +215,33 @@ mod tests {
         );
     }
 
+    /// A token body without every field the profile lists, in its order, is
+    /// refused: the verifier compares the field list whole.
+    #[test]
+    #[should_panic(expected = "the body carries the profile's fields, in its order")]
+    fn a_token_body_short_of_the_profiles_fields_is_refused() {
+        let sent = b"POST /2/oauth2/token HTTP/1.1\r\nhost: api.x.com\r\ncontent-type: application/x-www-form-urlencoded\r\n\r\ngrant_type=authorization_code&code_verifier=v";
+        let recv_layout = Layout::token_response(TOKEN_RECV).unwrap();
+        check_token(
+            &record(
+                AUTHORITY,
+                sent,
+                TOKEN_RECV,
+                &Layout::token_request(sent),
+                &recv_layout,
+            ),
+            sent.len(),
+            TOKEN_RECV.len(),
+            &bearer_in(TOKEN_RECV, "SECRETBEARER"),
+        );
+    }
+
     /// A record revealing the bearer is refused.
     #[test]
     #[should_panic(expected = "exactly one commitment is framed as the bearer")]
     fn a_token_record_that_reveals_the_bearer_is_refused() {
-        let sent = b"POST /2/oauth2/token HTTP/1.1\r\nhost: api.x.com\r\ncontent-type: application/x-www-form-urlencoded\r\n\r\ngrant_type=authorization_code&code_verifier=v";
-        let sent_layout = Layout::token_request(sent, &TOKEN_SESSION).unwrap();
+        let sent = b"POST /2/oauth2/token HTTP/1.1\r\nhost: api.x.com\r\ncontent-type: application/x-www-form-urlencoded\r\n\r\ngrant_type=authorization_code&client_id=c&code=k&redirect_uri=r&code_verifier=v";
+        let sent_layout = Layout::token_request(sent);
         let everything = Layout {
             reveal: std::iter::once(0..TOKEN_RECV.len()).collect(),
             commit: vec![],

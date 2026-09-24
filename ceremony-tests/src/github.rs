@@ -7,6 +7,7 @@ use axum::http::header;
 use libid_ceremony::attestation::AttestedData;
 use libid_transcript::ceremony::{
     profiles,
+    token_body,
     IdentitySession,
     TokenSession,
 };
@@ -24,15 +25,12 @@ use super::{
     },
 };
 
-/// GitHub's token session: the profile's, with the request revealed whole.
-/// `client_secret` is public application configuration, not a committed
-/// suffix.
-pub const TOKEN_SESSION: TokenSession = TokenSession {
-    secret_field: None,
-    ..match profiles::GITHUB.token {
-        Some(session) => session,
-        None => panic!("the github profile notarizes a token session"),
-    }
+/// GitHub's token session, as the generated profile table declares it: the
+/// request revealed whole, `client_secret` among its fields, because the
+/// credential is public application configuration.
+pub const TOKEN_SESSION: TokenSession = match profiles::GITHUB.token {
+    Some(session) => session,
+    None => panic!("the github profile notarizes a token session"),
 };
 
 /// GitHub's identity session, as the generated profile table declares it.
@@ -52,15 +50,20 @@ pub struct TokenFields<'a> {
 }
 
 impl TokenFields<'_> {
-    /// The body: the form serialization of the five fields, in order.
+    /// The body: the form serialization of the five fields, in the order
+    /// the profile's `token_fields` fixes.
     pub fn body(&self) -> String {
-        url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("client_id", self.client_id)
-            .append_pair("code", self.code)
-            .append_pair("redirect_uri", self.redirect_uri)
-            .append_pair("code_verifier", self.code_verifier)
-            .append_pair("client_secret", self.client_secret)
-            .finish()
+        token_body(
+            &TOKEN_SESSION,
+            &[
+                ("client_id", self.client_id),
+                ("code", self.code),
+                ("redirect_uri", self.redirect_uri),
+                ("code_verifier", self.code_verifier),
+                ("client_secret", self.client_secret),
+            ],
+        )
+        .expect("the five fields are the profile's, each nonempty")
     }
 }
 
@@ -98,7 +101,7 @@ pub fn identity_request(bearer: &str) -> Request {
 /// The token session, run through `notary`: `request` revealed whole, the
 /// response revealing the bearer's framing.
 pub async fn exchange(notary: &Notary, request: Request) -> Result<Exchange, Failed> {
-    Exchange::notarized(notary, request, &TOKEN_SESSION).await
+    Exchange::notarized(notary, request).await
 }
 
 /// The identity session, run through `notary` with `bearer`.
@@ -208,7 +211,7 @@ mod tests {
             b"client_id=Iv1.0123456789abcdef&code=6b7f2c1d9e4a8035&redirect_uri=https%3A%2F%2Flocalhost%3A4682%2Fauth%2Fcallback&code_verifier=iMSTNh6gQkRnBGlY1c0MUOsD7MCO4G8C7ph1_gIZs5I&client_secret=d3b07384d113edec49eaa6238ad5ff00c1f2e3a4"
         );
 
-        let layout = Layout::token_request(&sent, &TOKEN_SESSION).unwrap();
+        let layout = Layout::token_request(&sent);
         let whole = 0..sent.len();
         assert_eq!(layout.reveal, std::slice::from_ref(&whole));
         assert!(layout.commit.is_empty());
@@ -263,7 +266,7 @@ mod tests {
         const PRETTY_ID: &[u8] = b"HTTP/1.1 200 OK\r\ncontent-type: application/json; charset=utf-8\r\n\r\n{\n  \"login\": \"Alice\",\n  \"id\": 583231\n}";
 
         let sent = wire(token_request(&FIELDS)).await;
-        let layout = Layout::token_request(&sent, &TOKEN_SESSION).unwrap();
+        let layout = Layout::token_request(&sent);
         let recv_layout = Layout::token_response(PRETTY_TOKEN).unwrap();
         assert!(
             recv_layout
@@ -376,21 +379,17 @@ mod tests {
         assert!(wrong.is_err(), "another blinder does not open it");
     }
 
-    /// A request laid out with the credential committed, the shape the
-    /// profile table declares, is refused: nothing in the request is hidden.
+    /// A request laid out with the credential committed is refused: nothing
+    /// in a public client's request is hidden.
     #[tokio::test]
     #[should_panic(expected = "a public client's request hides nothing")]
     async fn a_request_hiding_the_credential_is_refused() {
         let sent = wire(token_request(&FIELDS)).await;
-        let hidden = profiles::GITHUB
-            .token
-            .expect("the profile table declares a token session");
-        let sent_layout = Layout::token_request(&sent, &hidden).unwrap();
-        assert_eq!(
-            sent_layout.commit.len(),
-            1,
-            "the table's layout commits the credential"
-        );
+        let secret = bearer_in(&sent, FIELDS.client_secret).range;
+        let sent_layout = Layout {
+            reveal: std::iter::once(0..secret.start).collect(),
+            commit: vec![secret],
+        };
         let recv_layout = Layout::token_response(TOKEN_RECV).unwrap();
         check_token(
             &record("github.com", &sent, TOKEN_RECV, &sent_layout, &recv_layout),

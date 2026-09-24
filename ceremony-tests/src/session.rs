@@ -61,19 +61,15 @@ fn platform_error(recv: &[u8]) -> Option<String> {
 }
 
 impl Exchange {
-    /// `request` through `notary`, laid out as `token`: the request as the
-    /// profile reveals it, the response revealing the bearer's framing. A
-    /// response framing no bearer fails with the platform's `error` member
-    /// when it carries one.
+    /// `request` through `notary`: the request revealed whole, the response
+    /// revealing the bearer's framing. A response framing no bearer fails
+    /// with the platform's `error` member when it carries one.
     pub async fn notarized(
         notary: &Notary,
         request: Request,
-        token: &TokenSession,
     ) -> Result<Exchange, Failed> {
-        let token = *token;
         let session = prover::notarized(notary, request, move |sent, recv| {
-            let sent_layout =
-                Layout::token_request(sent, &token).map_err(prover::refused)?;
+            let sent_layout = Layout::token_request(sent);
             let recv_layout = Layout::token_response(recv).map_err(|e| {
                 transcript(match platform_error(recv) {
                     Some(error) => format!("{e}; the platform said: {error}"),
@@ -298,6 +294,21 @@ pub fn check_token(
         "the request line is the profile's"
     );
     assert_eq!(count(request, b"\r\n\r\n"), 1, "exactly one head boundary");
+    let boundary = request
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("one head boundary")
+        + 4;
+    let (names, values): (Vec<_>, Vec<_>) =
+        url::form_urlencoded::parse(&request[boundary..]).unzip();
+    assert_eq!(
+        names, token.token_fields,
+        "the body carries the profile's fields, in its order"
+    );
+    assert!(
+        values.iter().all(|value| !value.is_empty()),
+        "every field carries a value"
+    );
     for line in token.required_headers {
         assert_eq!(
             count(request, format!("\r\n{line}\r\n").as_bytes()),

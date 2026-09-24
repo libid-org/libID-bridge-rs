@@ -1817,18 +1817,18 @@ dependencies = [
 
 [[package]]
 name = "libid-ceremony"
-version = "0.4.0"
-source = "git+https://github.com/libid-org/libID-rs?tag=v0.4.0#82bc4e286d762531ba3ac86996db4afc6ea38f56"
+version = "0.6.0"
+source = "git+https://github.com/libid-org/libID-rs?tag=v0.6.0#4e49b414d81ef732bed153db8d574f8e4c5e39c1"
 dependencies = [
  "bincode 2.0.1",
  "libid-crypto",
- "thiserror 2.0.20",
+ "libid-transcript",
 ]
 
 [[package]]
 name = "libid-crypto"
-version = "0.4.0"
-source = "git+https://github.com/libid-org/libID-rs?tag=v0.4.0#82bc4e286d762531ba3ac86996db4afc6ea38f56"
+version = "0.6.0"
+source = "git+https://github.com/libid-org/libID-rs?tag=v0.6.0#4e49b414d81ef732bed153db8d574f8e4c5e39c1"
 dependencies = [
  "hex",
  "k256",
@@ -1839,19 +1839,18 @@ dependencies = [
 
 [[package]]
 name = "libid-profiles"
-version = "0.10.0"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b500f5875925c4bce39377730a0ffc8f66dd4d623fc7c1555411b48b2076530e"
+checksum = "8b02b0c07495c28f3842fa2e659172167ece55de866a6769ec67e1e4f7590dd8"
 
 [[package]]
 name = "libid-tlsn"
-version = "0.4.0"
-source = "git+https://github.com/libid-org/libID-rs?tag=v0.4.0#82bc4e286d762531ba3ac86996db4afc6ea38f56"
+version = "0.6.0"
+source = "git+https://github.com/libid-org/libID-rs?tag=v0.6.0#4e49b414d81ef732bed153db8d574f8e4c5e39c1"
 dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
- "libid-ceremony",
  "libid-transcript",
  "thiserror 2.0.20",
  "tlsn",
@@ -1863,10 +1862,12 @@ dependencies = [
 
 [[package]]
 name = "libid-transcript"
-version = "0.4.0"
-source = "git+https://github.com/libid-org/libID-rs?tag=v0.4.0#82bc4e286d762531ba3ac86996db4afc6ea38f56"
+version = "0.6.0"
+source = "git+https://github.com/libid-org/libID-rs?tag=v0.6.0#4e49b414d81ef732bed153db8d574f8e4c5e39c1"
 dependencies = [
+ "bincode 2.0.1",
  "httparse",
+ "libid-crypto",
  "libid-profiles",
  "serde",
  "serde_json",

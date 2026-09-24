@@ -17,10 +17,10 @@ publish = false
 # One source, one revision: libid-tlsn is git-only and its API exposes
 # libid-transcript types. The tlsn and mpz revisions they build on are pinned
 # by the [patch] tables below.
-libid-ceremony = { git = "https://github.com/libid-org/libID-rs", tag = "v0.4.0" }
-libid-crypto = { git = "https://github.com/libid-org/libID-rs", tag = "v0.4.0" }
-libid-tlsn = { git = "https://github.com/libid-org/libID-rs", tag = "v0.4.0" }
-libid-transcript = { git = "https://github.com/libid-org/libID-rs", tag = "v0.4.0" }
+libid-ceremony = { git = "https://github.com/libid-org/libID-rs", tag = "v0.6.0" }
+libid-crypto = { git = "https://github.com/libid-org/libID-rs", tag = "v0.6.0" }
+libid-tlsn = { git = "https://github.com/libid-org/libID-rs", tag = "v0.6.0" }
+libid-transcript = { git = "https://github.com/libid-org/libID-rs", tag = "v0.6.0" }
 
 # ── the Google ID token: RS256 over a JWKS fetched over verified TLS ────
 ring = "0.17"

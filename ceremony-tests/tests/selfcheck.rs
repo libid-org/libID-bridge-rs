@@ -14,6 +14,14 @@ async fn a_fresh_x_session_is_exported_for_the_secret() {
 
 /// Paths the workflow and the README select with `--exact`.
 mod browser {
+    pub mod person {
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "requires Chrome and local sockets; no account or external network"]
+        async fn chrome_tells_one_story() {
+            ceremony_tests::browser::person::chrome_tells_one_story().await
+        }
+    }
+
     pub mod google {
         mod tests {
             #[tokio::test(flavor = "multi_thread")]

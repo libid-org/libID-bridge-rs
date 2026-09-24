@@ -8,30 +8,9 @@ Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
 Object.defineProperty(navigator, 'vendor', {get: () => 'Google Inc.'});
 Object.defineProperty(navigator, 'platform', {get: () => 'MacIntel'});
 
-// The client hints match the user agent string Chrome was launched with.
-if (navigator.userAgentData) {
-  Object.defineProperty(navigator, 'userAgentData', {
-    get: () => ({
-      brands: [
-        {brand: 'Google Chrome', version: '145'},
-        {brand: 'Chromium', version: '145'},
-        {brand: 'Not:A-Brand', version: '99'},
-      ],
-      mobile: false,
-      platform: 'macOS',
-      getHighEntropyValues: () => Promise.resolve({
-        brands: [{brand: 'Google Chrome', version: '145.0.0.0'}, {brand: 'Chromium', version: '145.0.0.0'}],
-        fullVersionList: [{brand: 'Google Chrome', version: '145.0.0.0'}, {brand: 'Chromium', version: '145.0.0.0'}],
-        mobile: false,
-        platform: 'macOS',
-        platformVersion: '15.3.0',
-        architecture: 'arm',
-        model: '',
-        uaFullVersion: '145.0.0.0',
-      }),
-    }),
-  });
-}
+// The client hints are the user agent metadata `person::prepare` sets over
+// CDP, which Chrome itself reports through `navigator.userAgentData` and the
+// `sec-ch-ua` headers.
 
 // `window.chrome`, with the members a page reads off it.
 window.chrome = {

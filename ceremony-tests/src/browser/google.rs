@@ -92,8 +92,9 @@ impl Authorization {
     /// here without objection, and read again on every later export until
     /// it lapses.
     async fn fresh_cookies(&self) -> Vec<Stored> {
-        // Google honours a session only where it lets its account page open
-        // on it; a lapsed one is sent to the sign-in page instead.
+        // Google honours a session only where its account page opens on it
+        // for this account; a lapsed one is sent to the sign-in page, or
+        // shown the signed-out page on the same host, which names no account.
         let honoured = async |session: &Session| {
             signed_in(&profile::held(session, google_host).await)
                 && profile::lands_on(
@@ -102,6 +103,7 @@ impl Authorization {
                     "myaccount.google.com",
                 )
                 .await
+                && profile::carries(session, &self.email).await
         };
         profile::session(self, "Google", &self.url(), google_host, honoured)
             .await
@@ -154,10 +156,16 @@ impl Platform for Authorization {
                 .collect::<Vec<_>>()
                 .join(" ")
         );
-        assert_eq!(
-            held.len(),
-            self.cookies.len(),
-            "Chrome holds every cookie the export set"
+        let refused: Vec<_> = self
+            .cookies
+            .iter()
+            .filter(|set| !held.iter().any(|c| c.same_slot(set)))
+            .map(|c| format!("{}@{}{}", c.name, c.domain, c.path))
+            .collect();
+        assert!(
+            refused.is_empty(),
+            "Chrome holds every cookie the export set; it refused {}",
+            refused.join(" ")
         );
         // A fragment is absent from HTTP, but CDP supplies it separately.
         let mut redirect = watch_fragment(session, &self.redirect_uri).await;

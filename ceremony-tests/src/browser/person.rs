@@ -13,10 +13,6 @@ use chromiumoxide::{
             UserAgentBrandVersion,
             UserAgentMetadata,
         },
-        network::{
-            Headers,
-            SetExtraHttpHeadersParams,
-        },
         page::AddScriptToEvaluateOnNewDocumentParams,
     },
     Page,
@@ -79,6 +75,8 @@ pub fn configure(config: BrowserConfigBuilder) -> BrowserConfigBuilder {
 
 /// The automation override off, the viewport at the window's size, the user
 /// agent and its client hints, and the stealth script on every new document.
+/// The metadata here is the one source of the client hints: Chrome reports it
+/// through `navigator.userAgentData` and the `sec-ch-ua` headers alike.
 pub async fn prepare(page: &Page) {
     let _ = page
         .execute(SetAutomationOverrideParams { enabled: false })
@@ -108,7 +106,9 @@ pub async fn prepare(page: &Page) {
                 ]),
                 platform: "macOS".to_owned(),
                 platform_version: "15.3.0".to_owned(),
-                architecture: "arm".to_owned(),
+                // An Intel Mac, as the user agent, `navigator.platform` and
+                // the WebGL renderer in stealth.js all say.
+                architecture: "x86".to_owned(),
                 model: String::new(),
                 mobile: false,
                 bitness: Some("64".to_owned()),
@@ -117,13 +117,113 @@ pub async fn prepare(page: &Page) {
         })
         .await;
     let _ = page
-            .execute(SetExtraHttpHeadersParams::new(Headers::new(serde_json::json!({
-                "sec-ch-ua": "\"Chromium\";v=\"145\", \"Not:A-Brand\";v=\"99\", \"Google Chrome\";v=\"145\"",
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": "\"macOS\"",
-            }))))
-            .await;
-    let _ = page
         .execute(AddScriptToEvaluateOnNewDocumentParams::new(STEALTH))
         .await;
+}
+
+/// A Chrome presented as a person's, with nothing to authorize.
+struct Presented;
+
+impl super::Platform for Presented {
+    fn configure(&self, config: BrowserConfigBuilder) -> BrowserConfigBuilder {
+        configure(config)
+    }
+
+    async fn prepare(&self, page: &Page) {
+        prepare(page).await
+    }
+
+    fn state(&self) -> &str {
+        ""
+    }
+
+    async fn authorize(&self, _session: &mut super::Session) -> String {
+        unreachable!("a presentation authorizes nothing")
+    }
+}
+
+/// Chrome, presented as a person's, tells one story: the `sec-ch-ua` header
+/// it sends names the brands `navigator.userAgentData` lists, in the same
+/// order, and the architecture its high-entropy hints report is the Intel
+/// the platform string and the WebGL renderer claim. Needs a Chrome and a
+/// loopback socket, nothing else.
+pub async fn chrome_tells_one_story() {
+    use axum::{
+        http::HeaderMap,
+        routing::get,
+        Router,
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (sent, mut received) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route(
+                "/",
+                get(move |headers: HeaderMap| async move {
+                    let header = headers
+                        .get("sec-ch-ua")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default();
+                    let _ = sent.send(header.to_owned());
+                    axum::response::Html("<!doctype html><title>person</title>")
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+
+    let session = super::Session::open(&Presented).await;
+    session.navigate(&format!("{origin}/")).await;
+    let header =
+        tokio::time::timeout(std::time::Duration::from_secs(10), received.recv())
+            .await
+            .expect("Chrome requests the page")
+            .expect("the page's request headers");
+    // The request arrives before the document it answers exists.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while session.evaluate("document.readyState").await != "complete" {
+            tokio::time::sleep(super::POLL).await;
+        }
+    })
+    .await
+    .expect("the page loads");
+    let listed: Vec<serde_json::Value> = serde_json::from_str(
+        &session
+            .evaluate("JSON.stringify(navigator.userAgentData.brands)")
+            .await,
+    )
+    .expect("navigator.userAgentData lists its brands");
+    let brands = listed
+        .iter()
+        .map(|b| format!("{};v={}", b["brand"], b["version"]))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let architecture = session
+        .evaluate(
+            "navigator.userAgentData.getHighEntropyValues(['architecture']).then(v => v.architecture)",
+        )
+        .await;
+    let platform = session.evaluate("navigator.platform").await;
+    let renderer = session
+        .evaluate(
+            "document.createElement('canvas').getContext('webgl')?.getParameter(37446) ?? ''",
+        )
+        .await;
+    let _ = session.close().await;
+    server.abort();
+
+    assert_eq!(
+        header, brands,
+        "the header and the page list one set of brands"
+    );
+    assert!(brands.contains("\"Google Chrome\";v=\"145\""), "{brands}");
+    assert_eq!(architecture, "x86");
+    assert_eq!(platform, "MacIntel");
+    assert!(
+        renderer.is_empty() || renderer.contains("Intel"),
+        "WebGL names an Intel GPU: {renderer}"
+    );
 }

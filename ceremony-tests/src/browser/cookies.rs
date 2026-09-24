@@ -5,6 +5,7 @@ use base64::Engine;
 use chromiumoxide::cdp::browser_protocol::network::{
     Cookie as Held,
     CookieParam,
+    CookiePartitionKey,
     CookieSameSite,
     SetCookiesParams,
 };
@@ -17,7 +18,9 @@ use super::Session;
 use crate::env::optional;
 
 /// One cookie of a saved session. `same_site` is absent where the browser
-/// reported none; `expires` is `0` for a session cookie.
+/// reported none; `expires` is `0` for a session cookie; `partition_key` is
+/// absent for an unpartitioned cookie, and a partitioned one is restored into
+/// its partition, not beside its unpartitioned namesake.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Stored {
     pub name: String,
@@ -31,6 +34,8 @@ pub struct Stored {
     pub same_site: Option<CookieSameSite>,
     #[serde(default)]
     pub expires: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_key: Option<CookiePartitionKey>,
 }
 
 impl Stored {
@@ -45,7 +50,20 @@ impl Stored {
             http_only: c.http_only,
             same_site: c.same_site,
             expires: c.expires,
+            partition_key: c.partition_key,
         }
+    }
+
+    /// Whether `other` is this cookie as Chrome holds it: the same name,
+    /// domain, path and partition. The value is not compared: Chrome may
+    /// have rotated it by the time it is read.
+    pub fn same_slot(&self, other: &Stored) -> bool {
+        let site =
+            |c: &Stored| c.partition_key.as_ref().map(|k| k.top_level_site.clone());
+        self.name == other.name
+            && self.domain == other.domain
+            && self.path == other.path
+            && site(self) == site(other)
     }
 
     /// The cookie's host, without the leading dot.
@@ -71,6 +89,7 @@ impl Stored {
         param.secure = Some(self.secure);
         param.http_only = Some(self.http_only);
         param.same_site = self.same_site.clone();
+        param.partition_key = self.partition_key.clone();
         if self.expires > 0.0 {
             param.expires = Some(
                 chromiumoxide::cdp::browser_protocol::network::TimeSinceEpoch::new(
@@ -85,8 +104,9 @@ impl Stored {
 /// The cookies of `export` for the hosts `keep` admits: a list, or
 /// Playwright's `storageState` carrying one under `cookies`; each field under
 /// its camelCase or snake_case name; `sameSite` in any spelling, absent where
-/// unspecified. An expired cookie is left out, as Chrome would drop it on
-/// arrival.
+/// unspecified; `partitionKey` as CDP reports it, an object naming its
+/// top-level site, or that site alone. An expired cookie is left out, as
+/// Chrome would drop it on arrival.
 pub fn parse(
     export: &[u8],
     keep: impl Fn(&str) -> bool,
@@ -145,6 +165,16 @@ pub fn parse(
                 .unwrap_or(false),
             same_site,
             expires,
+            partition_key: match field(&["partitionKey", "partition_key"]) {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(site)) => {
+                    Some(CookiePartitionKey::new(site.clone(), false))
+                }
+                Some(key) => Some(
+                    serde_json::from_value(key.clone())
+                        .map_err(|_| "a partitionKey names its topLevelSite")?,
+                ),
+            },
         });
     }
     Ok(cookies)
@@ -283,6 +313,36 @@ mod tests {
         );
     }
 
+    /// A partitioned cookie keeps its partition through an export and back
+    /// into Chrome, and is not its unpartitioned namesake.
+    #[test]
+    fn a_partitioned_cookie_is_restored_into_its_partition() {
+        let list = parse(
+            br#"[{"name":"NID","value":"fake","domain":".google.com","path":"/",
+                  "partitionKey":{"topLevelSite":"https://google.com","hasCrossSiteAncestor":false}},
+                 {"name":"NID","value":"fake","domain":".google.com","path":"/"},
+                 {"name":"AEC","value":"fake","domain":".google.com","partitionKey":"https://google.com"}]"#,
+            google,
+        )
+        .unwrap();
+        let reparsed = parse(&json(&list), google).unwrap();
+        for list in [&list, &reparsed] {
+            assert_eq!(
+                list[0].param().partition_key.map(|k| k.top_level_site),
+                Some("https://google.com".into())
+            );
+            assert_eq!(list[1].param().partition_key, None);
+            assert!(!list[0].same_slot(&list[1]), "two slots, not one");
+            assert_eq!(
+                list[2]
+                    .partition_key
+                    .as_ref()
+                    .map(|k| k.top_level_site.as_str()),
+                Some("https://google.com")
+            );
+        }
+    }
+
     #[test]
     fn a_host_only_cookie_carries_no_domain_attribute() {
         let list = parse(
@@ -311,6 +371,7 @@ mod tests {
             http_only: true,
             same_site: Some(CookieSameSite::Lax),
             expires: 0.0,
+            partition_key: None,
         }];
         let json = json(&stored);
         let back = parse(&json, |_| true).unwrap();

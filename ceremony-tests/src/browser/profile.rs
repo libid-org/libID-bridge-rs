@@ -96,8 +96,9 @@ pub async fn session(
 }
 
 /// Whether `session`, sent to `url`, comes to rest on `host` within
-/// [`PROBE`]: the page a platform shows a signed-in session, rather than
-/// the sign-in page it redirects everyone else to.
+/// [`PROBE`], rather than on the sign-in page a platform redirects a lapsed
+/// session to. A platform may also show a signed-out visitor a page on
+/// `host`; [`carries`] tells the two apart.
 pub async fn lands_on(session: &Session, url: &str, host: &str) -> bool {
     session.navigate(url).await;
     let started = std::time::Instant::now();
@@ -109,6 +110,24 @@ pub async fn lands_on(session: &Session, url: &str, host: &str) -> bool {
             .as_deref()
             == Some(host)
         {
+            return true;
+        }
+        tokio::time::sleep(POLL).await;
+    }
+    false
+}
+
+/// Whether the page open in `session` carries `needle` in its markup within
+/// [`PROBE`], ignoring case: an account's own address, which a platform's
+/// account page names and its signed-out page cannot.
+pub async fn carries(session: &Session, needle: &str) -> bool {
+    let js = format!(
+        "document.documentElement.innerHTML.toLowerCase().includes({})",
+        serde_json::to_string(&needle.to_ascii_lowercase()).expect("a JSON string")
+    );
+    let started = std::time::Instant::now();
+    while started.elapsed() < PROBE {
+        if session.evaluate(&js).await == "true" {
             return true;
         }
         tokio::time::sleep(POLL).await;

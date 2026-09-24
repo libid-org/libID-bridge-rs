@@ -124,17 +124,9 @@ pub async fn prepare(page: &Page) {
 /// A Chrome presented as a person's, with nothing to authorize.
 struct Presented;
 
-impl super::Platform for Presented {
+impl super::Chrome for Presented {
     fn presented_as_person(&self) -> bool {
         true
-    }
-
-    fn state(&self) -> &str {
-        ""
-    }
-
-    async fn authorize(&self, _session: &mut super::Session) -> String {
-        unreachable!("a presentation authorizes nothing")
     }
 }
 

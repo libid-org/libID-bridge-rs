@@ -6,6 +6,7 @@ use std::time::Duration;
 use super::{
     budget,
     headed,
+    Chrome,
     Platform,
     Session,
     POLL,
@@ -69,6 +70,8 @@ impl Authorization<'_> {
         .into()
     }
 }
+
+impl Chrome for Authorization<'_> {}
 
 impl Platform for Authorization<'_> {
     fn state(&self) -> &str {

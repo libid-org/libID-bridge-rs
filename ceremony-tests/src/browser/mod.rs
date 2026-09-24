@@ -79,12 +79,11 @@ pub async fn within(
         .is_some()
 }
 
-/// One platform's authorization: how its Chrome is configured, and how its
-/// pages are driven from a blank tab to the redirect.
+/// How a session's Chrome is launched and each of its pages prepared.
 // A rung awaits these in its own task and never sends them across one, so
 // the futures need no auto-trait bounds.
 #[allow(async_fn_in_trait)]
-pub trait Platform {
+pub trait Chrome {
     /// Whether Chrome presents itself as a person's desktop Chrome, as
     /// [`person`] configures and prepares it.
     fn presented_as_person(&self) -> bool {
@@ -112,7 +111,14 @@ pub trait Platform {
             person::prepare(page).await;
         }
     }
+}
 
+/// One platform's authorization: the Chrome it runs in, and how its pages
+/// are driven from a blank tab to the redirect.
+// A rung awaits these in its own task and never sends them across one, so
+// the futures need no auto-trait bounds.
+#[allow(async_fn_in_trait)]
+pub trait Platform: Chrome {
     /// The `state` the authorization request carries.
     fn state(&self) -> &str;
 
@@ -197,12 +203,12 @@ const CONTROLS: &str = r#"JSON.stringify({
 }, null, 1)"#;
 
 impl Session {
-    /// A Chrome as `platform` wants it, with one blank page prepared.
-    pub async fn open(platform: &impl Platform) -> Session {
+    /// A Chrome as `chrome` wants it, with one blank page prepared.
+    pub async fn open(chrome: &impl Chrome) -> Session {
         // A profile of its own: without one, Chrome runs every session in the
         // same directory, and what one run set or was judged on reaches the
         // next run of any rung.
-        let (profile_dir, temp) = match platform.profile() {
+        let (profile_dir, temp) = match chrome.profile() {
             Some(dir) => {
                 std::fs::create_dir_all(&dir).expect("the profile directory");
                 (dir, None)
@@ -229,7 +235,7 @@ impl Session {
         if let Some(chrome) = &crate::settings::tooling().chrome {
             config = config.chrome_executable(chrome);
         }
-        let config = platform.configure(config);
+        let config = chrome.configure(config);
         let (browser, mut handler) = Browser::launch(
             config
                 .build()
@@ -251,15 +257,15 @@ impl Session {
             page,
             traced: AtomicU32::new(0),
         };
-        session.prepare(platform).await;
+        session.prepare(chrome).await;
         session
     }
 
     /// A tab the site opened becomes the driven page, prepared like the
     /// first one.
-    pub async fn adopt(&mut self, page: Page, platform: &impl Platform) {
+    pub async fn adopt(&mut self, page: Page, chrome: &impl Chrome) {
         self.page = page;
-        self.prepare(platform).await;
+        self.prepare(chrome).await;
     }
 
     /// The tabs Chrome has open now, by target.
@@ -290,13 +296,13 @@ impl Session {
         .await
     }
 
-    /// Network events on, and whatever `platform` needs on a page.
-    async fn prepare(&mut self, platform: &impl Platform) {
+    /// Network events on, and whatever `chrome` needs on a page.
+    async fn prepare(&mut self, chrome: &impl Chrome) {
         self.page
             .execute(EnableParams::default())
             .await
             .expect("network events on this page");
-        platform.prepare(&self.page).await;
+        chrome.prepare(&self.page).await;
     }
 
     /// Watch this page for a request to `redirect_uri`. Subscribed before

@@ -17,7 +17,7 @@ use chromiumoxide::{
 
 use super::{
     within,
-    Platform,
+    Chrome,
     Session,
     POLL,
 };
@@ -47,15 +47,15 @@ pub async fn held(session: &Session, keep: impl Fn(&str) -> bool) -> Vec<Cookie>
 /// Chrome launched with nothing attached to it, and is read again once the
 /// window closes.
 pub async fn session(
-    platform: &impl Platform,
+    chrome: &impl Chrome,
     name: &str,
     url: &str,
     keep: impl Fn(&str) -> bool,
     signed_in: impl AsyncFn(&Session) -> bool,
 ) -> Vec<Cookie> {
-    let profile = platform.profile().expect("an export names its profile");
+    let profile = chrome.profile().expect("an export names its profile");
     let read = || async {
-        let session = Session::open(platform).await;
+        let session = Session::open(chrome).await;
         let honoured = signed_in(&session).await;
         let cookies = held(&session, &keep).await;
         let _ = session.close().await;

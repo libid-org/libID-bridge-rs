@@ -10,6 +10,7 @@ use super::{
     found_within,
     headed,
     profile,
+    Chrome,
     Platform,
     Session,
     POLL,
@@ -137,7 +138,7 @@ impl Authorization {
     }
 }
 
-impl Platform for Authorization {
+impl Chrome for Authorization {
     fn profile(&self) -> Option<PathBuf> {
         self.profile.clone()
     }
@@ -147,7 +148,9 @@ impl Platform for Authorization {
     fn presented_as_person(&self) -> bool {
         true
     }
+}
 
+impl Platform for Authorization {
     fn state(&self) -> &str {
         &self.state
     }

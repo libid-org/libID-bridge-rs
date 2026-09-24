@@ -30,6 +30,7 @@ use super::{
     headed,
     profile,
     within,
+    Chrome,
     Platform,
     Session,
     POLL,
@@ -157,22 +158,13 @@ impl Export {
     }
 }
 
-impl Platform for Export {
+impl Chrome for Export {
     fn profile(&self) -> Option<std::path::PathBuf> {
         Some(self.profile.clone())
     }
 
     fn presented_as_person(&self) -> bool {
         true
-    }
-
-    fn state(&self) -> &str {
-        "export"
-    }
-
-    /// An export reads the profile's cookies and authorizes nothing.
-    async fn authorize(&self, _: &mut Session) -> String {
-        unreachable!("an export authorizes nothing")
     }
 }
 
@@ -385,11 +377,13 @@ impl Authorization<'_> {
     }
 }
 
-impl Platform for Authorization<'_> {
+impl Chrome for Authorization<'_> {
     fn presented_as_person(&self) -> bool {
         true
     }
+}
 
+impl Platform for Authorization<'_> {
     fn state(&self) -> &str {
         self.state
     }

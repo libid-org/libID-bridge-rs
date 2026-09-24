@@ -12,11 +12,11 @@ use chromiumoxide::{
     cdp::browser_protocol::input::{
         DispatchKeyEventParams,
         DispatchKeyEventType,
-        DispatchMouseEventParams,
-        DispatchMouseEventType,
     },
+    layout::Point,
     Page,
 };
+use rand::Rng;
 
 use super::{
     budget,
@@ -218,7 +218,7 @@ impl Authorization<'_> {
     /// tab X opens, the page's own sign-in link, the username, the password,
     /// the e-mail address if X asks, and Cloudflare's check if it runs.
     async fn sign_in(&self, session: &mut Session) {
-        let mut jitter = Jitter::seeded();
+        let mut jitter = <Jitter as rand::SeedableRng>::from_os_rng();
         let known = session.tabs().await;
         let _ = tokio::time::timeout(
             Duration::from_secs(15),
@@ -262,22 +262,29 @@ impl Authorization<'_> {
 
         if present(session, USERNAME, Duration::from_secs(10)).await {
             for _ in 0..3 {
-                let (x, y) =
-                    (200.0 + jitter.unit() * 600.0, 150.0 + jitter.unit() * 400.0);
+                let (x, y) = (
+                    200.0 + jitter.random::<f64>() * 600.0,
+                    150.0 + jitter.random::<f64>() * 400.0,
+                );
                 move_mouse(&session.page, x, y, &mut jitter).await;
-                tokio::time::sleep(Duration::from_millis(jitter.between(200, 600))).await;
+                tokio::time::sleep(Duration::from_millis(jitter.random_range(200..600)))
+                    .await;
             }
             session
                 .evaluate("window.scrollBy(0, 50 + Math.random() * 100)")
                 .await;
-            tokio::time::sleep(Duration::from_millis(jitter.between(300, 700))).await;
+            tokio::time::sleep(Duration::from_millis(jitter.random_range(300..700)))
+                .await;
             session.evaluate("window.scrollBy(0, -50)").await;
-            tokio::time::sleep(Duration::from_millis(jitter.between(200, 500))).await;
+            tokio::time::sleep(Duration::from_millis(jitter.random_range(200..500)))
+                .await;
             move_to(session, USERNAME, &mut jitter).await;
-            tokio::time::sleep(Duration::from_millis(jitter.between(200, 500))).await;
+            tokio::time::sleep(Duration::from_millis(jitter.random_range(200..500)))
+                .await;
             type_like_a_person(session, USERNAME, &self.account.username, &mut jitter)
                 .await;
-            tokio::time::sleep(Duration::from_millis(jitter.between(500, 1000))).await;
+            tokio::time::sleep(Duration::from_millis(jitter.random_range(500..1000)))
+                .await;
             session.trace("username-typed").await;
             if session.evaluate(NEXT_BUTTON).await == "not_found" {
                 press(&session.page, "Tab").await;
@@ -293,8 +300,10 @@ impl Authorization<'_> {
             match self.account.email.as_deref() {
                 Some(email) => {
                     type_like_a_person(session, CHALLENGE, email, &mut jitter).await;
-                    tokio::time::sleep(Duration::from_millis(jitter.between(300, 600)))
-                        .await;
+                    tokio::time::sleep(Duration::from_millis(
+                        jitter.random_range(300..600),
+                    ))
+                    .await;
                     press(&session.page, "Enter").await;
                     tokio::time::sleep(Duration::from_secs(2)).await;
                     session.trace("after-challenge").await;
@@ -327,9 +336,9 @@ impl Authorization<'_> {
                 .collect::<String>()
         );
         move_to(session, PASSWORD, &mut jitter).await;
-        tokio::time::sleep(Duration::from_millis(jitter.between(200, 400))).await;
+        tokio::time::sleep(Duration::from_millis(jitter.random_range(200..400))).await;
         type_like_a_person(session, PASSWORD, &self.account.password, &mut jitter).await;
-        tokio::time::sleep(Duration::from_millis(jitter.between(400, 800))).await;
+        tokio::time::sleep(Duration::from_millis(jitter.random_range(400..800))).await;
         session.trace("password-typed").await;
         click_by_text(session, &["Log in", "Continue"]).await;
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -652,19 +661,10 @@ async fn move_mouse(page: &Page, to_x: f64, to_y: f64, jitter: &mut Jitter) {
     let (mut x, mut y) = (to_x * 0.3, to_y * 0.3);
     for i in 1..=5 {
         let t = f64::from(i) / 5.0;
-        x += (to_x - x) * t + (jitter.unit() - 0.5) * 8.0;
-        y += (to_y - y) * t + (jitter.unit() - 0.5) * 8.0;
-        let _ = page
-            .execute(
-                DispatchMouseEventParams::builder()
-                    .r#type(DispatchMouseEventType::MouseMoved)
-                    .x(x)
-                    .y(y)
-                    .build()
-                    .expect("a mouse move"),
-            )
-            .await;
-        tokio::time::sleep(Duration::from_millis(jitter.between(25, 60))).await;
+        x += (to_x - x) * t + (jitter.random::<f64>() - 0.5) * 8.0;
+        y += (to_y - y) * t + (jitter.random::<f64>() - 0.5) * 8.0;
+        let _ = page.move_mouse(Point { x, y }).await;
+        tokio::time::sleep(Duration::from_millis(jitter.random_range(25..60))).await;
     }
 }
 
@@ -715,7 +715,7 @@ async fn type_like_a_person(
         for event in events {
             let _ = session.page.execute(event.expect("a key event")).await;
         }
-        tokio::time::sleep(Duration::from_millis(jitter.between(60, 180))).await;
+        tokio::time::sleep(Duration::from_millis(jitter.random_range(60..180))).await;
     }
 }
 
@@ -754,38 +754,8 @@ async fn press(page: &Page, key: &str) {
         .await;
 }
 
-/// A source of small variations: an xorshift generator seeded from the
-/// clock and the process id.
-struct Jitter(u64);
-
-impl Jitter {
-    fn seeded() -> Jitter {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("a clock at or after the epoch")
-            .as_nanos() as u64;
-        Jitter((nanos ^ u64::from(std::process::id()).rotate_left(32)) | 1)
-    }
-
-    fn next(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.0 = x;
-        x
-    }
-
-    /// A value in `[low, high)`.
-    fn between(&mut self, low: u64, high: u64) -> u64 {
-        low + self.next() % (high - low)
-    }
-
-    /// A value in `[0, 1)`.
-    fn unit(&mut self) -> f64 {
-        (self.next() >> 11) as f64 / (1u64 << 53) as f64
-    }
-}
+/// The source of the small variations in timing and pointer paths.
+type Jitter = rand::rngs::StdRng;
 
 #[cfg(test)]
 mod challenge_tests {

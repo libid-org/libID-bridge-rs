@@ -542,6 +542,7 @@ dependencies = [
  "libid-crypto",
  "libid-tlsn",
  "libid-transcript",
+ "rand 0.9.5",
  "ring",
  "serde",
  "serde_json",

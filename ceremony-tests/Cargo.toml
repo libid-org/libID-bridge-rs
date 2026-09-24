@@ -43,6 +43,8 @@ bytes = "1"
 # ── the browser ─────────────────────────────────────────────────────────
 chromiumoxide = { version = "0.7", default-features = false, features = ["tokio-runtime"] }
 totp-rs = "5"
+# The small variations in X's sign-in timing and pointer paths.
+rand = "0.9"
 tempfile = "3"
 futures-util = "0.3"
 

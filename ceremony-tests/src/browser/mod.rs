@@ -173,6 +173,9 @@ impl Session {
             }
         };
         let mut config = BrowserConfig::builder()
+            // chromiumoxide's 20 s is short for a cold CI runner starting two
+            // Chromes at once.
+            .launch_timeout(Duration::from_secs(60))
             .user_data_dir(&profile_dir)
             .arg("--no-sandbox")
             .arg("--disable-gpu")

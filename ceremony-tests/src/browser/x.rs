@@ -2,18 +2,21 @@
 //! restored from saved cookies or signed in through X's own pages, then the
 //! consent page. Chrome presents itself as a person's desktop Chrome.
 
-use std::time::{
-    Duration,
-    Instant,
+use std::{
+    ops::Range,
+    time::{
+        Duration,
+        Instant,
+    },
 };
 
 use chromiumoxide::{
-    browser::BrowserConfigBuilder,
     cdp::browser_protocol::input::{
         DispatchKeyEventParams,
         DispatchKeyEventType,
     },
     layout::Point,
+    page::ScreenshotParams,
     Page,
 };
 use rand::Rng;
@@ -25,8 +28,8 @@ use super::{
         Stored,
     },
     headed,
-    person,
     profile,
+    within,
     Platform,
     Session,
     POLL,
@@ -99,12 +102,9 @@ impl Account {
     /// (base64 of the list an export prints) or `{prefix}_COOKIES_FILE` (the
     /// JSON it writes), are optional.
     pub fn from_env(prefix: &str) -> Account {
-        let cookies = cookies::from_env(prefix, x_host).unwrap_or_default();
         Account {
-            username: required(&format!("{prefix}_USERNAME")),
-            password: required(&format!("{prefix}_PASSWORD")),
-            email: optional(&format!("{prefix}_EMAIL")),
-            cookies,
+            cookies: cookies::from_env(prefix, x_host).unwrap_or_default(),
+            ..Account::for_export(prefix)
         }
     }
 
@@ -140,16 +140,20 @@ pub struct Authorization<'a> {
 impl Authorization<'_> {
     /// The URL to open.
     pub fn url(&self) -> String {
-        let query = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("response_type", "code")
-            .append_pair("client_id", self.client_id)
-            .append_pair("redirect_uri", self.redirect_uri)
-            .append_pair("scope", "tweet.read users.read")
-            .append_pair("state", self.state)
-            .append_pair("code_challenge", self.code_challenge)
-            .append_pair("code_challenge_method", "S256")
-            .finish();
-        format!("https://x.com/i/oauth2/authorize?{query}")
+        url::Url::parse_with_params(
+            "https://x.com/i/oauth2/authorize",
+            [
+                ("response_type", "code"),
+                ("client_id", self.client_id),
+                ("redirect_uri", self.redirect_uri),
+                ("scope", "tweet.read users.read"),
+                ("state", self.state),
+                ("code_challenge", self.code_challenge),
+                ("code_challenge_method", "S256"),
+            ],
+        )
+        .expect("the authorization endpoint is a URL")
+        .into()
     }
 
     /// The session of the export profile: every x.com cookie Chrome holds
@@ -183,16 +187,9 @@ impl Authorization<'_> {
         SIGNED_IN.iter().all(|mark| text.contains(mark))
     }
 
-    /// Wait up to `within` for a signed-in X page.
-    async fn signed_in_within(session: &Session, within: Duration) -> bool {
-        let started = Instant::now();
-        while started.elapsed() < within {
-            if Self::signed_in(session).await {
-                return true;
-            }
-            tokio::time::sleep(POLL).await;
-        }
-        false
+    /// Wait up to `patience` for a signed-in X page.
+    async fn signed_in_within(session: &Session, patience: Duration) -> bool {
+        within(patience, POLL, async || Self::signed_in(session).await).await
     }
 
     /// Install the saved session on the blank page, each cookie on both
@@ -237,12 +234,12 @@ impl Authorization<'_> {
         if let Some(opened) = session.tab_opened(&known, Duration::from_secs(8)).await {
             session.adopt(opened, self).await;
         }
-        let loading = Instant::now();
-        while loading.elapsed() < Duration::from_secs(15)
-            && session.evaluate("document.readyState").await != "complete"
-        {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
+        within(
+            Duration::from_secs(15),
+            Duration::from_secs(1),
+            async || session.evaluate("document.readyState").await == "complete",
+        )
+        .await;
         tokio::time::sleep(Duration::from_secs(3)).await;
         session.evaluate(X_CONSENT).await;
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -267,24 +264,19 @@ impl Authorization<'_> {
                     150.0 + jitter.random::<f64>() * 400.0,
                 );
                 move_mouse(&session.page, x, y, &mut jitter).await;
-                tokio::time::sleep(Duration::from_millis(jitter.random_range(200..600)))
-                    .await;
+                pause(&mut jitter, 200..600).await;
             }
             session
                 .evaluate("window.scrollBy(0, 50 + Math.random() * 100)")
                 .await;
-            tokio::time::sleep(Duration::from_millis(jitter.random_range(300..700)))
-                .await;
+            pause(&mut jitter, 300..700).await;
             session.evaluate("window.scrollBy(0, -50)").await;
-            tokio::time::sleep(Duration::from_millis(jitter.random_range(200..500)))
-                .await;
+            pause(&mut jitter, 200..500).await;
             move_to(session, USERNAME, &mut jitter).await;
-            tokio::time::sleep(Duration::from_millis(jitter.random_range(200..500)))
-                .await;
+            pause(&mut jitter, 200..500).await;
             type_like_a_person(session, USERNAME, &self.account.username, &mut jitter)
                 .await;
-            tokio::time::sleep(Duration::from_millis(jitter.random_range(500..1000)))
-                .await;
+            pause(&mut jitter, 500..1000).await;
             session.trace("username-typed").await;
             if session.evaluate(NEXT_BUTTON).await == "not_found" {
                 press(&session.page, "Tab").await;
@@ -300,10 +292,7 @@ impl Authorization<'_> {
             match self.account.email.as_deref() {
                 Some(email) => {
                     type_like_a_person(session, CHALLENGE, email, &mut jitter).await;
-                    tokio::time::sleep(Duration::from_millis(
-                        jitter.random_range(300..600),
-                    ))
-                    .await;
+                    pause(&mut jitter, 300..600).await;
                     press(&session.page, "Enter").await;
                     tokio::time::sleep(Duration::from_secs(2)).await;
                     session.trace("after-challenge").await;
@@ -326,31 +315,25 @@ impl Authorization<'_> {
         };
         assert!(
             present(session, PASSWORD, patience).await,
-            "X shows the password field. On: {}\nPage: {}",
-            session.location().await,
-            session
-                .body_text()
-                .await
-                .chars()
-                .take(400)
-                .collect::<String>()
+            "X shows the password field. {}",
+            session.diagnosis().await
         );
         move_to(session, PASSWORD, &mut jitter).await;
-        tokio::time::sleep(Duration::from_millis(jitter.random_range(200..400))).await;
+        pause(&mut jitter, 200..400).await;
         type_like_a_person(session, PASSWORD, &self.account.password, &mut jitter).await;
-        tokio::time::sleep(Duration::from_millis(jitter.random_range(400..800))).await;
+        pause(&mut jitter, 400..800).await;
         session.trace("password-typed").await;
         click_by_text(session, &["Log in", "Continue"]).await;
         tokio::time::sleep(Duration::from_secs(5)).await;
         session.trace("after-log-in").await;
         self.refusal_check(session).await;
 
-        let checking = Instant::now();
-        while session.location().await.contains("/account/access")
-            && checking.elapsed() < Duration::from_secs(30)
-        {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        }
+        within(
+            Duration::from_secs(30),
+            Duration::from_secs(2),
+            async || !session.location().await.contains("/account/access"),
+        )
+        .await;
         let patience = if headed() {
             budget()
         } else {
@@ -360,14 +343,8 @@ impl Authorization<'_> {
         session.trace("signed-in").await;
         assert!(
             signed_in,
-            "X shows the signed-in page after the password. On: {}\nPage: {}",
-            session.location().await,
-            session
-                .body_text()
-                .await
-                .chars()
-                .take(400)
-                .collect::<String>()
+            "X shows the signed-in page after the password. {}",
+            session.diagnosis().await
         );
     }
 
@@ -393,12 +370,8 @@ impl Platform for Authorization<'_> {
         self.profile.clone()
     }
 
-    fn configure(&self, config: BrowserConfigBuilder) -> BrowserConfigBuilder {
-        person::configure(config)
-    }
-
-    async fn prepare(&self, page: &Page) {
-        person::prepare(page).await
+    fn presented_as_person(&self) -> bool {
+        true
     }
 
     fn state(&self) -> &str {
@@ -493,12 +466,7 @@ impl Platform for Authorization<'_> {
                 assert!(
                     !signed_in_again,
                     "X asked to sign in twice. Page: {}",
-                    session
-                        .body_text()
-                        .await
-                        .chars()
-                        .take(400)
-                        .collect::<String>()
+                    session.excerpt().await
                 );
                 self.sign_in(session).await;
                 signed_in_again = true;
@@ -548,14 +516,13 @@ async fn challenge_diagnostics(session: &Session) {
     eprintln!("X challenge diagnostics: {summary}");
     if let Some(dir) = crate::env::optional("X_CHALLENGE_TRACE") {
         let _ = std::fs::create_dir_all(&dir);
-        if let Ok(png) = session
+        let _ = session
             .page
-            .screenshot(chromiumoxide::page::ScreenshotParams::builder().build())
-            .await
-        {
-            let _ =
-                std::fs::write(std::path::Path::new(&dir).join("x-challenge.png"), png);
-        }
+            .save_screenshot(
+                ScreenshotParams::builder().build(),
+                std::path::Path::new(&dir).join("x-challenge.png"),
+            )
+            .await;
     }
 }
 
@@ -628,16 +595,12 @@ const CONSENT_CLICK: &str = r#"(() => {
     return 'absent: ' + controls.join(' ;; ').slice(0, 600);
 })()"#;
 
-/// Whether `selector` appears on the page within `within`.
-async fn present(session: &Session, selector: &str, within: Duration) -> bool {
-    let started = Instant::now();
-    while started.elapsed() < within {
-        if session.page.find_element(selector).await.is_ok() {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    false
+/// Whether `selector` appears on the page within `patience`.
+async fn present(session: &Session, selector: &str, patience: Duration) -> bool {
+    within(patience, Duration::from_millis(250), async || {
+        session.page.find_element(selector).await.is_ok()
+    })
+    .await
 }
 
 /// A trusted click on the first button whose text is one of `texts`: the
@@ -664,24 +627,25 @@ async fn move_mouse(page: &Page, to_x: f64, to_y: f64, jitter: &mut Jitter) {
         x += (to_x - x) * t + (jitter.random::<f64>() - 0.5) * 8.0;
         y += (to_y - y) * t + (jitter.random::<f64>() - 0.5) * 8.0;
         let _ = page.move_mouse(Point { x, y }).await;
-        tokio::time::sleep(Duration::from_millis(jitter.random_range(25..60))).await;
+        pause(jitter, 25..60).await;
     }
 }
 
-/// The mouse moved onto the element `selector` names.
+/// The mouse moved onto the element `selector` names, or to the middle of
+/// the window when the page has no such element.
 async fn move_to(session: &Session, selector: &str, jitter: &mut Jitter) {
-    let quoted = serde_json::Value::String(selector.to_owned()).to_string();
-    let center = session
-        .evaluate(&format!(
-            "(() => {{ const el = document.querySelector({quoted}); if (!el) return '720,450'; \
-             const r = el.getBoundingClientRect(); \
-             return Math.round(r.x + r.width / 2) + ',' + Math.round(r.y + r.height / 2); }})()"
-        ))
-        .await;
-    let mut parts = center.split(',').filter_map(|s| s.parse::<f64>().ok());
-    if let (Some(x), Some(y)) = (parts.next(), parts.next()) {
+    let at = match session.page.find_element(selector).await {
+        Ok(element) => element.clickable_point().await.ok(),
+        Err(_) => Some(Point { x: 720.0, y: 450.0 }),
+    };
+    if let Some(Point { x, y }) = at {
         move_mouse(&session.page, x, y, jitter).await;
     }
+}
+
+/// A pause of a length drawn from `millis`.
+async fn pause(jitter: &mut Jitter, millis: Range<u64>) {
+    tokio::time::sleep(Duration::from_millis(jitter.random_range(millis))).await;
 }
 
 /// `text` typed into the element `selector` names, one key at a time with

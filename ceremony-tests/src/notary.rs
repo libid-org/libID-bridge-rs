@@ -4,13 +4,7 @@
 //! record back on the session's socket. It is the notary's protocol role
 //! only: no session cap, no WebSocket transport, no JWKS, no managed signer.
 
-use std::{
-    net::SocketAddr,
-    time::{
-        SystemTime,
-        UNIX_EPOCH,
-    },
-};
+use std::net::SocketAddr;
 
 use libid_ceremony::attestation::AttestedData;
 use libid_tlsn::attest::{
@@ -126,10 +120,7 @@ async fn serve(
         transcript: &result.partial_transcript,
         authority: &result.server_name.to_string(),
         commitments: &result.transcript_commitments,
-        created_at: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("a clock at or after the epoch")
-            .as_secs(),
+        created_at: crate::unix_now().as_secs(),
     })?;
     let encoded = attested.encode()?;
     let _ = recorded.send(attested);

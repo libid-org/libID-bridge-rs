@@ -5,6 +5,10 @@
 
 use std::ops::Range;
 
+use hyper::header::{
+    self,
+    HeaderName,
+};
 use libid_ceremony::attestation::{
     AttestedData,
     DirectionBlock,
@@ -44,9 +48,58 @@ pub struct Exchange {
     pub session: Notarized<Bearer>,
 }
 
+/// The token request the client sends for `token`'s session: the profile's
+/// request line and headers, and `body`.
+pub fn token_request(token: &TokenSession, body: String) -> Request {
+    let session = token.session;
+    hyper::Request::builder()
+        .method(session.method)
+        .uri(format!("https://{}{}", session.authority, session.path))
+        .header(header::HOST, session.authority)
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header(header::ACCEPT, "application/json")
+        .header(header::CONNECTION, "close")
+        .body(http_body_util::Full::new(bytes::Bytes::from(body)))
+        .expect("every part of this request is a constant or bytes")
+}
+
+/// The identity request the client sends for `identity`'s session: the
+/// bearer first, then `accept`, then `extra` in order, then `host`.
+pub fn identity_request(
+    identity: &IdentitySession,
+    bearer: &str,
+    extra: &[(HeaderName, &str)],
+) -> Request {
+    let session = identity.session;
+    let mut request = hyper::Request::builder()
+        .method(session.method)
+        .uri(format!("https://{}{}", session.authority, session.path))
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+        .header(header::ACCEPT, "application/json");
+    for (name, value) in extra {
+        request = request.header(name, *value);
+    }
+    request
+        .header(header::HOST, session.authority)
+        .header(header::CONNECTION, "close")
+        .body(http_body_util::Full::new(bytes::Bytes::new()))
+        .expect("every part of this request is a constant or bytes")
+}
+
+/// Where the body of an HTTP message in `bytes` begins: just past the first
+/// `\r\n\r\n`, if there is one.
+pub fn head_end(bytes: &[u8]) -> Option<usize> {
+    bytes
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|at| at + 4)
+}
+
 /// A failure in the session driver's transcript vocabulary.
-fn transcript(detail: String) -> libid_tlsn::Error {
-    libid_tlsn::Error::Transcript(libid_transcript::Error::Transcript { detail })
+fn transcript(detail: impl ToString) -> libid_tlsn::Error {
+    libid_tlsn::Error::Transcript(libid_transcript::Error::Transcript {
+        detail: detail.to_string(),
+    })
 }
 
 /// The `error` member of a JSON body in `recv`, when the platform answered
@@ -77,14 +130,14 @@ impl Exchange {
                 })
             })?;
             let [anchor, closing_quote] = recv_layout.reveal.as_slice() else {
-                return Err(transcript("the response layout frames no bearer".into()));
+                return Err(transcript("the response layout frames no bearer"));
             };
             let range = anchor.end..closing_quote.start;
             if range.is_empty() {
-                return Err(transcript("the response carries an empty bearer".into()));
+                return Err(transcript("the response carries an empty bearer"));
             }
             let value = String::from_utf8(recv[range.clone()].to_vec())
-                .map_err(|_| transcript("the bearer is not UTF-8".into()))?;
+                .map_err(|_| transcript("the bearer is not UTF-8"))?;
             Ok((sent_layout, recv_layout, Bearer { range, value }))
         })
         .await?;
@@ -109,9 +162,9 @@ impl Identity {
     ) -> Result<Identity, Failed> {
         let identity = *identity;
         let session = prover::notarized(notary, request, move |sent, recv| {
-            let sent_layout = Layout::identity_request(sent).map_err(prover::refused)?;
+            let sent_layout = Layout::identity_request(sent).map_err(transcript)?;
             let recv_layout =
-                Layout::identity_response(recv, &identity).map_err(prover::refused)?;
+                Layout::identity_response(recv, &identity).map_err(transcript)?;
             Ok((sent_layout, recv_layout, ()))
         })
         .await?;
@@ -294,11 +347,7 @@ pub fn check_token(
         "the request line is the profile's"
     );
     assert_eq!(count(request, b"\r\n\r\n"), 1, "exactly one head boundary");
-    let boundary = request
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .expect("one head boundary")
-        + 4;
+    let boundary = head_end(request).expect("one head boundary");
     let (names, values): (Vec<_>, Vec<_>) =
         url::form_urlencoded::parse(&request[boundary..]).unzip();
     assert_eq!(
@@ -353,13 +402,16 @@ pub fn check_token(
 }
 
 /// What the verifier demands of an identity record of `identity`'s session
-/// over transcripts of these lengths, read with `bearer`: the account's id
-/// and handle, as revealed, the id in the shape the profile declares.
+/// over transcripts of these lengths, read with `bearer` for the account
+/// whose handle is `handle`: the id in the shape the profile declares and
+/// made of decimal digits, the handle the account's in any case. The id and
+/// handle, as revealed.
 pub fn check_identity(
     record: &AttestedData,
     sent_len: usize,
     recv_len: usize,
     bearer: &str,
+    handle: &str,
     identity: &IdentitySession,
 ) -> (String, String) {
     assert_eq!(
@@ -434,7 +486,7 @@ pub fn check_identity(
         IdShape::JsonString => format!("\"{}\":\"", identity.id_field),
         IdShape::JsonInteger => format!("\"{}\":", identity.id_field),
     };
-    let mut handle = None;
+    let mut revealed_handle = None;
     let mut id = None;
     for range in &record.received.revealed {
         let as_handle = string_member(&range.bytes, handle_delimiter.as_bytes());
@@ -444,7 +496,7 @@ pub fn check_identity(
         };
         match (as_handle, as_id) {
             (Some(value), None) => assert!(
-                handle.replace(value).is_none(),
+                revealed_handle.replace(value).is_none(),
                 "the handle is revealed once"
             ),
             (None, Some(value)) => {
@@ -456,10 +508,17 @@ pub fn check_identity(
             ),
         }
     }
-    (
-        id.expect("the id is revealed"),
-        handle.expect("the handle is revealed"),
-    )
+    let id = id.expect("the id is revealed");
+    let revealed_handle = revealed_handle.expect("the handle is revealed");
+    assert!(
+        !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()),
+        "the id is a decimal integer: {id:?}"
+    );
+    assert!(
+        revealed_handle.eq_ignore_ascii_case(handle),
+        "the handle is the account's: {revealed_handle:?}"
+    );
+    (id, revealed_handle)
 }
 
 /// Records and wire bytes for the hermetic tests of each platform module.
@@ -509,16 +568,16 @@ pub mod fixtures {
             let read = server.read(&mut chunk).await.expect("the request bytes");
             assert!(read > 0, "hyper closed the socket inside the request");
             out.extend_from_slice(&chunk[..read]);
-            let Some(end) = out.windows(4).position(|w| w == b"\r\n\r\n") else {
+            let Some(body_at) = super::head_end(&out) else {
                 continue;
             };
-            let head = String::from_utf8_lossy(&out[..end]).to_ascii_lowercase();
+            let head = String::from_utf8_lossy(&out[..body_at]).to_ascii_lowercase();
             let body = head
                 .lines()
                 .find_map(|line| line.strip_prefix("content-length:"))
                 .map_or(0, |value| value.trim().parse::<usize>().expect("a length"));
-            if out.len() >= end + 4 + body {
-                break end + 4 + body;
+            if out.len() >= body_at + body {
+                break body_at + body;
             }
         };
         sending.abort();

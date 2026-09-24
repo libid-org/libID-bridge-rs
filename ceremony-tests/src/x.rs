@@ -2,7 +2,6 @@
 //! and the identity read, as the X profile lays them out, and what the
 //! Platform Verifier adds for X.
 
-use axum::http::header;
 use libid_ceremony::attestation::AttestedData;
 use libid_transcript::ceremony::{
     profiles,
@@ -18,7 +17,6 @@ use super::{
         self,
         count,
         Bearer,
-        Exchange,
         Identity,
         Request,
     },
@@ -45,7 +43,6 @@ pub fn token_request(
     redirect_uri: &str,
     code_verifier: &str,
 ) -> Request {
-    let session = TOKEN_SESSION.session;
     let body = token_body(
         &TOKEN_SESSION,
         &[
@@ -56,36 +53,13 @@ pub fn token_request(
         ],
     )
     .expect("the four fields are the profile's, each nonempty");
-    hyper::Request::builder()
-        .method(session.method)
-        .uri(format!("https://{}{}", session.authority, session.path))
-        .header(header::HOST, session.authority)
-        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-        .header(header::ACCEPT, "application/json")
-        .header(header::CONNECTION, "close")
-        .body(http_body_util::Full::new(bytes::Bytes::from(body)))
-        .expect("every part of this request is a constant or bytes")
+    session::token_request(&TOKEN_SESSION, body)
 }
 
 /// The identity request the client sends: exactly four headers, the bearer
 /// first.
 pub fn identity_request(bearer: &str) -> Request {
-    let session = IDENTITY_SESSION.session;
-    hyper::Request::builder()
-        .method(session.method)
-        .uri(format!("https://{}{}", session.authority, session.path))
-        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
-        .header(header::ACCEPT, "application/json")
-        .header(header::HOST, session.authority)
-        .header(header::CONNECTION, "close")
-        .body(http_body_util::Full::new(bytes::Bytes::new()))
-        .expect("every part of this request is a constant or bytes")
-}
-
-/// The token session, run through `notary`: `request` revealed whole, the
-/// response revealing the bearer's framing.
-pub async fn exchange(notary: &Notary, request: Request) -> Result<Exchange, Failed> {
-    Exchange::notarized(notary, request).await
+    session::identity_request(&IDENTITY_SESSION, bearer, &[])
 }
 
 /// The identity session, run through `notary` with `bearer`.
@@ -105,29 +79,6 @@ pub fn check_token(
         session::check_token(record, sent_len, recv_len, bearer, &TOKEN_SESSION);
     assert_eq!(count(&request, b"code_verifier="), 1);
     assert_eq!(count(&request, b"grant_type=authorization_code"), 1);
-}
-
-/// What the verifier demands of an X identity record read for the account
-/// whose handle is `handle`: the common checks; the id a decimal string, the
-/// username the account's. The id and username, as revealed.
-pub fn check_identity(
-    record: &AttestedData,
-    sent_len: usize,
-    recv_len: usize,
-    bearer: &str,
-    handle: &str,
-) -> (String, String) {
-    let (id, username) =
-        session::check_identity(record, sent_len, recv_len, bearer, &IDENTITY_SESSION);
-    assert!(
-        !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()),
-        "an X id is a decimal string: {id:?}"
-    );
-    assert!(
-        username.eq_ignore_ascii_case(handle),
-        "the username is the account's: {username:?}"
-    );
-    (id, username)
 }
 
 #[cfg(test)]
@@ -167,7 +118,7 @@ mod tests {
         .await;
         assert!(sent.starts_with(b"POST /2/oauth2/token HTTP/1.1\r\nhost: api.x.com\r\n"));
         assert_eq!(count(&sent, b"\r\n\r\n"), 1);
-        let body = &sent[sent.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4..];
+        let body = &sent[session::head_end(&sent).unwrap()..];
         assert_eq!(
             body,
             b"grant_type=authorization_code&client_id=WHRlc3RjbGllbnQ6MTpjaQ&code=Y29kZQ&redirect_uri=http%3A%2F%2Flocalhost%3A4682%2Fauth%2Fcallback&code_verifier=iMSTNh6gQkRnBGlY1c0MUOsD7MCO4G8C7ph1_gIZs5I"
@@ -204,8 +155,14 @@ mod tests {
 
         let recv_layout = Layout::identity_response(ID_RECV, &IDENTITY_SESSION).unwrap();
         let signed = record(AUTHORITY, &sent, ID_RECV, &layout, &recv_layout);
-        let (id, username) =
-            check_identity(&signed, sent.len(), ID_RECV.len(), "SECRETBEARER", "Alice");
+        let (id, username) = session::check_identity(
+            &signed,
+            sent.len(),
+            ID_RECV.len(),
+            "SECRETBEARER",
+            "Alice",
+            &IDENTITY_SESSION,
+        );
         assert_eq!(id, "2244994945");
         assert_eq!(username, "alice");
         assert_eq!(

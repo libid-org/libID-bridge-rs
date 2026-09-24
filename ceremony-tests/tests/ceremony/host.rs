@@ -123,11 +123,17 @@ impl Host {
             .expect("the bridge starts");
         Host { bridge }
     }
+}
+
+impl Deployment for Host {
+    fn redirect_uri(&self) -> String {
+        redirect_uri()
+    }
 
     /// The github entry of the configuration the bridge publishes, read over
     /// TCP from the admitted application origin: the client id and the
     /// credential the configuration named.
-    pub async fn published(&self) -> Published {
+    async fn published(&self) -> Published {
         let address = self.bridge.address;
         let reply = tokio::task::spawn_blocking(move || {
             Reply::to(address, "GET", CONFIG_PATH, &[("origin", APP_ORIGIN)], "")
@@ -148,15 +154,5 @@ impl Host {
         assert_eq!(published.client_id, required("GH_OAUTH_CLIENT_ID"));
         assert_eq!(published.credential, required("GH_OAUTH_CLIENT_SECRET"));
         published
-    }
-}
-
-impl Deployment for Host {
-    fn redirect_uri(&self) -> String {
-        redirect_uri()
-    }
-
-    async fn published(&self) -> Published {
-        Host::published(self).await
     }
 }

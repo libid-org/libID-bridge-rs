@@ -35,8 +35,10 @@ use crate::{
         Exchange,
         Identity,
     },
+    unix_now,
     x,
     Deployment,
+    Published,
 };
 
 /// A code GitHub refuses: twenty hex characters, the shape of a real one.
@@ -96,14 +98,18 @@ fn bearer_commitments_open(
     session::assert_opens(&identity_record.sent, &range, bearer, &blinder);
 }
 
-/// An identity session `platform` refused: its own `4xx`, answered after the
-/// MPC-TLS handshake with it completed.
-fn refused_after_the_handshake(platform: &str, outcome: Result<Identity, Failed>) {
-    let failed = outcome
-        .err()
-        .unwrap_or_else(|| panic!("{platform} refuses a bearer it did not issue"));
+/// A session `platform` refused: its own `answer` in the failure, given
+/// after the MPC-TLS handshake with it completed.
+fn refused_after_the_handshake<T>(
+    platform: &str,
+    outcome: Result<T, Failed>,
+    answer: &str,
+) {
+    let Err(failed) = outcome else {
+        panic!("{platform} refuses the session");
+    };
     let message = failed.to_string();
-    assert!(message.contains("API returned 4"), "{message}");
+    assert!(message.contains(answer), "{message}");
     assert!(
         message.contains("TlsHandshakeComplete"),
         "the session reached {platform} before it failed: {message}"
@@ -112,14 +118,7 @@ fn refused_after_the_handshake(platform: &str, outcome: Result<Identity, Failed>
 
 /// A `state` no earlier run sent: the process id and the clock, in hex.
 fn fresh_state() -> String {
-    format!(
-        "{:x}{:x}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("a clock at or after the epoch")
-            .as_nanos()
-    )
+    format!("{:x}{:x}", std::process::id(), unix_now().as_nanos())
 }
 
 /// A PKCE code verifier (RFC 7636, section 4.1): 32 random bytes as
@@ -148,6 +147,30 @@ fn assert_bearer(bearer: &str) {
     eprintln!("bearer: {} bytes", bearer.len());
 }
 
+/// A token session for [`SPENT_CODE`] with the published client id and
+/// `client_secret` fails with GitHub's own `answer`, after MPC-TLS against
+/// github.com completed.
+async fn github_refuses_the_token_session(
+    deployment: &impl Deployment,
+    client_secret: impl FnOnce(&Published) -> &str,
+    answer: &str,
+) {
+    let notary = Notary::attesting().await;
+    let published = deployment.published().await;
+    let request = github::token_request(&github::TokenFields {
+        client_id: &published.client_id,
+        code: SPENT_CODE,
+        redirect_uri: &deployment.redirect_uri(),
+        code_verifier: &s256("placeholder"),
+        client_secret: client_secret(&published),
+    });
+    refused_after_the_handshake(
+        "GitHub",
+        Exchange::notarized(&notary, request).await,
+        answer,
+    );
+}
+
 /// A refused authorization code fails the token session with GitHub's own
 /// answer, `bad_verification_code`, and the steps reached: a notary was
 /// dialled, MPC-TLS completed against github.com and GitHub answered. The
@@ -155,27 +178,12 @@ fn assert_bearer(bearer: &str) {
 pub async fn a_refused_code_fails_the_token_session_with_githubs_answer(
     deployment: &impl Deployment,
 ) {
-    let notary = Notary::attesting().await;
-    let published = deployment.published().await;
-    let failed = github::exchange(
-        &notary,
-        github::token_request(&github::TokenFields {
-            client_id: &published.client_id,
-            code: SPENT_CODE,
-            redirect_uri: &deployment.redirect_uri(),
-            code_verifier: &s256("placeholder"),
-            client_secret: &published.credential,
-        }),
+    github_refuses_the_token_session(
+        deployment,
+        |published| &published.credential,
+        "bad_verification_code",
     )
     .await
-    .err()
-    .expect("GitHub refuses a code it did not issue");
-    let message = failed.to_string();
-    assert!(message.contains("bad_verification_code"), "{message}");
-    assert!(
-        message.contains("TlsHandshakeComplete"),
-        "the session reached GitHub before it failed: {message}"
-    );
 }
 
 /// A credential GitHub refuses fails the token session with GitHub's own
@@ -184,30 +192,12 @@ pub async fn a_refused_code_fails_the_token_session_with_githubs_answer(
 pub async fn a_credential_github_refuses_fails_the_token_session(
     deployment: &impl Deployment,
 ) {
-    let notary = Notary::attesting().await;
-    let published = deployment.published().await;
-    let failed = github::exchange(
-        &notary,
-        github::token_request(&github::TokenFields {
-            client_id: &published.client_id,
-            code: SPENT_CODE,
-            redirect_uri: &deployment.redirect_uri(),
-            code_verifier: &s256("placeholder"),
-            client_secret: "not-this-deployments-credential",
-        }),
+    github_refuses_the_token_session(
+        deployment,
+        |_| "not-this-deployments-credential",
+        "incorrect_client_credentials",
     )
     .await
-    .err()
-    .expect("GitHub refuses a credential it did not issue");
-    let message = failed.to_string();
-    assert!(
-        message.contains("incorrect_client_credentials"),
-        "{message}"
-    );
-    assert!(
-        message.contains("TlsHandshakeComplete"),
-        "the session reached GitHub before it failed: {message}"
-    );
 }
 
 /// A bearer GitHub did not issue fails the identity session with GitHub's
@@ -219,6 +209,7 @@ pub async fn a_bearer_github_refuses_fails_the_identity_session() {
     refused_after_the_handshake(
         "GitHub",
         github::identity(&notary, FOREIGN_BEARER).await,
+        "API returned 4",
     );
 }
 
@@ -257,7 +248,7 @@ pub async fn a_real_github_authorization_yields_two_sessions_the_notary_attested
         code_verifier: &code_verifier,
         client_secret: &published.credential,
     };
-    let exchange = github::exchange(&notary, github::token_request(&fields))
+    let exchange = Exchange::notarized(&notary, github::token_request(&fields))
         .await
         .unwrap_or_else(|failed| panic!("the token session failed: {failed}"));
     eprintln!("token session: steps {:?}", exchange.session.steps);
@@ -278,12 +269,13 @@ pub async fn a_real_github_authorization_yields_two_sessions_the_notary_attested
         .unwrap_or_else(|failed| panic!("the identity session failed: {failed}"));
     eprintln!("identity session: steps {:?}", identity.session.steps);
     let identity_record = attested(&mut notary, &identity.session, "identity").await;
-    let (id, login) = github::check_identity(
+    let (id, login) = session::check_identity(
         &identity_record,
         identity.session.sent_len,
         identity.session.recv_len,
         bearer,
         account.username(),
+        &github::IDENTITY_SESSION,
     );
     bearer_commitments_open(&exchange, &token_record, &identity, &identity_record);
     eprintln!("identity: an id of {} digits, login {login}", id.len());
@@ -296,7 +288,11 @@ pub async fn a_real_github_authorization_yields_two_sessions_the_notary_attested
 pub async fn a_bearer_x_refuses_fails_the_identity_session() {
     env::logging();
     let notary = Notary::attesting().await;
-    refused_after_the_handshake("X", x::identity(&notary, FOREIGN_BEARER).await);
+    refused_after_the_handshake(
+        "X",
+        x::identity(&notary, FOREIGN_BEARER).await,
+        "API returned 4",
+    );
 }
 
 /// The X ceremony end to end, the bridge taking no part: Chrome signed in as
@@ -326,7 +322,7 @@ pub async fn a_real_x_authorization_yields_two_sessions_the_notary_attested() {
     .await;
     let seen = Instant::now();
 
-    let exchange = x::exchange(
+    let exchange = Exchange::notarized(
         &notary,
         x::token_request(&client_id, &grant.code, &redirect_uri, &code_verifier),
     )
@@ -363,12 +359,13 @@ pub async fn a_real_x_authorization_yields_two_sessions_the_notary_attested() {
         .unwrap_or_else(|failed| panic!("the identity session failed: {failed}"));
     eprintln!("identity session: steps {:?}", identity.session.steps);
     let identity_record = attested(&mut notary, &identity.session, "identity").await;
-    let (id, username) = x::check_identity(
+    let (id, username) = session::check_identity(
         &identity_record,
         identity.session.sent_len,
         identity.session.recv_len,
         bearer,
         account.username(),
+        &x::IDENTITY_SESSION,
     );
     bearer_commitments_open(&exchange, &token_record, &identity, &identity_record);
     eprintln!(

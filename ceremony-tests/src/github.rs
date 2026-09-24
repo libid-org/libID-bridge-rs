@@ -18,8 +18,8 @@ use super::{
     session::{
         self,
         count,
+        head_end,
         Bearer,
-        Exchange,
         Identity,
         Request,
     },
@@ -70,38 +70,17 @@ impl TokenFields<'_> {
 /// The token request the client sends: the profile's request line and
 /// headers, and the five-field body.
 pub fn token_request(fields: &TokenFields) -> Request {
-    let session = TOKEN_SESSION.session;
-    hyper::Request::builder()
-        .method(session.method)
-        .uri(format!("https://{}{}", session.authority, session.path))
-        .header(header::HOST, session.authority)
-        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-        .header(header::ACCEPT, "application/json")
-        .header(header::CONNECTION, "close")
-        .body(http_body_util::Full::new(bytes::Bytes::from(fields.body())))
-        .expect("every part of this request is a constant or bytes")
+    session::token_request(&TOKEN_SESSION, fields.body())
 }
 
 /// The identity request the client sends: the bearer first, then the
 /// `user-agent` GitHub's API requires of every caller.
 pub fn identity_request(bearer: &str) -> Request {
-    let session = IDENTITY_SESSION.session;
-    hyper::Request::builder()
-        .method(session.method)
-        .uri(format!("https://{}{}", session.authority, session.path))
-        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
-        .header(header::ACCEPT, "application/json")
-        .header(header::USER_AGENT, "libid-ceremony-suite")
-        .header(header::HOST, session.authority)
-        .header(header::CONNECTION, "close")
-        .body(http_body_util::Full::new(bytes::Bytes::new()))
-        .expect("every part of this request is a constant or bytes")
-}
-
-/// The token session, run through `notary`: `request` revealed whole, the
-/// response revealing the bearer's framing.
-pub async fn exchange(notary: &Notary, request: Request) -> Result<Exchange, Failed> {
-    Exchange::notarized(notary, request).await
+    session::identity_request(
+        &IDENTITY_SESSION,
+        bearer,
+        &[(header::USER_AGENT, "libid-ceremony-suite")],
+    )
 }
 
 /// The identity session, run through `notary` with `bearer`.
@@ -121,11 +100,7 @@ pub fn check_token(
 ) {
     let request =
         session::check_token(record, sent_len, recv_len, bearer, &TOKEN_SESSION);
-    let boundary = request
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .expect("one head boundary")
-        + 4;
+    let boundary = head_end(&request).expect("one head boundary");
     assert_eq!(
         &request[boundary..],
         fields.body().as_bytes(),
@@ -135,29 +110,6 @@ pub fn check_token(
     let mut normalized = request[..boundary].to_ascii_lowercase();
     normalized.retain(|&b| b != b' ' && b != b'\t');
     assert_eq!(count(&normalized, b"\r\nauthorization:"), 0);
-}
-
-/// What the verifier demands of a GitHub identity record read for the
-/// account whose login is `handle`: the common checks; the id an integer,
-/// the login the account's. The id and login, as revealed.
-pub fn check_identity(
-    record: &AttestedData,
-    sent_len: usize,
-    recv_len: usize,
-    bearer: &str,
-    handle: &str,
-) -> (String, String) {
-    let (id, login) =
-        session::check_identity(record, sent_len, recv_len, bearer, &IDENTITY_SESSION);
-    assert!(
-        !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()),
-        "a GitHub id is an integer: {id:?}"
-    );
-    assert!(
-        login.eq_ignore_ascii_case(handle),
-        "the login is the account's: {login:?}"
-    );
-    (id, login)
 }
 
 #[cfg(test)]
@@ -205,7 +157,7 @@ mod tests {
             b"POST /login/oauth/access_token HTTP/1.1\r\nhost: github.com\r\n"
         ));
         assert_eq!(count(&sent, b"\r\n\r\n"), 1);
-        let body = &sent[sent.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4..];
+        let body = &sent[head_end(&sent).unwrap()..];
         assert_eq!(
             body,
             b"client_id=Iv1.0123456789abcdef&code=6b7f2c1d9e4a8035&redirect_uri=https%3A%2F%2Flocalhost%3A4682%2Fauth%2Fcallback&code_verifier=iMSTNh6gQkRnBGlY1c0MUOsD7MCO4G8C7ph1_gIZs5I&client_secret=d3b07384d113edec49eaa6238ad5ff00c1f2e3a4"
@@ -244,8 +196,14 @@ mod tests {
 
         let recv_layout = Layout::identity_response(ID_RECV, &IDENTITY_SESSION).unwrap();
         let signed = record("api.github.com", &sent, ID_RECV, &layout, &recv_layout);
-        let (id, login) =
-            check_identity(&signed, sent.len(), ID_RECV.len(), "SECRETBEARER", "alice");
+        let (id, login) = session::check_identity(
+            &signed,
+            sent.len(),
+            ID_RECV.len(),
+            "SECRETBEARER",
+            "alice",
+            &IDENTITY_SESSION,
+        );
         assert_eq!(id, "583231");
         assert_eq!(login, "Alice");
         let body = joined(&signed.received);
@@ -295,12 +253,13 @@ mod tests {
             "the layout reveals the id with the whitespace before its brace"
         );
         let signed = record("api.github.com", &sent, PRETTY_ID, &layout, &recv_layout);
-        let (id, login) = check_identity(
+        let (id, login) = session::check_identity(
             &signed,
             sent.len(),
             PRETTY_ID.len(),
             "SECRETBEARER",
             "alice",
+            &IDENTITY_SESSION,
         );
         assert_eq!(id, "583231");
         assert_eq!(login, "Alice");
@@ -337,7 +296,14 @@ mod tests {
             count(&joined(&signed.received), b"node_id") == 1,
             "the widened range does reveal the node id"
         );
-        check_identity(&signed, sent.len(), ID_RECV.len(), "SECRETBEARER", "alice");
+        session::check_identity(
+            &signed,
+            sent.len(),
+            ID_RECV.len(),
+            "SECRETBEARER",
+            "alice",
+            &IDENTITY_SESSION,
+        );
     }
 
     /// The bearer's commitment opens with its blinder, and with no other

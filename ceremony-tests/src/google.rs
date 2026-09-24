@@ -267,17 +267,13 @@ pub async fn a_real_google_authorization_returns_a_verified_id_token() {
     let token =
         token_from_redirect(&landed, &authorization.redirect_uri, &authorization.state)
             .expect("valid Google response");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
     verify(
         &token,
         &keys,
         &authorization.client_id,
         &authorization.nonce,
         &authorization.email,
-        now,
+        crate::unix_now().as_secs(),
     )
     .expect("Google signature and ceremony claims");
     eprintln!("Google ID token: signature, state, nonce, audience, expiry, subject and verified account passed");

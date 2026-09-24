@@ -19,6 +19,7 @@ use chromiumoxide::{
 };
 
 use super::{
+    within,
     Platform,
     Session,
     POLL,
@@ -101,20 +102,14 @@ pub async fn session(
 /// `host`; [`carries`] tells the two apart.
 pub async fn lands_on(session: &Session, url: &str, host: &str) -> bool {
     session.navigate(url).await;
-    let started = std::time::Instant::now();
-    while started.elapsed() < PROBE {
-        let at = session.location().await;
-        if url::Url::parse(&at)
+    within(PROBE, POLL, async || {
+        url::Url::parse(&session.location().await)
             .ok()
             .and_then(|u| u.host_str().map(str::to_owned))
             .as_deref()
             == Some(host)
-        {
-            return true;
-        }
-        tokio::time::sleep(POLL).await;
-    }
-    false
+    })
+    .await
 }
 
 /// Whether the page open in `session` carries `needle` in its markup within
@@ -125,14 +120,7 @@ pub async fn carries(session: &Session, needle: &str) -> bool {
         "document.documentElement.innerHTML.toLowerCase().includes({})",
         serde_json::to_string(&needle.to_ascii_lowercase()).expect("a JSON string")
     );
-    let started = std::time::Instant::now();
-    while started.elapsed() < PROBE {
-        if session.evaluate(&js).await == "true" {
-            return true;
-        }
-        tokio::time::sleep(POLL).await;
-    }
-    false
+    within(PROBE, POLL, async || session.evaluate(&js).await == "true").await
 }
 
 /// A visible Chrome on `url`, with `profile` and nothing else: no debugging

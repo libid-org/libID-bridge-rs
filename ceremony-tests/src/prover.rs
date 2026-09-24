@@ -166,10 +166,3 @@ pub fn blinder(
         }
     }
 }
-
-/// A layout refusal, in the session driver's error vocabulary.
-pub fn refused(e: libid_transcript::ceremony::LayoutError) -> libid_tlsn::Error {
-    libid_tlsn::Error::Transcript(libid_transcript::Error::Transcript {
-        detail: e.to_string(),
-    })
-}

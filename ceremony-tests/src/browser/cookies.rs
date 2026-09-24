@@ -177,10 +177,7 @@ pub fn parse(
             "expected a cookie list, or one under `cookies`, each naming its name, \
              value and domain"
         })?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or_default();
+    let now = crate::unix_now().as_secs_f64();
     Ok(cookies
         .into_iter()
         .filter(|c| keep(c.host()) && (c.expires <= 0.0 || c.expires >= now))

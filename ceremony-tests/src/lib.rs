@@ -20,6 +20,13 @@ pub use deployment::{
     Published,
 };
 
+/// The time since the Unix epoch, by the system clock.
+pub fn unix_now() -> std::time::Duration {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock at or after the epoch")
+}
+
 /// The runtime the notary's listener runs on. `#[tokio::test]` drops each
 /// test's runtime, and every task on it, when the test returns; this one is
 /// never dropped.

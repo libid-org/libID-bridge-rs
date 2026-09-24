@@ -7,8 +7,8 @@ use super::{
         self,
         Stored,
     },
+    found_within,
     headed,
-    person,
     profile,
     Platform,
     Session,
@@ -18,15 +18,7 @@ use crate::env::{
     optional,
     required,
 };
-use chromiumoxide::{
-    browser::BrowserConfigBuilder,
-    cdp::browser_protocol::network::{
-        Cookie as Held,
-        EventRequestWillBeSent,
-    },
-    Page,
-};
-use futures_util::StreamExt;
+use chromiumoxide::cdp::browser_protocol::network::Cookie as Held;
 use std::{
     path::PathBuf,
     time::{
@@ -59,14 +51,10 @@ impl Authorization {
             "the Google cookie export carries no session cookie"
         );
         Self {
-            client_id: required("GOOGLE_OAUTH_CLIENT_ID"),
-            redirect_uri: required("LIBID_TEST_GOOGLE_REDIRECT_URI"),
-            state,
-            nonce,
-            email: required("GOOGLE_TEST_ALICE_EMAIL"),
             password: optional("GOOGLE_TEST_ALICE_PASSWORD"),
             cookies,
             profile: None,
+            ..Self::for_export(state, nonce)
         }
     }
 
@@ -113,16 +101,20 @@ impl Authorization {
     }
 
     pub fn url(&self) -> String {
-        let query = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("response_type", "id_token")
-            .append_pair("response_mode", "fragment")
-            .append_pair("client_id", &self.client_id)
-            .append_pair("redirect_uri", &self.redirect_uri)
-            .append_pair("scope", "openid email")
-            .append_pair("state", &self.state)
-            .append_pair("nonce", &self.nonce)
-            .finish();
-        format!("https://accounts.google.com/o/oauth2/v2/auth?{query}")
+        url::Url::parse_with_params(
+            "https://accounts.google.com/o/oauth2/v2/auth",
+            [
+                ("response_type", "id_token"),
+                ("response_mode", "fragment"),
+                ("client_id", &self.client_id),
+                ("redirect_uri", &self.redirect_uri),
+                ("scope", "openid email"),
+                ("state", &self.state),
+                ("nonce", &self.nonce),
+            ],
+        )
+        .expect("the authorization endpoint is a URL")
+        .into()
     }
 }
 
@@ -133,12 +125,8 @@ impl Platform for Authorization {
 
     /// Google refuses a browser it can tell is automated before it looks at
     /// the session, so this one presents itself as a person's.
-    fn configure(&self, config: BrowserConfigBuilder) -> BrowserConfigBuilder {
-        person::configure(config)
-    }
-
-    async fn prepare(&self, page: &Page) {
-        person::prepare(page).await
+    fn presented_as_person(&self) -> bool {
+        true
     }
 
     fn state(&self) -> &str {
@@ -321,22 +309,14 @@ pub async fn watch_fragment(session: &Session, uri: &str) -> super::Redirect {
         expected.query().is_none() && expected.fragment().is_none(),
         "redirect URI must have no query or fragment"
     );
-    let mut events = session
-        .page
-        .event_listener::<EventRequestWillBeSent>()
+    session
+        .watch(move |request| {
+            (url::Url::parse(&request.url).ok().as_ref() == Some(&expected)).then(|| {
+                let fragment = request.url_fragment.as_deref().unwrap_or_default();
+                format!("{}{fragment}", request.url)
+            })
+        })
         .await
-        .expect("redirect events");
-    let (tx, found) = tokio::sync::oneshot::channel();
-    let watching = tokio::spawn(async move {
-        while let Some(event) = events.next().await {
-            if url::Url::parse(&event.request.url).ok().as_ref() == Some(&expected) {
-                let fragment = event.request.url_fragment.as_deref().unwrap_or_default();
-                let _ = tx.send(format!("{}{fragment}", event.request.url));
-                return;
-            }
-        }
-    });
-    super::Redirect { found, watching }
 }
 
 /// Export the session of `GOOGLE_PROFILE` (`.env.google-profile`): a profile
@@ -392,16 +372,9 @@ pub async fn chrome_preserves_the_redirect_fragment() {
     let session = Session::open(&a).await;
     let mut redirect = watch_fragment(&session, &a.redirect_uri).await;
     session.navigate(&format!("{origin}/start")).await;
-    let observed = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some(url) = redirect.seen() {
-                break url;
-            }
-            tokio::time::sleep(POLL).await;
-        }
-    })
-    .await
-    .expect("Chrome reports the fragment");
+    let observed = found_within(Duration::from_secs(10), POLL, async || redirect.seen())
+        .await
+        .expect("Chrome reports the fragment");
     let _ = session.close().await;
     server.abort();
     assert_eq!(observed, target);

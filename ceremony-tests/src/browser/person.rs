@@ -125,12 +125,8 @@ pub async fn prepare(page: &Page) {
 struct Presented;
 
 impl super::Platform for Presented {
-    fn configure(&self, config: BrowserConfigBuilder) -> BrowserConfigBuilder {
-        configure(config)
-    }
-
-    async fn prepare(&self, page: &Page) {
-        prepare(page).await
+    fn presented_as_person(&self) -> bool {
+        true
     }
 
     fn state(&self) -> &str {
@@ -183,19 +179,20 @@ pub async fn chrome_tells_one_story() {
             .expect("Chrome requests the page")
             .expect("the page's request headers");
     // The request arrives before the document it answers exists.
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while session.evaluate("document.readyState").await != "complete" {
-            tokio::time::sleep(super::POLL).await;
-        }
-    })
-    .await
-    .expect("the page loads");
-    let listed: Vec<serde_json::Value> = serde_json::from_str(
-        &session
-            .evaluate("JSON.stringify(navigator.userAgentData.brands)")
-            .await,
+    let loaded = super::within(
+        std::time::Duration::from_secs(10),
+        super::POLL,
+        async || session.evaluate("document.readyState").await == "complete",
     )
-    .expect("navigator.userAgentData lists its brands");
+    .await;
+    assert!(loaded, "the page loads");
+    let listed: Vec<serde_json::Value> = session
+        .page
+        .evaluate("navigator.userAgentData.brands")
+        .await
+        .expect("navigator.userAgentData is readable")
+        .into_value()
+        .expect("navigator.userAgentData lists its brands");
     let brands = listed
         .iter()
         .map(|b| format!("{};v={}", b["brand"], b["version"]))

@@ -12,11 +12,11 @@ use super::{
 };
 use crate::env::required;
 
-/// The six-digit TOTP code for `secret` at `time`, as an authenticator app
-/// shows it: SHA-1, 30-second steps. `secret` is the base32 key as GitHub
+/// The six-digit TOTP codes for `secret`, as an authenticator app shows
+/// them: SHA-1, 30-second steps. `secret` is the base32 key as GitHub
 /// displays it; spaces and case are ignored, and GitHub's 80-bit keys are
 /// shorter than the RFC's minimum, which `new_unchecked` does not enforce.
-fn totp_code(secret: &str, time: u64) -> String {
+fn totp(secret: &str) -> totp_rs::TOTP {
     let normalized: String = secret
         .chars()
         .filter(|c| !c.is_whitespace())
@@ -25,7 +25,13 @@ fn totp_code(secret: &str, time: u64) -> String {
     let bytes = totp_rs::Secret::Encoded(normalized)
         .to_bytes()
         .expect("a base32 TOTP secret");
-    totp_rs::TOTP::new_unchecked(totp_rs::Algorithm::SHA1, 6, 1, 30, bytes).generate(time)
+    totp_rs::TOTP::new_unchecked(totp_rs::Algorithm::SHA1, 6, 1, 30, bytes)
+}
+
+/// The TOTP code for `secret` at `time`.
+#[cfg(test)]
+fn totp_code(secret: &str, time: u64) -> String {
+    totp(secret).generate(time)
 }
 
 /// The GitHub test account: its credentials, and its TOTP secret when it
@@ -59,11 +65,9 @@ impl Account {
             .totp_secret
             .as_deref()
             .expect("GitHub asked for a TOTP code: set the account's _TOTP_SECRET");
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        totp(secret)
+            .generate_current()
             .expect("a clock at or after the epoch")
-            .as_secs();
-        totp_code(secret, now)
     }
 }
 
@@ -80,15 +84,19 @@ pub struct Authorization<'a> {
 impl Authorization<'_> {
     /// The URL to open.
     pub fn url(&self) -> String {
-        let query = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("client_id", self.client_id)
-            .append_pair("redirect_uri", self.redirect_uri)
-            .append_pair("scope", "read:user")
-            .append_pair("state", self.state)
-            .append_pair("code_challenge", self.code_challenge)
-            .append_pair("code_challenge_method", "S256")
-            .finish();
-        format!("https://github.com/login/oauth/authorize?{query}")
+        url::Url::parse_with_params(
+            "https://github.com/login/oauth/authorize",
+            [
+                ("client_id", self.client_id),
+                ("redirect_uri", self.redirect_uri),
+                ("scope", "read:user"),
+                ("state", self.state),
+                ("code_challenge", self.code_challenge),
+                ("code_challenge_method", "S256"),
+            ],
+        )
+        .expect("the authorization endpoint is a URL")
+        .into()
     }
 }
 
@@ -163,11 +171,7 @@ impl Platform for Authorization<'_> {
                     filled = true;
                 }
             } else if path == "/sessions/two-factor/app" {
-                let step = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("a clock at or after the epoch")
-                    .as_secs()
-                    / 30;
+                let step = crate::unix_now().as_secs() / 30;
                 if totp_step_submitted != Some(step)
                     && session.page.find_element("#app_totp").await.is_ok()
                 {
@@ -194,7 +198,7 @@ impl Platform for Authorization<'_> {
                         !text.contains("redirect_uri") && !text.contains("Be careful"),
                         "GitHub refused the authorization request; the App's registered \
                          callback URL and LIBID_TEST_PUBLIC_ORIGIN differ. Page: {}",
-                        text.chars().take(400).collect::<String>()
+                        session.excerpt().await
                     );
                 }
             } else if path.starts_with("/sessions/verified-device") && !headed() {
@@ -202,12 +206,7 @@ impl Platform for Authorization<'_> {
                     "GitHub asked for device verification: the account has no TOTP \
                      method. Give it one, or confirm the device once in a visible Chrome \
                      (BROWSER_HEAD=1). Page: {}",
-                    session
-                        .body_text()
-                        .await
-                        .chars()
-                        .take(400)
-                        .collect::<String>()
+                    session.excerpt().await
                 );
             }
             tokio::time::sleep(POLL).await;
@@ -217,12 +216,7 @@ impl Platform for Authorization<'_> {
         panic!(
             "no authorization in {:?}.\nstopped on: {url}\npage said: {}",
             budget(),
-            session
-                .body_text()
-                .await
-                .chars()
-                .take(400)
-                .collect::<String>()
+            session.excerpt().await
         );
     }
 }

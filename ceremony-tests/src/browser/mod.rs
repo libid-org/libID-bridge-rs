@@ -18,10 +18,7 @@ use std::{
         AtomicU32,
         Ordering,
     },
-    time::{
-        Duration,
-        Instant,
-    },
+    time::Duration,
 };
 
 use chromiumoxide::{
@@ -30,6 +27,7 @@ use chromiumoxide::{
         network::{
             EnableParams,
             EventRequestWillBeSent,
+            Request,
         },
         target::TargetId,
     },
@@ -50,15 +48,56 @@ pub fn budget() -> Duration {
 /// How long the page is left alone between two looks at it.
 pub const POLL: Duration = Duration::from_millis(500);
 
+/// What `probe` finds within `budget`, looking every `every`. A look still
+/// running at the deadline is abandoned.
+pub async fn found_within<T>(
+    budget: Duration,
+    every: Duration,
+    mut probe: impl AsyncFnMut() -> Option<T>,
+) -> Option<T> {
+    tokio::time::timeout(budget, async {
+        loop {
+            if let Some(found) = probe().await {
+                return found;
+            }
+            tokio::time::sleep(every).await;
+        }
+    })
+    .await
+    .ok()
+}
+
+/// Whether `holds` is true within `budget`, looking every `every`. A look
+/// still running at the deadline is abandoned.
+pub async fn within(
+    budget: Duration,
+    every: Duration,
+    mut holds: impl AsyncFnMut() -> bool,
+) -> bool {
+    found_within(budget, every, async || holds().await.then_some(()))
+        .await
+        .is_some()
+}
+
 /// One platform's authorization: how its Chrome is configured, and how its
 /// pages are driven from a blank tab to the redirect.
 // A rung awaits these in its own task and never sends them across one, so
 // the futures need no auto-trait bounds.
 #[allow(async_fn_in_trait)]
 pub trait Platform {
+    /// Whether Chrome presents itself as a person's desktop Chrome, as
+    /// [`person`] configures and prepares it.
+    fn presented_as_person(&self) -> bool {
+        false
+    }
+
     /// Chrome's launch configuration, on top of the suite's own flags.
     fn configure(&self, config: BrowserConfigBuilder) -> BrowserConfigBuilder {
-        config
+        if self.presented_as_person() {
+            person::configure(config)
+        } else {
+            config
+        }
     }
 
     /// A profile Chrome keeps between sessions, or none for one that lasts
@@ -68,7 +107,11 @@ pub trait Platform {
     }
 
     /// What a page needs before it navigates anywhere.
-    async fn prepare(&self, _page: &Page) {}
+    async fn prepare(&self, page: &Page) {
+        if self.presented_as_person() {
+            person::prepare(page).await;
+        }
+    }
 
     /// The `state` the authorization request carries.
     fn state(&self) -> &str;
@@ -227,25 +270,21 @@ impl Session {
             .collect()
     }
 
-    /// A tab that is not among `known`, if one opens within `within`.
+    /// A tab that is not among `known`, if one opens within `patience`.
     pub async fn tab_opened(
         &self,
         known: &HashSet<TargetId>,
-        within: Duration,
+        patience: Duration,
     ) -> Option<Page> {
-        let started = Instant::now();
-        while started.elapsed() < within {
-            if let Ok(pages) = self.browser.pages().await {
-                if let Some(page) = pages
-                    .into_iter()
-                    .find(|page| !known.contains(page.target_id()))
-                {
-                    return Some(page);
-                }
-            }
-            tokio::time::sleep(POLL).await;
-        }
-        None
+        found_within(patience, POLL, async || {
+            self.browser
+                .pages()
+                .await
+                .ok()?
+                .into_iter()
+                .find(|page| !known.contains(page.target_id()))
+        })
+        .await
     }
 
     /// Network events on, and whatever `platform` needs on a page.
@@ -260,20 +299,33 @@ impl Session {
     /// Watch this page for a request to `redirect_uri`. Subscribed before
     /// the navigation, so the redirect cannot be missed.
     pub async fn watch_redirect(&self, redirect_uri: &str) -> Redirect {
+        let wanted = redirect_uri.to_owned();
+        self.watch(move |request| {
+            request
+                .url
+                .starts_with(&wanted)
+                .then(|| request.url.clone())
+        })
+        .await
+    }
+
+    /// Watch this page for the first request `matching` answers with a URL,
+    /// the URL [`Redirect::seen`] returns. Subscribed before the navigation,
+    /// so the request cannot be missed.
+    pub async fn watch(
+        &self,
+        matching: impl Fn(&Request) -> Option<String> + Send + 'static,
+    ) -> Redirect {
         let mut requests = self
             .page
             .event_listener::<EventRequestWillBeSent>()
             .await
             .expect("the requests this page is about to make");
         let (tx, found) = tokio::sync::oneshot::channel::<String>();
-        let wanted = redirect_uri.to_owned();
         let watching = tokio::spawn(async move {
-            let mut tx = Some(tx);
             while let Some(sent) = requests.next().await {
-                if sent.request.url.starts_with(&wanted) {
-                    if let Some(tx) = tx.take() {
-                        let _ = tx.send(sent.request.url.clone());
-                    }
+                if let Some(url) = matching(&sent.request) {
+                    let _ = tx.send(url);
                     return;
                 }
             }
@@ -316,13 +368,13 @@ impl Session {
         let n = self.traced.fetch_add(1, Ordering::Relaxed);
         let stem = std::path::Path::new(&dir).join(format!("{n:02}-{label}"));
         let _ = std::fs::create_dir_all(&dir);
-        if let Ok(png) = self
+        let _ = self
             .page
-            .screenshot(ScreenshotParams::builder().build())
-            .await
-        {
-            let _ = std::fs::write(stem.with_extension("png"), png);
-        }
+            .save_screenshot(
+                ScreenshotParams::builder().build(),
+                stem.with_extension("png"),
+            )
+            .await;
         let dump = format!(
             "{}\n\n{}\n\n{}\n",
             self.location().await,
@@ -339,6 +391,20 @@ impl Session {
             Err(_) => String::new(),
         };
         text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// The first 400 characters of the page's visible text.
+    pub async fn excerpt(&self) -> String {
+        self.body_text().await.chars().take(400).collect()
+    }
+
+    /// Where the page is and what it says, for a failure message.
+    pub async fn diagnosis(&self) -> String {
+        format!(
+            "On: {}\nPage: {}",
+            self.location().await,
+            self.excerpt().await
+        )
     }
 
     /// Type into a field, if it is on the page.

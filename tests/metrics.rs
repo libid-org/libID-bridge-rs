@@ -5,7 +5,7 @@
 mod common;
 
 mod metrics {
-    use libid_server_rs::metrics::*;
+    use libid_bridge_rs::metrics::*;
 
     /// A deployment that has retrieved nothing reports that it is serving
     /// nothing, and invents no counter it has not reached.

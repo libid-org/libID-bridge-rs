@@ -2,8 +2,8 @@
 #
 # Point the bridge at a copy of this file:
 #
-#     LIBID_CONFIG=/etc/libid/bridge.toml libid-server-rs
-#     libid-server-rs --config ./bridge.toml
+#     LIBID_CONFIG=/etc/libid/bridge.toml libid-bridge-rs
+#     libid-bridge-rs --config ./bridge.toml
 #
 # This file is the deployment. Nothing here has a flag or a variable of its
 # own: the enabled platforms can be written nowhere else, and a bridge with no

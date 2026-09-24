@@ -25,7 +25,7 @@ use hyper::{
     StatusCode,
 };
 
-use libid_server_rs::{
+use libid_bridge_rs::{
     artifact::upstream::ARTIFACT_PATH,
     config,
     state::AppState,

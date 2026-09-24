@@ -7,7 +7,7 @@ mod common;
 mod root {
     use std::sync::Arc;
 
-    use libid_server_rs::{
+    use libid_bridge_rs::{
         state::AppState,
         *,
     };

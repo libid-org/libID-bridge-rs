@@ -14,7 +14,7 @@ mod upstream {
         header,
         StatusCode,
     };
-    use libid_server_rs::{
+    use libid_bridge_rs::{
         artifact::{
             upstream::*,
             Published,
@@ -83,9 +83,9 @@ mod upstream {
     /// A deployment pointed at a fixture Distribution, started the way the
     /// binary starts one and given the one retrieval its refresher would
     /// make first.
-    async fn bridge(distribution: &Distribution) -> libid_server_rs::Bridge {
+    async fn bridge(distribution: &Distribution) -> libid_bridge_rs::Bridge {
         let bridge =
-            libid_server_rs::Bridge::start(&config(distribution.origin())).unwrap();
+            libid_bridge_rs::Bridge::start(&config(distribution.origin())).unwrap();
         bridge
             .refresher
             .revalidate()
@@ -96,7 +96,7 @@ mod upstream {
 
     /// A healthy Distribution, a deployment pointed at it, and what that
     /// deployment published.
-    async fn deployed() -> (Distribution, libid_server_rs::Bridge, Arc<Published>) {
+    async fn deployed() -> (Distribution, libid_bridge_rs::Bridge, Arc<Published>) {
         let distribution = Distribution::healthy().await;
         let bridge = bridge(&distribution).await;
         let before = published(&bridge);
@@ -105,7 +105,7 @@ mod upstream {
 
     /// What a deployment is serving. It has published one by the time any of
     /// these tests looks.
-    fn published(bridge: &libid_server_rs::Bridge) -> Arc<Published> {
+    fn published(bridge: &libid_bridge_rs::Bridge) -> Arc<Published> {
         bridge
             .state
             .callback
@@ -115,11 +115,11 @@ mod upstream {
     }
 
     /// A deployment pointed at this test's own Distribution.
-    fn config(ccdp_origin: &str) -> libid_server_rs::config::Settings {
+    fn config(ccdp_origin: &str) -> libid_bridge_rs::config::Settings {
         common::config(&["--ccdp-origin", ccdp_origin])
     }
 
-    fn served(bridge: &libid_server_rs::Bridge) -> String {
+    fn served(bridge: &libid_bridge_rs::Bridge) -> String {
         String::from_utf8(published(bridge).document.body.to_vec()).unwrap()
     }
 
@@ -133,7 +133,7 @@ mod upstream {
         assert_eq!(published.etag.as_deref(), Some("W/\"the-artifact\""));
         // Composed: the deployment's data is in the document, the marker gone.
         assert!(served(&bridge).contains("https://app.example"));
-        assert!(!served(&bridge).contains(libid_server_rs::artifact::policy::MARKER));
+        assert!(!served(&bridge).contains(libid_bridge_rs::artifact::policy::MARKER));
         // And the policy names the hash of what is being served.
         assert!(published
             .document
@@ -152,7 +152,7 @@ mod upstream {
             ..Reply::artifact()
         })
         .await;
-        let bridge = libid_server_rs::Bridge::start(&config(distribution.origin()))
+        let bridge = libid_bridge_rs::Bridge::start(&config(distribution.origin()))
             .expect("a deployment starts without its Distribution");
         bridge
             .refresher
@@ -236,7 +236,7 @@ mod upstream {
     #[tokio::test]
     async fn the_loop_survives_a_failed_refresh_and_replaces_on_a_later_one() {
         let (distribution, bridge, before) = deployed().await;
-        let libid_server_rs::Bridge { state, refresher } = bridge;
+        let libid_bridge_rs::Bridge { state, refresher } = bridge;
 
         // Answered in order, then the standing replacement.
         distribution.answers_next(Reply {
@@ -336,7 +336,7 @@ mod upstream {
                 matches!(
                     refusal,
                     FetchError::Artifact(
-                        libid_server_rs::artifact::policy::ArtifactError::UpstreamPolicy(
+                        libid_bridge_rs::artifact::policy::ArtifactError::UpstreamPolicy(
                             _
                         )
                     )
@@ -380,7 +380,7 @@ mod upstream {
     #[tokio::test]
     async fn a_body_over_the_bound_is_refused() {
         let oversize =
-            "x".repeat(libid_server_rs::artifact::policy::MAX_ARTIFACT_BYTES + 1);
+            "x".repeat(libid_bridge_rs::artifact::policy::MAX_ARTIFACT_BYTES + 1);
         for chunked in [false, true] {
             let distribution = Distribution::serving(Reply {
                 etag: None,
@@ -548,7 +548,7 @@ mod upstream {
             "{refusal}"
         );
         let bridge =
-            libid_server_rs::Bridge::start(&config(distribution.origin())).unwrap();
+            libid_bridge_rs::Bridge::start(&config(distribution.origin())).unwrap();
         assert!(bridge.refresher.revalidate().await.is_err());
         assert!(bridge.state.callback.borrow().is_none());
     }

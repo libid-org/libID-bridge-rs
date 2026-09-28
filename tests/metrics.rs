@@ -6,10 +6,7 @@ mod common;
 
 mod metrics {
     use libid_bridge_rs::{
-        artifact::upstream::{
-            CALLBACK,
-            VERSIONS,
-        },
+        artifact::upstream::Resource,
         metrics::*,
     };
 
@@ -39,11 +36,11 @@ mod metrics {
     fn the_rendering_names_every_metric() {
         let metrics = Metrics::new();
 
-        metrics.published(&CALLBACK);
-        metrics.unchanged(&CALLBACK);
-        metrics.failed(&CALLBACK, "unreachable");
-        metrics.published(&VERSIONS);
-        metrics.failed(&VERSIONS, "grammar");
+        metrics.published(Resource::Callback);
+        metrics.unchanged(Resource::Callback);
+        metrics.failed(Resource::Callback, "unreachable");
+        metrics.published(Resource::Versions);
+        metrics.failed(Resource::Versions, "grammar");
         metrics.callback_served();
         metrics.callback_unavailable();
 
@@ -79,7 +76,7 @@ mod metrics {
     #[test]
     fn each_resource_is_gauged_on_its_own() {
         let metrics = Metrics::new();
-        metrics.published(&VERSIONS);
+        metrics.published(Resource::Versions);
         let text = metrics.rendered();
         assert!(
             text.contains("libid_bridge_available{resource=\"callback\"} 0"),

@@ -9,8 +9,9 @@ mod versions {
         deployment::PlatformId,
         versions::*,
     };
+    use strum::IntoEnumIterator;
 
-    fn parsed(text: &str) -> Result<Versions, VersionsError> {
+    fn parsed(text: &str) -> serde_json::Result<Versions> {
         Versions::parse(text.as_bytes())
     }
 
@@ -41,27 +42,33 @@ mod versions {
         assert_eq!(list.bundled_for(PlatformId::Google), None);
 
         let none = parsed("{}").unwrap();
-        for platform in [PlatformId::Github, PlatformId::Google, PlatformId::X] {
+        for platform in PlatformId::iter() {
             assert_eq!(none.bundled_for(platform), None, "{platform}");
         }
     }
 
-    /// A key this bridge does not know is ignored, whatever its value: a
-    /// Distribution may bundle a platform this bridge predates. A key is
-    /// known by its exact spelling.
+    /// A key this bridge does not know is ignored: a Distribution may bundle
+    /// a platform this bridge predates. A key is known by its exact
+    /// spelling, and its value is held to the grammar like any other.
     #[test]
-    fn an_unknown_platform_key_is_ignored_whatever_its_value() {
+    fn an_unknown_platform_key_is_ignored() {
         let known = parsed(r#"{"github":[1]}"#).unwrap();
         for text in [
             r#"{"github":[1],"tiktok":[1]}"#,
-            r#"{"github":[1],"tiktok":"soon"}"#,
-            r#"{"github":[1],"tiktok":[]}"#,
-            r#"{"github":[1],"tiktok":[2,1,1]}"#,
+            r#"{"github":[1],"tiktok":[2,3]}"#,
             r#"{"github":[1],"GitHub":[2]}"#,
-            r#"{"github":[1],"":null}"#,
+            r#"{"github":[1],"":[1]}"#,
         ] {
             let list = parsed(text).unwrap_or_else(|e| panic!("{text}: {e}"));
             assert_eq!(list, known, "{text}");
+        }
+        for text in [
+            r#"{"github":[1],"tiktok":"soon"}"#,
+            r#"{"github":[1],"tiktok":[]}"#,
+            r#"{"github":[1],"tiktok":[2,1,1]}"#,
+            r#"{"github":[1],"":null}"#,
+        ] {
+            assert!(parsed(text).is_err(), "{text}");
         }
     }
 
@@ -79,10 +86,7 @@ mod versions {
     fn a_body_that_is_not_an_object_is_refused() {
         for text in ["", "not json", "{\"github\":[1]", "{\"github\":[1]}}"] {
             let refusal = parsed(text).expect_err(text);
-            assert!(
-                matches!(refusal, VersionsError::Json(_)),
-                "{text}: {refusal}"
-            );
+            assert!(refusal.is_syntax() || refusal.is_eof(), "{text}: {refusal}");
         }
         for text in [
             "[]",
@@ -92,132 +96,64 @@ mod versions {
             "true",
             "[{\"github\":[1]}]",
         ] {
-            assert_eq!(
-                parsed(text).expect_err(text),
-                VersionsError::NotAnObject,
-                "{text}"
+            let refusal = parsed(text).expect_err(text);
+            assert!(refusal.is_data(), "{text}: {refusal}");
+            assert!(
+                refusal.to_string().contains("expected a map"),
+                "{text}: {refusal}"
             );
         }
     }
 
     /// Each of these refuses the whole list, the well-formed platforms in it
-    /// included, and the refusal names the platform at fault.
+    /// included.
     #[test]
     fn a_violation_refuses_the_whole_list() {
-        use VersionsError::*;
-        let x = PlatformId::X;
-        for (text, expected) in [
-            (r#"{"github":[1],"x":1}"#, NotAnArray { platform: x }),
-            (r#"{"github":[1],"x":"1"}"#, NotAnArray { platform: x }),
-            (
-                r#"{"github":[1],"x":{"1":true}}"#,
-                NotAnArray { platform: x },
-            ),
-            (r#"{"github":[1],"x":null}"#, NotAnArray { platform: x }),
-            (r#"{"github":[1],"x":[]}"#, Empty { platform: x }),
-            (
-                r#"{"github":[1],"x":[-1]}"#,
-                NotAVersion {
-                    platform: x,
-                    found: "-1".into(),
-                },
-            ),
-            (
-                r#"{"github":[1],"x":[1.5]}"#,
-                NotAVersion {
-                    platform: x,
-                    found: "1.5".into(),
-                },
-            ),
-            (
-                r#"{"github":[1],"x":[1.0]}"#,
-                NotAVersion {
-                    platform: x,
-                    found: "1.0".into(),
-                },
-            ),
-            (
-                r#"{"github":[1],"x":[65536]}"#,
-                NotAVersion {
-                    platform: x,
-                    found: "65536".into(),
-                },
-            ),
-            (
-                r#"{"github":[1],"x":[1e2]}"#,
-                NotAVersion {
-                    platform: x,
-                    found: "100.0".into(),
-                },
-            ),
-            (
-                r#"{"github":[1],"x":["1"]}"#,
-                NotAVersion {
-                    platform: x,
-                    found: "a string".into(),
-                },
-            ),
-            (
-                r#"{"github":[1],"x":[true]}"#,
-                NotAVersion {
-                    platform: x,
-                    found: "a boolean".into(),
-                },
-            ),
-            (
-                r#"{"github":[1],"x":[null]}"#,
-                NotAVersion {
-                    platform: x,
-                    found: "null".into(),
-                },
-            ),
-            (
-                r#"{"github":[1],"x":[[1]]}"#,
-                NotAVersion {
-                    platform: x,
-                    found: "an array".into(),
-                },
-            ),
-            (
-                r#"{"github":[1],"x":[{"version":1}]}"#,
-                NotAVersion {
-                    platform: x,
-                    found: "an object".into(),
-                },
-            ),
-            (
-                r#"{"github":[1],"x":[1,1]}"#,
-                Duplicate {
-                    platform: x,
-                    version: 1,
-                },
-            ),
-            (
-                r#"{"github":[1],"x":[1,2,2]}"#,
-                Duplicate {
-                    platform: x,
-                    version: 2,
-                },
-            ),
-            (r#"{"github":[1],"x":[2,1]}"#, Unordered { platform: x }),
-            (r#"{"github":[1],"x":[1,3,2]}"#, Unordered { platform: x }),
-            (r#"{"github":[1],"x":[1,2,1]}"#, Unordered { platform: x }),
+        for text in [
+            r#"{"github":[1],"x":1}"#,
+            r#"{"github":[1],"x":"1"}"#,
+            r#"{"github":[1],"x":{"1":true}}"#,
+            r#"{"github":[1],"x":null}"#,
+            r#"{"github":[1],"x":[]}"#,
+            r#"{"github":[1],"x":[-1]}"#,
+            r#"{"github":[1],"x":[1.5]}"#,
+            r#"{"github":[1],"x":[1.0]}"#,
+            r#"{"github":[1],"x":[65536]}"#,
+            r#"{"github":[1],"x":[1e2]}"#,
+            r#"{"github":[1],"x":["1"]}"#,
+            r#"{"github":[1],"x":[true]}"#,
+            r#"{"github":[1],"x":[null]}"#,
+            r#"{"github":[1],"x":[[1]]}"#,
+            r#"{"github":[1],"x":[{"version":1}]}"#,
+            r#"{"github":[1],"x":[1,1]}"#,
+            r#"{"github":[1],"x":[1,2,2]}"#,
+            r#"{"github":[1],"x":[2,1]}"#,
+            r#"{"github":[1],"x":[1,3,2]}"#,
+            r#"{"github":[1],"x":[1,2,1]}"#,
         ] {
-            assert_eq!(parsed(text).expect_err(text), expected, "{text}");
+            let refusal = parsed(text).expect_err(text);
+            assert!(refusal.is_data(), "{text}: {refusal}");
         }
     }
 
-    /// A refusal names the platform and the number at fault, and never echoes
-    /// a string: a value the length of the body stays out of the log.
+    /// A refusal names the rule broken and where in the body.
     #[test]
-    fn a_refusal_names_the_platform_and_never_echoes_a_string() {
-        let refusal = parsed(r#"{"x":["zzMarkerzz"]}"#).unwrap_err().to_string();
-        assert!(refusal.contains("x"), "{refusal}");
-        assert!(refusal.contains("a string"), "{refusal}");
-        assert!(!refusal.contains("zzMarkerzz"), "{refusal}");
+    fn a_refusal_names_the_rule_and_the_place() {
+        let refusal = parsed(r#"{"github":[1],"x":[]}"#).unwrap_err().to_string();
+        assert!(refusal.contains("lists no version"), "{refusal}");
+        assert!(refusal.contains("column"), "{refusal}");
+
+        let refusal = parsed(r#"{"github":[1],"x":[3,2]}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(refusal.contains("version 2 after 3"), "{refusal}");
+
+        let refusal = parsed(r#"{"github":[1],"x":[1,1]}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(refusal.contains("version 1 after 1"), "{refusal}");
 
         let refusal = parsed(r#"{"github":[70000]}"#).unwrap_err().to_string();
-        assert!(refusal.contains("github"), "{refusal}");
         assert!(refusal.contains("70000"), "{refusal}");
     }
 

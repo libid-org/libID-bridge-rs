@@ -6,7 +6,6 @@
 
 use std::{
     collections::BTreeMap,
-    fmt,
     sync::Arc,
 };
 
@@ -83,10 +82,26 @@ impl Deployment {
     }
 }
 
-/// The platforms a ceremony can run against. A name outside this catalog is
-/// refused while parsing a file, and ignored in a version list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+/// The platforms a ceremony can run against, each spelled in lowercase
+/// wherever it is written: the file, the version list and the public
+/// configuration. A name outside this catalog is refused while parsing a
+/// file, and ignored in a version list.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Deserialize,
+    strum::Display,
+    strum::EnumIter,
+    strum::EnumString,
+)]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum PlatformId {
     /// Keyed `google`.
     Google,
@@ -102,30 +117,6 @@ impl PlatformId {
     /// client is public; no other does.
     pub fn sends_a_credential(self) -> bool {
         matches!(self, PlatformId::Github)
-    }
-
-    /// The wire spelling: the key in the public configuration and in the
-    /// version list.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Google => "google",
-            Self::X => "x",
-            Self::Github => "github",
-        }
-    }
-
-    /// The platform `name` keys, or `None` where this bridge knows none by
-    /// that name.
-    pub fn named(name: &str) -> Option<PlatformId> {
-        [Self::Google, Self::X, Self::Github]
-            .into_iter()
-            .find(|platform| platform.as_str() == name)
-    }
-}
-
-impl fmt::Display for PlatformId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
     }
 }
 
@@ -434,7 +425,7 @@ impl CeremonyConfig<'_> {
                     entry
                 })
                 .collect();
-            by_id.insert(p.id.as_str().to_owned(), json!({ "versions": versions }));
+            by_id.insert(p.id.to_string(), json!({ "versions": versions }));
         }
         json!({
             "ccdpOrigin": self.ccdp_origin,

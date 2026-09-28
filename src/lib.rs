@@ -37,9 +37,8 @@ use std::sync::Arc;
 use artifact::upstream::{
     Publisher,
     Refresher,
+    Resource,
     Upstream,
-    CALLBACK,
-    VERSIONS,
 };
 use error::Result;
 use state::AppState;
@@ -65,8 +64,9 @@ impl Bridge {
     pub fn start(settings: &config::Settings) -> Result<Bridge> {
         let deployment = deployment::Deployment::checked(settings)?;
         let upstream = Upstream::new(&deployment.ccdp_origin);
-        let (callback_publisher, callback) = Publisher::of(&upstream, CALLBACK);
-        let (config_publisher, ceremony_config) = Publisher::of(&upstream, VERSIONS);
+        let (callback_publisher, callback) = Publisher::of(&upstream, Resource::Callback);
+        let (config_publisher, ceremony_config) =
+            Publisher::of(&upstream, Resource::Versions);
         let metrics = Arc::new(metrics::Metrics::new());
         let state = Arc::new(AppState {
             callback,

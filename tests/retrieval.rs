@@ -763,11 +763,14 @@ mod upstream {
             "  text/html",
             "text/html ",
         ] {
-            assert!(CALLBACK.is_served_as(media), "{media:?} names the artifact");
+            assert!(
+                Resource::Callback.is_served_as(media),
+                "{media:?} names the artifact"
+            );
         }
         for media in ["text/htmlx", "text/html-fragment", "application/json", ""] {
             assert!(
-                !CALLBACK.is_served_as(media),
+                !Resource::Callback.is_served_as(media),
                 "{media:?} does not name the artifact"
             );
         }
@@ -776,11 +779,14 @@ mod upstream {
             "application/json; charset=utf-8",
             "Application/JSON",
         ] {
-            assert!(VERSIONS.is_served_as(media), "{media:?} names the list");
+            assert!(
+                Resource::Versions.is_served_as(media),
+                "{media:?} names the list"
+            );
         }
         for media in ["application/jsonx", "text/json", "text/html", ""] {
             assert!(
-                !VERSIONS.is_served_as(media),
+                !Resource::Versions.is_served_as(media),
                 "{media:?} does not name the list"
             );
         }
@@ -933,12 +939,12 @@ mod upstream {
         assert_eq!(host, format!("127.0.0.1:{port}"));
         let upstream = Upstream::new(&origin("https://lib.id:443"));
         assert_eq!(
-            upstream.url(&CALLBACK),
+            upstream.url(Resource::Callback),
             format!("https://lib.id{ARTIFACT_PATH}"),
             "a default port is not part of the URL the client dials"
         );
         assert_eq!(
-            upstream.url(&VERSIONS),
+            upstream.url(Resource::Versions),
             format!("https://lib.id{VERSIONS_PATH}")
         );
     }

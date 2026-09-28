@@ -157,11 +157,11 @@ The Distribution publishes the platform ceremony versions it bundles at
 `/ccdp/versions.json`, beside the artifact: one JSON object keyed by platform
 id, each value a nonempty, duplicate-free, ascending array of unsigned 16-bit
 integers, as in `{"github":[1],"google":[1],"x":[1]}`. The bridge advertises
-exactly those versions. A key it does not know is ignored, whatever its
-value: a Distribution may bundle a platform this bridge predates. Any other
-violation — a top level that is not an object, a value that is not such an
-array, an empty array, a duplicate, a version out of order — refuses the
-whole list, and the list last accepted stays.
+exactly those versions. A key it does not know is ignored: a Distribution may
+bundle a platform this bridge predates. Every value is held to the grammar,
+and any violation — a top level that is not an object, a value that is not
+such an array, an empty array, a duplicate, a version out of order — refuses
+the whole list, and the list last accepted stays.
 
 Each accepted list composes the record once: every configured platform the
 list names, with the client each listed version runs. A configured platform

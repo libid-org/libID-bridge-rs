@@ -19,11 +19,9 @@ use prometheus_client::{
     registry::Registry,
 };
 
-use crate::artifact::upstream::{
-    Resource,
-    CALLBACK,
-    VERSIONS,
-};
+use strum::IntoEnumIterator;
+
+use crate::artifact::upstream::Resource;
 
 /// How one retrieval ended, and of which resource.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -121,9 +119,9 @@ impl Metrics {
 
         // A gauge that reads `0` from the start says a resource is missing;
         // one that does not exist yet says nothing.
-        for resource in [CALLBACK, VERSIONS] {
+        for resource in Resource::iter() {
             let label = ByResource {
-                resource: resource.label,
+                resource: resource.label(),
             };
             available.get_or_create(&label).set(0);
             published_at.get_or_create(&label).set(0);
@@ -141,26 +139,26 @@ impl Metrics {
 
     /// A retrieval of `resource` published its product, replacing whatever
     /// was served.
-    pub fn published(&self, resource: &Resource) {
+    pub fn published(&self, resource: Resource) {
         self.count(resource, "published");
         let label = ByResource {
-            resource: resource.label,
+            resource: resource.label(),
         };
         self.available.get_or_create(&label).set(1);
         self.published_at.get_or_create(&label).set(unix_seconds());
     }
 
     /// A retrieval of `resource` found what is served to be current.
-    pub fn unchanged(&self, resource: &Resource) {
+    pub fn unchanged(&self, resource: Resource) {
         self.count(resource, "unchanged")
     }
 
     /// A retrieval of `resource` produced nothing. Whatever was served stays.
-    pub fn failed(&self, resource: &Resource, kind: &'static str) {
+    pub fn failed(&self, resource: Resource, kind: &'static str) {
         self.count(resource, "failed");
         self.failures
             .get_or_create(&Failure {
-                resource: resource.label,
+                resource: resource.label(),
                 kind,
             })
             .inc();
@@ -194,10 +192,10 @@ impl Metrics {
     }
 
     /// One retrieval outcome of `resource`.
-    fn count(&self, resource: &Resource, outcome: &'static str) {
+    fn count(&self, resource: Resource, outcome: &'static str) {
         self.retrievals
             .get_or_create(&Retrieval {
-                resource: resource.label,
+                resource: resource.label(),
                 outcome,
             })
             .inc();

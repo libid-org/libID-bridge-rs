@@ -49,7 +49,6 @@ use crate::{
     versions::{
         self,
         Versions,
-        VersionsError,
     },
 };
 
@@ -68,44 +67,54 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long the request and its answer may take once the transport is open.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// One resource of the Distribution, as this bridge retrieves it: where it
-/// is, what it is served as, how much of it is read, and what its
-/// retrievals are counted under.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Resource {
-    /// Its path under the CCDP origin.
-    pub path: &'static str,
-    /// The media type its `Content-Type` must name: what the request asks
-    /// for, and what a response is refused without.
-    pub media: &'static str,
-    /// The largest body this bridge reads of it; the retrieval stops there.
-    pub max_bytes: usize,
-    /// The `resource` label its retrievals are counted under.
-    pub label: &'static str,
+/// The resources of the Distribution this bridge retrieves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumIter)]
+pub enum Resource {
+    /// The callback artifact.
+    Callback,
+    /// The version list.
+    Versions,
 }
 
-/// The callback artifact.
-pub const CALLBACK: Resource = Resource {
-    path: ARTIFACT_PATH,
-    media: "text/html",
-    max_bytes: policy::MAX_ARTIFACT_BYTES,
-    label: "callback",
-};
-
-/// The version list.
-pub const VERSIONS: Resource = Resource {
-    path: VERSIONS_PATH,
-    media: "application/json",
-    max_bytes: versions::MAX_VERSIONS_BYTES,
-    label: "versions",
-};
-
 impl Resource {
+    /// Its path under the CCDP origin.
+    pub fn path(self) -> &'static str {
+        match self {
+            Resource::Callback => ARTIFACT_PATH,
+            Resource::Versions => VERSIONS_PATH,
+        }
+    }
+
+    /// The media type its `Content-Type` must name: what the request asks
+    /// for, and what a response is refused without.
+    pub fn media(self) -> &'static str {
+        match self {
+            Resource::Callback => "text/html",
+            Resource::Versions => "application/json",
+        }
+    }
+
+    /// The largest body this bridge reads of it; the retrieval stops there.
+    pub fn max_bytes(self) -> usize {
+        match self {
+            Resource::Callback => policy::MAX_ARTIFACT_BYTES,
+            Resource::Versions => versions::MAX_VERSIONS_BYTES,
+        }
+    }
+
+    /// The `resource` label its retrievals are counted under.
+    pub fn label(self) -> &'static str {
+        match self {
+            Resource::Callback => "callback",
+            Resource::Versions => "versions",
+        }
+    }
+
     /// Whether `content_type` names exactly this resource's media type,
     /// case-insensitively, with parameters after optional whitespace and a
     /// `;`. `text/htmlx` does not name `text/html`.
-    pub fn is_served_as(&self, content_type: &str) -> bool {
-        let wanted = self.media.as_bytes();
+    pub fn is_served_as(self, content_type: &str) -> bool {
+        let wanted = self.media().as_bytes();
         let named = content_type.trim_start().as_bytes();
         named.len() >= wanted.len()
             && named[..wanted.len()].eq_ignore_ascii_case(wanted)
@@ -183,8 +192,8 @@ pub enum FetchError {
     #[error(transparent)]
     Artifact(#[from] policy::ArtifactError),
     /// The version list arrived and this bridge will not accept it.
-    #[error(transparent)]
-    Versions(#[from] VersionsError),
+    #[error("the version list is refused: {0}")]
+    Versions(#[from] serde_json::Error),
 }
 
 impl FetchError {
@@ -278,8 +287,8 @@ impl Upstream {
 
     /// The URL `resource` is retrieved from, for a log line or a failure
     /// message.
-    pub fn url(&self, resource: &Resource) -> String {
-        format!("{}{}", self.origin, resource.path)
+    pub fn url(&self, resource: Resource) -> String {
+        format!("{}{}", self.origin, resource.path())
     }
 
     /// Retrieve the callback artifact and compose what would be served from
@@ -294,7 +303,7 @@ impl Upstream {
             body,
             headers,
             etag,
-        } = self.fetch(&CALLBACK, etag).await?
+        } = self.fetch(Resource::Callback, etag).await?
         else {
             return Ok(None);
         };
@@ -325,7 +334,9 @@ impl Upstream {
         &self,
         etag: Option<&str>,
     ) -> Result<Option<(Versions, Option<String>)>, FetchError> {
-        let Fetched::Fresh { body, etag, .. } = self.fetch(&VERSIONS, etag).await? else {
+        let Fetched::Fresh { body, etag, .. } =
+            self.fetch(Resource::Versions, etag).await?
+        else {
             return Ok(None);
         };
         Ok(Some((Versions::parse(&body)?, etag)))
@@ -334,7 +345,7 @@ impl Upstream {
     /// One conditional GET of `resource`, under one budget.
     async fn fetch(
         &self,
-        resource: &Resource,
+        resource: Resource,
         etag: Option<&str>,
     ) -> Result<Fetched, FetchError> {
         tokio::time::timeout(REQUEST_TIMEOUT, self.exchange(resource, etag))
@@ -345,7 +356,7 @@ impl Upstream {
     /// Send the request and read the answer.
     async fn exchange(
         &self,
-        resource: &Resource,
+        resource: Resource,
         etag: Option<&str>,
     ) -> Result<Fetched, FetchError> {
         let response = self
@@ -371,13 +382,13 @@ impl Upstream {
     /// identity`, so the bytes hashed are the bytes read.
     fn request(
         &self,
-        resource: &Resource,
+        resource: Resource,
         etag: Option<&str>,
     ) -> hyper::Request<Empty<Bytes>> {
         let mut request = hyper::Request::builder()
             .method(hyper::Method::GET)
             .uri(self.url(resource))
-            .header(header::ACCEPT, resource.media)
+            .header(header::ACCEPT, resource.media())
             .header(header::ACCEPT_ENCODING, "identity")
             .header(
                 header::USER_AGENT,
@@ -396,7 +407,7 @@ impl Fetched {
     /// `resource` read out of a `200`: served as its media type, unencoded,
     /// and within its bound.
     async fn of(
-        resource: &Resource,
+        resource: Resource,
         response: hyper::Response<hyper::body::Incoming>,
     ) -> Result<Fetched, FetchError> {
         let (parts, body) = response.into_parts();
@@ -407,7 +418,7 @@ impl Fetched {
         if !resource.is_served_as(media) {
             return Err(FetchError::Media {
                 found: media.to_owned(),
-                wanted: resource.media,
+                wanted: resource.media(),
             });
         }
         // The request admitted `identity` alone; an encoded body is refused.
@@ -419,12 +430,12 @@ impl Fetched {
         let etag = header(header::ETAG).map(str::to_owned);
 
         // Bounded while it is read, whatever `content-length` declares.
-        let body = Limited::new(body, resource.max_bytes)
+        let body = Limited::new(body, resource.max_bytes())
             .collect()
             .await
             .map_err(
                 |e| match e.downcast_ref::<http_body_util::LengthLimitError>() {
-                    Some(_) => FetchError::TooLarge(resource.max_bytes),
+                    Some(_) => FetchError::TooLarge(resource.max_bytes()),
                     None => FetchError::unreachable(format!("reading the body: {e}")),
                 },
             )?
@@ -456,7 +467,7 @@ impl<T> Publisher<T> {
     /// the routes read. Nothing is published until a retrieval accepts
     /// something.
     pub fn of(upstream: &Upstream, resource: Resource) -> (Publisher<T>, Retrieved<T>) {
-        let url = upstream.url(&resource);
+        let url = upstream.url(resource);
         let (current, read_current) = watch::channel(None);
         let (failure, read_failure) = watch::channel(None);
         (
@@ -603,7 +614,7 @@ impl Refresher {
     /// `outcome` of one retrieval through `publisher`, in the metrics, in the
     /// failure its route reports, and in the log.
     fn account<T>(&self, publisher: &Publisher<T>, outcome: &Result<bool, FetchError>) {
-        let resource = &publisher.resource;
+        let resource = publisher.resource;
         match outcome {
             Ok(true) => {
                 self.metrics.published(resource);
@@ -613,7 +624,7 @@ impl Refresher {
                 self.metrics.unchanged(resource);
                 publisher.succeeded();
                 tracing::debug!(
-                    resource = resource.label,
+                    resource = resource.label(),
                     url = publisher.url,
                     "the resource is unchanged"
                 );
@@ -622,7 +633,7 @@ impl Refresher {
                 self.metrics.failed(resource, e.kind());
                 publisher.failed(e);
                 tracing::warn!(
-                    resource = resource.label,
+                    resource = resource.label(),
                     url = publisher.url,
                     detail = %e,
                     kind = e.kind(),
@@ -654,7 +665,7 @@ impl Refresher {
             return Ok(false);
         }
         tracing::info!(
-            resource = CALLBACK.label,
+            resource = Resource::Callback.label(),
             url = self.callback.url,
             etag = published.etag.as_deref().unwrap_or("<none>"),
             policy = published.document.csp.to_str().unwrap_or("<unreadable>"),
@@ -683,7 +694,7 @@ impl Refresher {
         // the file disagree on is logged.
         let record = self.deployment.ceremony_config(&versions);
         tracing::info!(
-            resource = VERSIONS.label,
+            resource = Resource::Versions.label(),
             url = self.config.url,
             etag = etag.as_deref().unwrap_or("<none>"),
             versions = %versions,

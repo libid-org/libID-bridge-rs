@@ -10,9 +10,9 @@ WORKDIR /build
 COPY . .
 RUN cargo build --release --locked
 
-# Runtime stage. No CA bundle: the trust anchors for retrieving the callback
-# artifact are compiled in (`webpki-roots`), and the healthcheck is
-# plaintext loopback. curl serves the healthcheck.
+# Runtime stage. No CA bundle: the trust anchors for retrieving the
+# Distribution's resources are compiled in (`webpki-roots`), and the
+# healthcheck is plaintext loopback. curl serves the healthcheck.
 FROM debian:bookworm-slim
 
 RUN apt-get update \

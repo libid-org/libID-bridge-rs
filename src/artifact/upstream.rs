@@ -1,7 +1,8 @@
-//! Retrieving the callback artifact from the Distribution at startup and
-//! revalidating it on a schedule. Nothing here sees a request: one connection
-//! is opened per retrieval, carrying no cookie, credential or query, and a
-//! redirect is refused.
+//! Retrieving the callback artifact from the Distribution and revalidating
+//! it on a schedule. Nothing here sees a request: one connection is opened
+//! per retrieval, carrying no cookie, credential or query, and a redirect is
+//! refused. The first retrieval is the refresh loop's, so startup opens no
+//! connection.
 
 use std::{
     sync::Arc,
@@ -216,8 +217,8 @@ impl Upstream {
     }
 
     /// Retrieve the artifact and compose what would be served from it.
-    /// `Ok(None)` is a `304`: the document in hand is current. Startup and the
-    /// refresh loop both take this path.
+    /// `Ok(None)` is a `304`: the document in hand is current. Every tick of
+    /// the refresh loop takes this path, the first included.
     pub async fn retrieve(
         &self,
         allowed_origins: &[Admitted],

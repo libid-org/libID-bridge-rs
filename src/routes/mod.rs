@@ -11,9 +11,8 @@
 //! `allowedAppOrigins ∪ {ccdpOrigin}` admits, echoes that origin itself as
 //! the one origin allowed, and answers on `OPTIONS` the preflight a
 //! caller sending its own header needs. The callback carries no CORS: it is a
-//! top-level navigation. Each of the two answers `503` while it has nothing
-//! from the Distribution to serve. No other path is served, and no route
-//! performs a token exchange or opens a notary connection.
+//! top-level navigation. No other path is served, and no route performs a
+//! token exchange or opens a notary connection.
 
 pub mod callback;
 pub mod config;
@@ -100,12 +99,6 @@ async fn metrics(
 async fn unrouted() -> Response {
     (StatusCode::NOT_FOUND, "").into_response()
 }
-
-/// How long a caller is asked to wait before a route that had nothing from
-/// the Distribution to serve is retried. The retrieval that would end that
-/// answer is already in its own backoff, which starts a second after a
-/// failure.
-pub const RETRY_AFTER: &str = "5";
 
 /// The liveness probe.
 pub const HEALTH_PATH: &str = "/health";

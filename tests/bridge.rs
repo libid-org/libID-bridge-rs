@@ -18,7 +18,7 @@ mod root {
     };
 
     /// The state of a deployment started on the fixture configuration with
-    /// `args`, nothing retrieved yet.
+    /// `args`.
     async fn started(args: &[&str]) -> Arc<AppState> {
         Bridge::start(&common::config(args)).unwrap().state
     }
@@ -28,31 +28,21 @@ mod root {
     /// the published record.
     #[tokio::test]
     async fn an_omitted_ccdp_origin_selects_the_canonical_distribution() {
-        let state = common::state(&[]).await;
-        let record = common::record(&state);
+        let state = started(&[]).await;
+        let record: serde_json::Value =
+            serde_json::from_slice(&state.ceremony_config).unwrap();
         assert_eq!(record["ccdpOrigin"], Distribution::shared().origin());
     }
 
-    /// Nothing is retrieved at startup: a started deployment has no record
-    /// and no document until its refresher runs, and says of each what it is
-    /// waiting on.
+    /// The record is composed at startup and the document is retrieved
+    /// later: a started deployment holds its record before its refresher
+    /// runs, and no document.
     #[tokio::test]
-    async fn a_started_deployment_has_retrieved_nothing() {
+    async fn a_started_deployment_holds_its_record_and_no_document() {
         let state = started(&[]).await;
-        assert!(state.ceremony_config.current.borrow().is_none());
-        assert!(state.callback.current.borrow().is_none());
-        assert!(state.ceremony_config.failure.borrow().is_none());
-        assert!(state.callback.failure.borrow().is_none());
-        let why = state.ceremony_config.why_nothing();
-        assert!(
-            why.contains(&format!(
-                "{}/ccdp/versions.json",
-                Distribution::shared().origin()
-            )),
-            "{why}"
-        );
-        let why = state.callback.why_nothing();
-        assert!(why.contains("/ccdp/callback.html"), "{why}");
+        assert!(!state.ceremony_config.is_empty());
+        assert!(state.callback.borrow().is_none());
+        assert!(state.failure.borrow().is_none());
     }
 
     /// The effective set is `allowedAppOrigins ∪ {ccdpOrigin}`: the resolved
@@ -252,45 +242,38 @@ mod root {
         }
     }
 
-    /// The published record keys every enabled platform the Distribution
-    /// lists by name, with one entry per listed version carrying the client
-    /// it runs; the github entries carry the public client credential, and no
-    /// other platform's do.
+    /// The published record keys every enabled platform by name and carries
+    /// its client id; the github entry carries its public client credential,
+    /// and no other entry carries one.
     #[tokio::test]
     async fn the_published_configuration_keys_every_enabled_platform_by_name() {
-        let state = common::state(&[
+        let state = started(&[
             "--platforms",
             r#"[{"id":"google","default_client_id":"g"},{"id":"x","default_client_id":"xc"},{"id":"github","default_client_id":"gh","default_client_credential":"c0ffee"}]"#,
         ])
         .await;
-        let record = common::record(&state);
+        let record: serde_json::Value =
+            serde_json::from_slice(&state.ceremony_config).unwrap();
         let platforms = record["platforms"].as_object().unwrap();
         let mut names: Vec<&str> = platforms.keys().map(String::as_str).collect();
         names.sort_unstable();
         assert_eq!(names, ["github", "google", "x"]);
-        assert_eq!(
-            platforms["google"],
-            serde_json::json!({ "versions": [{ "version": 1, "clientId": "g" }] })
-        );
-        assert_eq!(
-            platforms["x"],
-            serde_json::json!({ "versions": [{ "version": 1, "clientId": "xc" }] })
-        );
+        assert_eq!(platforms["google"], serde_json::json!({ "clientId": "g" }));
+        assert_eq!(platforms["x"], serde_json::json!({ "clientId": "xc" }));
         assert_eq!(
             platforms["github"],
-            serde_json::json!({ "versions": [
-                { "version": 1, "clientId": "gh", "clientCredential": "c0ffee" }
-            ]})
+            serde_json::json!({ "clientId": "gh", "clientCredential": "c0ffee" })
         );
     }
 
     /// The fixture deployment publishes the fixture credential.
     #[tokio::test]
     async fn the_fixture_deployment_publishes_its_credential() {
-        let state = common::state(&[]).await;
-        let record = common::record(&state);
+        let state = started(&[]).await;
+        let record: serde_json::Value =
+            serde_json::from_slice(&state.ceremony_config).unwrap();
         assert_eq!(
-            record["platforms"]["github"]["versions"][0]["clientCredential"],
+            record["platforms"]["github"]["clientCredential"],
             common::CLIENT_CREDENTIAL
         );
     }

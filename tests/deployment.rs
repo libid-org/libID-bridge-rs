@@ -6,6 +6,8 @@
 mod common;
 
 mod deployment {
+    use std::collections::BTreeMap;
+
     use libid_bridge_rs::{
         deployment::*,
         error::{
@@ -13,7 +15,6 @@ mod deployment {
             Result,
         },
         origin::Origin,
-        versions::Versions,
     };
     use serde_json::{
         json,
@@ -59,22 +60,20 @@ mod deployment {
         .to_string()
     }
 
-    fn versions(text: &str) -> Versions {
-        Versions::parse(text.as_bytes()).expect("a list the tests write")
+    /// The record `platforms` publish, as the bytes it is served in.
+    fn serialized(platforms: &[Platform]) -> String {
+        let ccdp_origin = Origin::parse("CCDP_ORIGIN", "https://lib.id").unwrap();
+        let bytes = CeremonyConfig {
+            ccdp_origin: &ccdp_origin,
+            platforms,
+        }
+        .serialized();
+        String::from_utf8(bytes.to_vec()).expect("the record is JSON text")
     }
 
-    /// The record `platforms` publish for `versions`.
-    fn record(platforms: &[Platform], versions: &Versions) -> Value {
-        let ccdp_origin = Origin::parse("CCDP_ORIGIN", "https://lib.id").unwrap();
-        serde_json::from_slice(
-            &CeremonyConfig {
-                ccdp_origin: &ccdp_origin,
-                platforms,
-                versions,
-            }
-            .serialized(),
-        )
-        .unwrap()
+    /// The record `platforms` publish.
+    fn record(platforms: &[Platform]) -> Value {
+        serde_json::from_str(&serialized(platforms)).unwrap()
     }
 
     fn sorted_keys(value: &Value) -> Vec<&str> {
@@ -103,28 +102,39 @@ mod deployment {
         assert!(p[0].overrides.is_empty());
     }
 
-    /// An override is a whole client, keyed by version: the client a version
-    /// runs is its override where one is written, the defaults otherwise.
+    /// An override is a whole client, keyed by its version, beside the
+    /// defaults it leaves in place.
     #[test]
-    fn an_override_is_the_client_of_its_version_alone() {
+    fn an_override_is_a_whole_client_keyed_by_its_version() {
         let p = checked(OVERRIDDEN).unwrap();
         let github = &p[0];
-        assert_eq!(github.client_for(1), &github.default);
+        assert_eq!(github.default.client_id, "Iv1.0");
         assert_eq!(
-            github.client_for(2),
-            &Client {
-                client_id: "Iv1.2".into(),
-                client_credential: Some("decaf".into()),
-            }
+            github.overrides,
+            BTreeMap::from([(
+                2,
+                Client {
+                    client_id: "Iv1.2".into(),
+                    client_credential: Some("decaf".into()),
+                },
+            )])
         );
-        assert_eq!(github.client_for(3), &github.default);
         let x = &p[1];
-        assert_eq!(x.client_for(1).client_id, "x1");
-        assert_eq!(x.client_for(2), &x.default);
+        assert_eq!(x.default.client_id, "xc");
+        assert_eq!(
+            x.overrides,
+            BTreeMap::from([(
+                1,
+                Client {
+                    client_id: "x1".into(),
+                    client_credential: None,
+                },
+            )])
+        );
     }
 
     /// The canonical spellings of a version key are read, zero and the
-    /// largest version included.
+    /// largest version included, and published under the same spellings.
     #[test]
     fn a_version_key_is_the_canonical_decimal_spelling() {
         let p = checked(&x_overriding(json!({
@@ -135,105 +145,75 @@ mod deployment {
         .unwrap();
         let keys: Vec<u16> = p[0].overrides.keys().copied().collect();
         assert_eq!(keys, [0, 7, 65535]);
+        let record = record(&p);
+        assert_eq!(
+            sorted_keys(&record["platforms"]["x"]["versionOverrides"]),
+            ["0", "65535", "7"]
+        );
     }
 
-    /// The record carries each configured platform the Distribution lists,
-    /// with one entry per listed version, ascending, each carrying the client
-    /// that version runs: its override, or the defaults. `clientCredential`
-    /// is on exactly github's entries, and nothing of the former shape
-    /// survives.
+    /// The record carries each enabled platform under its id: the client its
+    /// versions run and, under `versionOverrides`, each override keyed by the
+    /// decimal version. `clientCredential` is on exactly github's clients,
+    /// and nothing of the former shape survives.
     #[test]
-    fn the_record_carries_one_entry_per_listed_version_with_the_client_it_runs() {
+    fn the_record_carries_each_platforms_client_and_its_overrides() {
         let platforms = checked(OVERRIDDEN).unwrap();
-        let record = record(&platforms, &versions(r#"{"github":[1,2,3],"x":[1,2]}"#));
+        let record = record(&platforms);
 
         assert_eq!(sorted_keys(&record), ["ccdpOrigin", "platforms"]);
         assert_eq!(record["ccdpOrigin"], "https://lib.id");
         assert_eq!(sorted_keys(&record["platforms"]), ["github", "x"]);
         assert_eq!(
             record["platforms"]["github"],
-            json!({ "versions": [
-                { "version": 1, "clientId": "Iv1.0", "clientCredential": "c0ffee" },
-                { "version": 2, "clientId": "Iv1.2", "clientCredential": "decaf" },
-                { "version": 3, "clientId": "Iv1.0", "clientCredential": "c0ffee" },
-            ]})
+            json!({
+                "clientId": "Iv1.0",
+                "clientCredential": "c0ffee",
+                "versionOverrides": {
+                    "2": { "clientId": "Iv1.2", "clientCredential": "decaf" }
+                }
+            })
         );
         assert_eq!(
             record["platforms"]["x"],
-            json!({ "versions": [
-                { "version": 1, "clientId": "x1" },
-                { "version": 2, "clientId": "xc" },
-            ]})
-        );
-        assert_eq!(
-            sorted_keys(&record["platforms"]["x"]["versions"][1]),
-            ["clientId", "version"]
+            json!({
+                "clientId": "xc",
+                "versionOverrides": { "1": { "clientId": "x1" } }
+            })
         );
         let raw = record.to_string();
         assert!(!raw.contains("ceremonyVersions"), "{raw}");
+        assert!(!raw.contains("\"versions\""), "{raw}");
     }
 
-    /// The versions advertised are the Distribution's, in the order it lists
-    /// them; the file names none of its own.
+    /// `versionOverrides` is present only where the file overrides a
+    /// version: a platform overriding none is its client alone.
     #[test]
-    fn the_versions_advertised_are_the_distributions() {
-        let platforms = checked(ONE).unwrap();
-        let record = record(&platforms, &versions(r#"{"github":[3,9]}"#));
-        let listed: Vec<u64> = record["platforms"]["github"]["versions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|entry| entry["version"].as_u64().unwrap())
-            .collect();
-        assert_eq!(listed, [3, 9]);
-    }
-
-    /// An override for a version the Distribution does not list is ignored:
-    /// an override applies only on top of a version that exists.
-    #[test]
-    fn an_override_for_an_unlisted_version_is_ignored() {
-        let platforms = checked(OVERRIDDEN).unwrap();
-        let record = record(&platforms, &versions(r#"{"github":[1],"x":[2]}"#));
+    fn a_platform_overriding_no_version_carries_no_version_overrides() {
+        let record = record(&checked(ONE).unwrap());
         assert_eq!(
-            record["platforms"]["github"]["versions"],
-            json!([{ "version": 1, "clientId": "Iv1.0", "clientCredential": "c0ffee" }])
+            sorted_keys(&record["platforms"]["github"]),
+            ["clientCredential", "clientId"]
         );
-        assert_eq!(
-            record["platforms"]["x"]["versions"],
-            json!([{ "version": 2, "clientId": "xc" }])
-        );
-        let raw = record.to_string();
-        assert!(!raw.contains("Iv1.2") && !raw.contains("x1"), "{raw}");
     }
 
-    /// A configured platform the Distribution lists no version for is not
-    /// advertised.
+    /// The platforms are keyed by id in the bytes served, sorted as
+    /// `serde_json::Map` sorts keys, whatever order the file enables them in.
     #[test]
-    fn a_configured_platform_the_distribution_omits_is_not_advertised() {
-        let platforms = checked(OVERRIDDEN).unwrap();
-        let record = record(&platforms, &versions(r#"{"github":[1]}"#));
-        assert_eq!(sorted_keys(&record["platforms"]), ["github"]);
-    }
-
-    /// A platform the Distribution lists and the file does not configure is
-    /// not advertised: there is no client to publish for it.
-    #[test]
-    fn a_listed_platform_the_file_does_not_configure_is_not_advertised() {
-        let platforms = checked(ONE).unwrap();
-        let record = record(
-            &platforms,
-            &versions(r#"{"github":[1],"google":[1],"x":[1]}"#),
+    fn the_record_keys_the_platforms_in_sorted_order() {
+        let platforms = checked(
+            r#"[{"id":"x","default_client_id":"xc"},{"id":"github","default_client_id":"gh","default_client_credential":"c"},{"id":"google","default_client_id":"g"}]"#,
+        )
+        .unwrap();
+        let raw = serialized(&platforms);
+        let at = |key: &str| {
+            raw.find(&format!("\"{key}\":"))
+                .unwrap_or_else(|| panic!("{key} is missing from {raw}"))
+        };
+        assert!(
+            at("github") < at("google") && at("google") < at("x"),
+            "{raw}"
         );
-        assert_eq!(sorted_keys(&record["platforms"]), ["github"]);
-    }
-
-    /// A list naming no configured platform composes a record naming none.
-    #[test]
-    fn a_list_naming_no_configured_platform_composes_an_empty_record() {
-        let platforms = checked(ONE).unwrap();
-        let record = record(&platforms, &versions(r#"{"google":[1]}"#));
-        assert_eq!(sorted_keys(&record), ["ccdpOrigin", "platforms"]);
-        assert_eq!(record["platforms"], json!({}));
     }
 
     /// Each of these is refused at startup.

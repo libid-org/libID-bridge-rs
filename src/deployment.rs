@@ -1,8 +1,7 @@
 //! What a deployment is, checked once at startup: the Distribution it
 //! selects, the origins it admits, the platforms it enables with the OAuth
-//! clients their versions run, and the public ceremony configuration
-//! composed from those clients and the versions the Distribution bundles.
-//! Nothing here is retrieved or bound.
+//! clients their ceremony versions run, and the public ceremony configuration
+//! composed from them. Nothing here is retrieved or bound.
 
 use std::{
     collections::BTreeMap,
@@ -10,7 +9,10 @@ use std::{
 };
 
 use bytes::Bytes;
-use serde::Deserialize;
+use serde::{
+    Deserialize,
+    Serialize,
+};
 use serde_json::{
     json,
     Map,
@@ -27,7 +29,6 @@ use crate::{
         Admitted,
         Origin,
     },
-    versions::Versions,
 };
 
 /// The checked inputs of one deployment.
@@ -69,37 +70,21 @@ impl Deployment {
         })
     }
 
-    /// The public ceremony configuration this deployment publishes for
-    /// `versions`, as the bytes every admitted caller receives: composed and
-    /// serialized once per accepted version list.
-    pub fn ceremony_config(&self, versions: &Versions) -> Bytes {
+    /// The public ceremony configuration, as the bytes every admitted caller
+    /// receives: composed and serialized once, at startup.
+    pub fn ceremony_config(&self) -> Bytes {
         CeremonyConfig {
             ccdp_origin: &self.ccdp_origin,
             platforms: &self.platforms,
-            versions,
         }
         .serialized()
     }
 }
 
 /// The platforms a ceremony can run against, each spelled in lowercase
-/// wherever it is written: the file, the version list and the public
-/// configuration. A name outside this catalog is refused while parsing a
-/// file, and ignored in a version list.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Deserialize,
-    strum::Display,
-    strum::EnumIter,
-    strum::EnumString,
-)]
+/// wherever it is written: the file and the public configuration. A name
+/// outside this catalog is refused while parsing a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, strum::Display)]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum PlatformId {
@@ -121,24 +106,25 @@ impl PlatformId {
 }
 
 /// One OAuth client: the public client identifier and, on the platforms
-/// whose ceremony sends one, the OAuth App's client secret, published as
-/// `clientCredential`. The file writes a platform's defaults as
-/// `default_client_id` and `default_client_credential` on the platform's
-/// own table, and the client of one version as a
-/// `[platforms.version_override.N]` table carrying these two keys.
+/// whose ceremony sends one, the OAuth App's client secret. The file writes
+/// a platform's defaults as `default_client_id` and
+/// `default_client_credential` on the platform's own table, and the client
+/// of one version as a `[platforms.version_override.N]` table carrying
+/// `client_id` and `client_credential`. The public record carries it as
+/// `clientId` and, where there is one, `clientCredential`.
 ///
 /// Whether a client carries a credential is not a different shape, it is a
 /// rule, and [`Client::checked`] applies it: GitHub's ceremony sends one as
 /// `client_secret` and no other ceremony sends one at all.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all(serialize = "camelCase"))]
 pub struct Client {
     /// The public OAuth client identifier: nonempty printable ASCII without
     /// whitespace.
     pub client_id: String,
     /// The client credential, on exactly the platforms whose ceremony sends
     /// one: nonempty printable ASCII without whitespace.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_credential: Option<String>,
 }
 
@@ -203,9 +189,9 @@ impl Client {
 /// client_credential = "..."
 /// ```
 ///
-/// Which versions the platform advertises is not written here: the
-/// Distribution lists the versions it bundles, and the record is composed
-/// from both.
+/// Which versions exist is not written here: the Distribution publishes the
+/// versions it bundles, and the application reads that list and runs each
+/// with the client this table assigns it.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlatformProfile {
@@ -226,17 +212,25 @@ pub struct PlatformProfile {
 }
 
 /// One enabled platform, checked: the client its versions run by default,
-/// and the versions with a client of their own. Which versions it
-/// advertises is the Distribution's to say; a record is composed from both.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// and the versions with a client of their own. Serialized, it is the
+/// platform's entry in the public record: the default client's `clientId`
+/// and `clientCredential` and, where any override is written,
+/// `versionOverrides` keyed by the decimal spelling of the version.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Platform {
-    /// Which platform.
+    /// Which platform: the key its entry is published under.
+    #[serde(skip_serializing)]
     pub id: PlatformId,
     /// The client every version runs unless `overrides` names it.
+    #[serde(flatten)]
     pub default: Client,
-    /// The clients written for particular versions, by version. One for a
-    /// version the Distribution does not list is ignored when the record is
-    /// composed; an override applies only on top of a version that exists.
+    /// The clients written for particular versions, by version. Every one
+    /// written is published: whether a version exists is the Distribution's
+    /// to say and the application's to check.
+    #[serde(
+        rename = "versionOverrides",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub overrides: BTreeMap<u16, Client>,
 }
 
@@ -271,11 +265,6 @@ impl Platform {
             default,
             overrides,
         })
-    }
-
-    /// The client `version` runs: the one written for it, or the defaults.
-    pub fn client_for(&self, version: u16) -> &Client {
-        self.overrides.get(&version).unwrap_or(&self.default)
     }
 
     /// `key` as a version: the canonical decimal spelling of an unsigned
@@ -374,86 +363,35 @@ fn allowed_app_origins(list: &[String]) -> Result<Vec<Admitted>> {
     Ok(out)
 }
 
-/// The public ceremony configuration: what one deployment publishes for one
-/// version list.
+/// The public ceremony configuration: what one deployment publishes.
 pub struct CeremonyConfig<'a> {
     /// The CCDP Distribution this deployment selects.
     pub ccdp_origin: &'a Origin,
     /// The enabled platforms, checked.
     pub platforms: &'a [Platform],
-    /// The versions the Distribution bundles, accepted.
-    pub versions: &'a Versions,
 }
 
 impl CeremonyConfig<'_> {
-    /// The record: each configured platform the list names, with one entry
-    /// per listed version, ascending, carrying the client that version
-    /// runs. A configured platform the list does not name is left out, an
-    /// override for a version the list does not carry is ignored, and each
-    /// is logged. A listed platform the file does not configure has no
-    /// client to publish and is not advertised.
+    /// The record: `ccdpOrigin`, and under `platforms` each enabled
+    /// platform's entry by its id, in the order `serde_json::Map` keeps its
+    /// keys.
     fn record(&self) -> Value {
-        let mut by_id = Map::new();
-        for p in self.platforms {
-            let Some(listed) = self.versions.bundled_for(p.id) else {
-                tracing::warn!(
-                    platform = %p.id,
-                    "the platform is left out of the ceremony configuration: the \
-                     Distribution lists no version for it"
-                );
-                continue;
-            };
-            for version in p.overrides.keys().filter(|v| !listed.contains(v)) {
-                tracing::warn!(
-                    platform = %p.id,
-                    version,
-                    "the version override is ignored: the Distribution does not list \
-                     the version"
-                );
-            }
-            let versions: Vec<Value> = listed
-                .iter()
-                .map(|&version| {
-                    let client = p.client_for(version);
-                    let mut entry = json!({
-                        "version": version,
-                        "clientId": client.client_id,
-                    });
-                    if let Some(credential) = client.client_credential.as_deref() {
-                        entry["clientCredential"] = Value::from(credential);
-                    }
-                    entry
-                })
-                .collect();
-            by_id.insert(p.id.to_string(), json!({ "versions": versions }));
-        }
+        let by_id: Map<String, Value> = self
+            .platforms
+            .iter()
+            .map(|p| (p.id.to_string(), json!(p)))
+            .collect();
         json!({
             "ccdpOrigin": self.ccdp_origin,
             "platforms": Value::Object(by_id),
         })
     }
 
-    /// That record as the bytes it is served in, serialized once.
+    /// That record as the bytes it is served in, serialized once at startup.
     pub fn serialized(&self) -> Bytes {
         Bytes::from(
             serde_json::to_vec(&self.record())
                 .expect("a Value of string keys serializes into memory"),
         )
     }
-}
-
-/// The public ceremony configuration as published: one record, composed once
-/// from this deployment's clients and one accepted version list, and the
-/// validator that list arrived with.
-///
-/// One value, published as one unit, as the callback document is: the ETag
-/// advances only where a record does, so a list this bridge refuses cannot
-/// leave the next revalidation asking after it.
-pub struct PublishedConfig {
-    /// The record: the exact bytes every admitted caller receives.
-    pub record: Bytes,
-    /// The version list it was composed from.
-    pub versions: Versions,
-    /// The `ETag` the list arrived with, sent back as `If-None-Match`.
-    pub etag: Option<String>,
 }

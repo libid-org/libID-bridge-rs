@@ -32,8 +32,7 @@ fn ccdp_origin() -> &'static str {
 }
 
 /// A deployment admitting two applications, with `overrides` replacing any
-/// flag they name, serving the artifact and the record its Distribution
-/// answered with.
+/// flag they name, serving the artifact its Distribution answered with.
 async fn deployment(overrides: &[&str]) -> Arc<AppState> {
     let mut args = vec![
         "--allowed-app-origins",
@@ -340,10 +339,8 @@ async fn config_does_not_infer_admission_from_fetch_metadata_alone() {
 }
 
 /// The record carries exactly `ccdpOrigin` and `platforms`; the github entry
-/// carries exactly its versions, one entry per version the Distribution
-/// lists, each with the client id and the public client credential. No
-/// allowlist, redirect URI or notary setting travels, and nothing of the
-/// former shape.
+/// carries exactly its client id and its public client credential. No
+/// allowlist, redirect URI, notary setting or version travels.
 #[tokio::test]
 async fn config_carries_the_public_credential_and_no_allowlist() {
     let body = body_of(get_config(Some(APP_ORIGIN), "").await).await;
@@ -354,20 +351,14 @@ async fn config_carries_the_public_credential_and_no_allowlist() {
     assert_eq!(body["ccdpOrigin"], ccdp_origin());
 
     let github = body["platforms"]["github"].as_object().unwrap();
-    let keys: Vec<_> = github.keys().map(String::as_str).collect();
-    assert_eq!(keys, ["versions"]);
-    assert_eq!(
-        github["versions"],
-        serde_json::json!([{
-            "version": 1,
-            "clientId": crate::common::CLIENT_ID,
-            "clientCredential": crate::common::CLIENT_CREDENTIAL,
-        }])
-    );
+    let mut keys: Vec<_> = github.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["clientCredential", "clientId"]);
+    assert_eq!(github["clientId"], crate::common::CLIENT_ID);
+    assert_eq!(github["clientCredential"], crate::common::CLIENT_CREDENTIAL);
 
     let raw = body.to_string();
     assert!(!raw.contains(APP_ORIGIN));
-    assert!(!raw.contains("ceremonyVersions"), "the former shape");
     assert!(
         !raw.contains("redirectUri"),
         "an application derives the redirect URI"
@@ -382,11 +373,11 @@ async fn config_carries_the_public_credential_and_no_allowlist() {
     );
 }
 
-/// An enabled X platform is published as its versions, each with a client id
-/// and nothing else: X's ceremony runs browser to notary as a public client,
-/// and its entries carry no credential.
+/// An enabled X platform is published as its client id and nothing else:
+/// X's ceremony runs browser to notary as a public client, and its entry
+/// carries no credential.
 #[tokio::test]
-async fn config_publishes_an_x_entry_of_exactly_version_and_client_id() {
+async fn config_publishes_an_x_entry_of_exactly_its_client_id() {
     let state = deployment(&[
         "--platforms",
         &format!(
@@ -398,120 +389,24 @@ async fn config_publishes_an_x_entry_of_exactly_version_and_client_id() {
     .await;
     let body = body_of(config_with(state, &[("origin", APP_ORIGIN)], "").await).await;
 
-    let x = body["platforms"]["x"].as_object().expect("an x entry");
-    let keys: Vec<_> = x.keys().map(String::as_str).collect();
-    assert_eq!(keys, ["versions"]);
-    let entry = x["versions"][0].as_object().expect("one version");
-    let mut keys: Vec<_> = entry.keys().map(String::as_str).collect();
-    keys.sort_unstable();
-    assert_eq!(keys, ["clientId", "version"]);
-    assert_eq!(entry["clientId"], "WHRlc3RjbGllbnQ6MTpjaQ");
-    assert_eq!(entry["version"], 1);
     assert_eq!(
-        body["platforms"]["github"]["versions"][0]["clientId"],
+        body["platforms"]["x"],
+        serde_json::json!({ "clientId": "WHRlc3RjbGllbnQ6MTpjaQ" })
+    );
+    assert_eq!(
+        body["platforms"]["github"]["clientId"],
         crate::common::CLIENT_ID
     );
 }
 
-/// Until the first version list is accepted there is no record. An admitted
-/// caller is told so with a `503` it can read and retry: the CORS headers a
-/// `200` would carry, `Retry-After`, and a message naming the Distribution
-/// URL waited on. An unadmitted one gets its `403` as ever, a query its
-/// `400`, and the preflight and the liveness probe are unaffected.
+/// The record is composed at startup and waits on nothing: an admitted
+/// caller reads it before the refresher has run once.
 #[tokio::test]
-async fn config_says_it_has_no_record_until_the_first_version_list_is_accepted() {
-    let bridge = crate::common::bridge(&[]);
-    let state = bridge.state.clone();
-    let versions_url = format!("{}/ccdp/versions.json", ccdp_origin());
-
-    let resp = config_with(state.clone(), &[("origin", APP_ORIGIN)], "").await;
-    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let h = resp.headers();
-    assert_eq!(h["retry-after"], "5");
-    assert_eq!(h["access-control-allow-origin"], APP_ORIGIN);
-    assert_eq!(h["vary"], "origin, sec-fetch-site");
-    assert_eq!(h["content-type"], "application/json");
-    assert_eq!(h["cache-control"], "no-store");
-    assert!(h.get("access-control-allow-credentials").is_none());
-    let body = body_of(resp).await;
-    let message = body["message"].as_str().expect("a message");
-    assert!(message.contains(&versions_url), "{message}");
-    assert!(body.get("platforms").is_none());
-
-    // A same-origin read is admitted and told the same, with no CORS header.
-    let resp = config_with(state.clone(), &[("sec-fetch-site", "same-origin")], "").await;
-    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(resp.headers()["retry-after"], "5");
-    assert!(resp.headers().get("access-control-allow-origin").is_none());
-
-    // Admission runs first, exactly as for a `200`.
-    for origin in [None, Some("https://evil.example"), Some("null")] {
-        let headers: Vec<(&str, &str)> =
-            origin.into_iter().map(|o| ("origin", o)).collect();
-        let resp = config_with(state.clone(), &headers, "").await;
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{origin:?}");
-        assert!(resp.headers().get("retry-after").is_none());
-        assert!(resp.headers().get("access-control-allow-origin").is_none());
-    }
-
-    // The request is judged before the record is looked for.
-    let resp = config_with(state.clone(), &[("origin", APP_ORIGIN)], "?tenant=1").await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-
-    // The preflight grants what it always grants, and the probe answers.
-    let resp = app(state.clone())
-        .oneshot(
-            Request::builder()
-                .method("OPTIONS")
-                .uri(routes::CONFIG_PATH)
-                .header("origin", APP_ORIGIN)
-                .header("access-control-request-method", "GET")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-    assert_eq!(resp.headers()["access-control-allow-origin"], APP_ORIGIN);
-    let resp = app(state.clone())
-        .oneshot(Request::get("/health").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    // The first accepted list ends the wait.
-    assert!(crate::common::retrieve_once(&bridge).await.unwrap());
+async fn config_answers_an_admitted_caller_before_any_retrieval() {
+    let state = crate::common::bridge(&[]).state;
     let resp = config_with(state, &[("origin", APP_ORIGIN)], "").await;
     assert_eq!(resp.status(), StatusCode::OK);
-    assert!(resp.headers().get("retry-after").is_none());
-    let body = body_of(resp).await;
-    assert_eq!(body["platforms"]["github"]["versions"][0]["version"], 1);
-}
-
-/// A version list refused after a record was composed leaves that record
-/// served, as a refused artifact leaves the document.
-#[tokio::test]
-async fn config_keeps_the_last_record_when_a_later_list_is_refused() {
-    let distribution = Distribution::healthy().await;
-    let bridge = crate::common::bridge(&["--ccdp-origin", distribution.origin()]);
-    assert!(crate::common::retrieve_once(&bridge).await.unwrap());
-    let served =
-        body_of(config_with(bridge.state.clone(), &[("origin", APP_ORIGIN)], "").await)
-            .await;
-    assert_eq!(served["platforms"]["github"]["versions"][0]["version"], 1);
-
-    distribution.now_serves_versions(crate::common::Reply::listing(r#"{"github":[]}"#));
-    crate::common::retrieve_once(&bridge)
-        .await
-        .expect_err("an empty array refuses the list");
-
-    let resp = config_with(bridge.state.clone(), &[("origin", APP_ORIGIN)], "").await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(
-        body_of(resp).await,
-        served,
-        "the record already served stays"
-    );
+    assert_eq!(body_of(resp).await["ccdpOrigin"], ccdp_origin());
 }
 
 /// A caller that must preflight its read is answered by the same admission
@@ -836,14 +731,14 @@ async fn the_bridge_serves_no_ccdp_document_and_no_alias() {
 }
 
 /// A deployment whose Distribution has not answered serves everything else,
-/// and says of the callback and of the configuration that it has nothing
-/// and why.
+/// the record included, and says of the callback that it has no document and
+/// why.
 #[tokio::test]
 async fn a_deployment_without_its_distribution_serves_everything_else() {
     let unreachable = crate::common::unreachable_origin().await;
     let bridge = crate::common::bridge(&["--ccdp-origin", &unreachable]);
-    // The tick the refresher would perform, once, which records why each
-    // retrieval produced nothing.
+    // The retrieval the refresher would perform, once, which records why it
+    // produced nothing.
     crate::common::retrieve_once(&bridge)
         .await
         .expect_err("an unreachable Distribution answers nothing");
@@ -861,17 +756,12 @@ async fn a_deployment_without_its_distribution_serves_everything_else() {
         assert_eq!(resp.status(), expected, "{path}");
     }
 
+    // The record needs nothing from the Distribution.
     let resp = config_with(state.clone(), &[("origin", APP_ORIGIN)], "").await;
-    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(resp.headers()["retry-after"], "5");
-    assert_eq!(resp.headers()["access-control-allow-origin"], APP_ORIGIN);
-    let message = body_of(resp).await["message"]
-        .as_str()
-        .expect("a message")
-        .to_owned();
-    assert!(
-        message.contains(&format!("{unreachable}/ccdp/versions.json")),
-        "it names what could not be retrieved: {message}"
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        body_of(resp).await["platforms"]["github"]["clientId"],
+        crate::common::CLIENT_ID
     );
 
     let resp = app(state.clone())
@@ -946,11 +836,9 @@ async fn the_metrics_route_reports_what_happened() {
     )
     .unwrap();
     for line in [
-        "libid_bridge_retrievals_total{resource=\"callback\",outcome=\"published\"} 1",
-        "libid_bridge_retrievals_total{resource=\"versions\",outcome=\"published\"} 1",
+        "libid_bridge_artifact_retrievals_total{outcome=\"published\"} 1",
         "libid_bridge_callback_requests_total{outcome=\"document\"} 1",
-        "libid_bridge_available{resource=\"callback\"} 1",
-        "libid_bridge_available{resource=\"versions\"} 1",
+        "libid_bridge_callback_document_available 1",
     ] {
         assert!(text.contains(line), "{line} missing from:\n{text}");
     }

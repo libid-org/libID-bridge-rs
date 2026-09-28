@@ -104,8 +104,9 @@ pub struct Settings {
     /// The enabled platforms, as `[[platforms]]` tables: each names a
     /// platform, the public client id its ceremony versions run by default,
     /// for `github` the public client credential they send, and, under
-    /// `version_override`, the client of any version that runs another. The
-    /// versions themselves are the Distribution's to list.
+    /// `version_override`, the client of any version that runs another.
+    /// Which versions exist is not written here: the Distribution publishes
+    /// the versions it bundles, and the application reads that list.
     ///
     /// ```toml
     /// [[platforms]]

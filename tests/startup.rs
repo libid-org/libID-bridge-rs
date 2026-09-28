@@ -19,7 +19,6 @@ use std::{
         ExitStatus,
         Stdio,
     },
-    time::Duration,
 };
 
 use common::{
@@ -126,19 +125,6 @@ impl Started {
         (status, body.to_owned())
     }
 
-    /// A `GET`, retried while the answer is `503`: what a caller told to
-    /// retry does, with the refresher's first tick the thing waited on.
-    fn get_when_served(&self, path: &str, headers: &[(&str, &str)]) -> (u16, String) {
-        for _ in 0..400 {
-            let (status, body) = self.request("GET", path, headers, "");
-            if status != 503 {
-                return (status, body);
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        panic!("{path} was still 503 after ten seconds")
-    }
-
     /// SIGINT the binary: its exit status and what it said after the signal.
     /// `Drop` finds a process already reaped and says nothing.
     fn interrupted(mut self) -> (ExitStatus, String) {
@@ -174,9 +160,8 @@ fn the_binary_serves_until_interrupted() {
     assert!(rest.contains("shutting down"), "{rest}");
 }
 
-/// A deployment enabling X alone starts, publishes the X entry once its
-/// Distribution's version list is retrieved and no github entry, and answers
-/// the former token path with `404`.
+/// A deployment enabling X alone starts, publishes the X entry and no github
+/// entry, and answers the former token path with `404`.
 #[test]
 fn an_x_only_deployment_starts_and_serves_no_token_route() {
     let config = config_file(
@@ -184,17 +169,17 @@ fn an_x_only_deployment_starts_and_serves_no_token_route() {
     );
     let bridge = Started::on(config.path());
 
-    let (status, body) = bridge.get_when_served(
+    let (status, body) = bridge.request(
+        "GET",
         "/api/v1/ceremony/config",
         &[("origin", "https://app.example")],
+        "",
     );
     assert_eq!(status, 200, "{body}");
     let record: serde_json::Value = serde_json::from_str(&body).expect("a JSON record");
     assert_eq!(
         record["platforms"]["x"],
-        serde_json::json!({
-            "versions": [{ "version": 1, "clientId": "WHRlc3RjbGllbnQ6MTpjaQ" }]
-        })
+        serde_json::json!({ "clientId": "WHRlc3RjbGllbnQ6MTpjaQ" })
     );
     assert!(record["platforms"].get("github").is_none());
 
@@ -225,7 +210,7 @@ fn a_configuration_the_binary_cannot_serve_stops_it() {
 }
 
 /// A configuration in the former format, naming the versions itself, stops
-/// the binary before it binds, with the key it no longer reads named.
+/// the binary before it binds, with the key it does not read named.
 #[test]
 fn a_configuration_naming_versions_itself_stops_the_binary() {
     let config = config_file(

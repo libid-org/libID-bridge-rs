@@ -19,10 +19,12 @@ gas, keeps no database, and talks to no chain.
 ## How a claim works
 
 1. The application reads `GET /api/v1/ceremony/config` from an admitted
-   origin: the CCDP Distribution to load and, per enabled platform, the
-   ceremony versions that Distribution bundles, each with its public client
-   id and, for GitHub, the public `clientCredential`. It derives the redirect
-   URI itself from the bridge origin it already knows:
+   origin: the CCDP Distribution to load and, per enabled platform, the OAuth
+   client its ceremony versions run — the public client id and, for GitHub,
+   the public `clientCredential` — with a client of its own for any version
+   the file overrides. It reads the ceremony versions that Distribution
+   bundles from `{ccdpOrigin}/ccdp/versions.json` itself, and derives the
+   redirect URI from the bridge origin it already knows:
    `{bridgeOrigin}/auth/callback`.
 2. The browser derives its PKCE verifier, opens the provider's authorization
    page, and is redirected to `GET /auth/callback` on this bridge: one
@@ -55,9 +57,9 @@ out; origin checks and a closed input surface cannot constrain its owner.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/health` | Liveness probe. Returns `OK`, whether or not a callback document or a record is available. Not one of the contract's routes — see below. |
+| `GET` | `/health` | Liveness probe. Returns `OK`, whether or not a callback document is available. Not one of the contract's routes — see below. |
 | `GET` | `/metrics` | What this deployment counts, in the Prometheus text exposition format. Not one of the contract's routes. |
-| `GET`, `OPTIONS` | `/api/v1/ceremony/config` | The public ceremony configuration: `{ ccdpOrigin, platforms }`. Readable from an admitted origin, or by a same-origin `GET` without `Origin` on `Sec-Fetch-Site: same-origin`. `403` for any other origin, `400` for a query, `503` with `Retry-After: 5` until the Distribution's version list has been retrieved once. `OPTIONS` answers the preflight a caller sending its own header needs, by the same admission rule: `GET`, the headers asked for, no credentials. |
+| `GET`, `OPTIONS` | `/api/v1/ceremony/config` | The public ceremony configuration: `{ ccdpOrigin, platforms }`. Readable from an admitted origin, or by a same-origin `GET` without `Origin` on `Sec-Fetch-Site: same-origin`. `403` for any other origin, `400` for a query. `OPTIONS` answers the preflight a caller sending its own header needs, by the same admission rule: `GET`, the headers asked for, no credentials. |
 | `GET` | `/auth/callback` | The registered OAuth callback document: the CCDP Distribution's artifact with this deployment's data inserted, identical for every request. |
 
 `/health` is not one of the contract's two routes. The published image's
@@ -75,35 +77,36 @@ Any other path, `POST /api/v1/ceremony/github-token` included, is answered
   "ccdpOrigin": "https://lib.id",
   "platforms": {
     "github": {
-      "versions": [
-        { "version": 1, "clientId": "Iv1.0123456789abcdef", "clientCredential": "…" }
-      ]
+      "clientId": "Iv1.0123456789abcdef",
+      "clientCredential": "…",
+      "versionOverrides": {
+        "2": { "clientId": "Iv1.fedcba9876543210", "clientCredential": "…" }
+      }
     },
-    "x": {
-      "versions": [
-        { "version": 1, "clientId": "…" }
-      ]
-    }
+    "x": { "clientId": "…" }
   }
 }
 ```
 
-A platform is present exactly when the configuration file enables it and the
-Distribution lists at least one ceremony version for it. Its `versions` are
-the versions the Distribution bundles, ascending and unique, each with the
-OAuth client that version runs: the file's `version_override` for it where
-there is one, the platform's defaults otherwise. `clientCredential` is
-present on exactly the entries whose ceremony sends one: GitHub's. Every
-client id and credential is nonempty printable ASCII without whitespace,
-checked at startup. The record carries no redirect URI, no allowlist, no
-notary setting and no user token.
+A platform is present exactly when the configuration file enables it. Its
+entry is the OAuth client its ceremony versions run: `clientId` and, on
+exactly the platforms whose ceremony sends one — GitHub — `clientCredential`.
+`versionOverrides` is present only when the file overrides at least one
+version, and maps the decimal spelling of a version, the same grammar as the
+file's keys, to the whole client that version runs instead. Every client id
+and credential is nonempty printable ASCII without whitespace, checked at
+startup. The record carries no redirect URI, no allowlist, no notary setting
+and no user token.
 
-The record depends on the Distribution, so it is not known at startup. Until
-the version list has been retrieved once, an admitted caller is answered
-`503` with `Retry-After: 5`, the CORS headers a `200` would carry, and a
-`{"message": …}` body naming the Distribution URL waited on; an unadmitted
-origin gets its `403` first, as always. Once a record has been composed it
-keeps being served through any later failure, as the callback document does.
+The record names no version. The Distribution publishes the platform
+ceremony versions it bundles at `{ccdpOrigin}/ccdp/versions.json`, and the
+application reads that list itself: it keeps the versions it implements, runs
+each with the override the record names for it or the platform's client
+otherwise, and enables no platform the list omits or the record does not
+configure. An override for a version the list does not carry applies to
+nothing. The record is composed and serialized once at startup, so an
+admitted caller is answered `200` whether or not the Distribution has been
+reached.
 
 ## The CCDP Distribution
 
@@ -116,7 +119,10 @@ executes — the Callback implementation, the prover, the circuits and
 notarization client — is served by a separate static **CCDP Distribution** at
 `CCDP_ORIGIN`, which may be cross-site and knows nothing about this bridge. The
 bridge publishes configuration and serves one callback document. It serves no
-CCDP resource and no proving asset.
+CCDP resource and no proving asset. The Distribution also publishes the
+platform ceremony versions it bundles, at `/ccdp/versions.json`; the
+application reads that list directly, and the bridge's record names no
+version.
 
 ### The callback document
 
@@ -129,8 +135,8 @@ reads that artifact, substitutes **one unversioned list** —
 in place of the marker, composes the response policy, and publishes the pair.
 It does not parse the document: the marker occurs once or the artifact is
 refused, and everything around it is served as it arrived. It parses no OAuth
-`state`, selects no CCDP version, and enumerates no ceremony version of its
-own: a compatible Callback change needs no bridge rebuild.
+`state`, selects no CCDP version, and holds no version list: a compatible
+Callback change needs no bridge rebuild.
 
 `allowedOrigins` is an array of strings, every member spelled as it was
 written, whichever kind it is. It carries `ccdpOrigin` itself, literally,
@@ -151,66 +157,40 @@ request, and there is no request-logging middleware. **Any proxy in front of
 this server must redact the callback path's query string from its access
 logs** — that half of the contract is the operator's.
 
-### The version list
-
-The Distribution publishes the platform ceremony versions it bundles at
-`/ccdp/versions.json`, beside the artifact: one JSON object keyed by platform
-id, each value a nonempty, duplicate-free, ascending array of unsigned 16-bit
-integers, as in `{"github":[1],"google":[1],"x":[1]}`. The bridge advertises
-exactly those versions. A key it does not know is ignored: a Distribution may
-bundle a platform this bridge predates. Every value is held to the grammar,
-and any violation — a top level that is not an object, a value that is not
-such an array, an empty array, a duplicate, a version out of order — refuses
-the whole list, and the list last accepted stays.
-
-Each accepted list composes the record once: every configured platform the
-list names, with the client each listed version runs. A configured platform
-the list does not name is left out, and an override for a version the list
-does not carry is ignored; each is logged when the record is composed, and
-neither is an error, because the Distribution cannot be checked at startup.
-
-### Retrieval
-
-Both resources are **retrieved from the Distribution**,
-`{CCDP_ORIGIN}/ccdp/callback.html` and `{CCDP_ORIGIN}/ccdp/versions.json`,
-first as soon as the process runs and then every five minutes, each
-conditionally on the `ETag` it came with. Each is published independently: a
-retrieval that returns `304`, fails to reach the Distribution, or returns
-something this bridge will not accept leaves what is already served as it is,
-and only a valid replacement replaces it. The document and the policy naming
-its hashes are published as one value, and so are the record and the list it
-was composed from. Redirects are refused, each body is read up to a bound of
-its own, and the request carries no cookie, credential, query, or anything
+The artifact is **retrieved from the Distribution**: `{CCDP_ORIGIN}/ccdp/callback.html`,
+first as soon as the process runs and then every five minutes, conditionally on
+the `ETag` it came with. A retrieval that returns `304`, fails to reach the
+Distribution, or returns something this bridge will not serve leaves the document
+already being served as it is; only a valid replacement replaces it, and the
+document and the policy naming its hashes are published as one value. Redirects
+are refused, and the request carries no cookie, credential, query, or anything
 derived from a callback request.
 
 **The Distribution's availability is not this deployment's.** The process starts
-without it, binds, and serves the liveness probe and the metrics. Until a
-retrieval produces a document the callback path answers `503` with an inert
-page naming the last failure; until one produces a version list the
-configuration route answers `503` naming the URL it waits on. A tick on
-which either retrieval failed backs off from one second to five minutes,
-doubling. Once a document or a record is published it keeps being served
-through any later failure. A development stack serves its own Distribution
-over HTTP on `localhost` or `127.0.0.1`, the one plaintext exception the
-origin rules make.
+without it, binds, and serves the configuration, the liveness probe and the
+metrics. Until a retrieval produces a document the callback path answers `503`
+with an inert page naming the last failure, and a failed retry backs off from
+one second to five minutes, doubling. Once a document is published it keeps being
+served through any later failure. A development stack serves its own
+Distribution over HTTP on `localhost` or `127.0.0.1`, the one plaintext
+exception the origin rules make.
 
 ## What this deployment counts
 
 `GET /metrics` answers the Prometheus text exposition format. It is scraped
-from the pod and is not part of the ceremony contract. `resource` is
-`callback` for the artifact and `versions` for the version list.
+from the pod and is not part of the ceremony contract.
 
 | Metric | What it says |
 |---|---|
-| `libid_bridge_retrievals_total{resource,outcome}` | Retrievals, by resource and `published`, `unchanged` or `failed` |
-| `libid_bridge_retrieval_failures_total{resource,kind}` | Failed retrievals, by resource and which refusal |
+| `libid_bridge_artifact_retrievals_total{outcome}` | Retrievals, by `published`, `unchanged` or `failed` |
+| `libid_bridge_artifact_retrieval_failures_total{kind}` | Failed retrievals, by which refusal |
 | `libid_bridge_callback_requests_total{outcome}` | Callback requests, by `document` or `unavailable` |
-| `libid_bridge_available{resource}` | `1` while the callback document, or the record composed from the version list, is available |
-| `libid_bridge_published_timestamp_seconds{resource}` | When the served document or record was published |
+| `libid_bridge_callback_document_available` | `1` while a document is available |
+| `libid_bridge_callback_document_published_timestamp_seconds` | When the served document was published |
 
-A deployment serving something it can no longer replace shows a rising
-`failed` count for that resource with `available` still `1`, and its
-published timestamp stops moving.
+A deployment serving a document it can no longer replace shows a rising
+`failed` count with `callback_document_available` still `1`, and its published
+timestamp stops moving.
 
 ## What the operator has to supply
 
@@ -249,8 +229,9 @@ are set only in the file, one `[[platforms]]` table per enabled platform: its
 `id` (`github`, `google` or `x`), the public `default_client_id` its ceremony
 versions run and, for `github`, the App's client secret as
 `default_client_credential`, which the bridge publishes. The versions
-themselves are not written here; the Distribution lists the ones it bundles.
-There is no notary setting and no environment variable for the credential.
+themselves are not written here: the Distribution publishes the ones it
+bundles, and the application reads them. There is no notary setting and no
+environment variable for the credential.
 
 A version may run a client of its own: `version_override` is a table keyed by
 the version, the decimal spelling of an unsigned 16-bit integer, bare or

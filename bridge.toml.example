@@ -55,10 +55,10 @@ ccdp_origin = "https://lib.id"
 
 
 # The enabled platforms: one table per platform, naming the OAuth client its
-# ceremony versions run. Which versions are advertised is not written here:
-# the Distribution publishes the versions it bundles, and the bridge
-# advertises exactly those, each with the client below. A platform the
-# Distribution lists no version for is not advertised.
+# ceremony versions run. Which versions exist is not written here: the
+# Distribution publishes the versions it bundles, and the application reads
+# that list and runs each version with the client below. A platform the
+# Distribution lists no version for is one no application enables.
 #
 # The github table also carries the OAuth App's client secret, which the
 # bridge publishes as clientCredential: public application configuration the
@@ -73,7 +73,7 @@ default_client_credential = "0123456789abcdef0123456789abcdef01234567"
 # the version, bare or quoted, carrying a whole client -- client_id, and
 # client_credential exactly where the platform's ceremony sends one. The
 # defaults above stay required. An override for a version the Distribution
-# does not list is ignored, and logged when the configuration is composed.
+# does not list applies to nothing.
 #
 #     [platforms.version_override.2]
 #     client_id = "Iv1.fedcba9876543210"

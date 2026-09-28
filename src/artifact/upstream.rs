@@ -579,12 +579,13 @@ impl Refresher {
         }
     }
 
-    /// One tick: the callback artifact, then the version list.
+    /// One tick: the callback artifact and the version list, retrieved
+    /// concurrently. Neither waits on the other, and each is published on
+    /// its own.
     pub async fn revalidate(&self) -> Tick {
-        Tick {
-            callback: self.revalidate_callback().await,
-            versions: self.revalidate_versions().await,
-        }
+        let (callback, versions) =
+            tokio::join!(self.revalidate_callback(), self.revalidate_versions());
+        Tick { callback, versions }
     }
 
     /// One retrieval of the callback artifact, counted, recorded and logged:

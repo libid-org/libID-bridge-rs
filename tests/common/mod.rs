@@ -1,6 +1,6 @@
 //! What the tests build a deployment from: a Distribution on loopback serving
-//! the fixture artifact, and a configuration naming it. Compiled into each
-//! integration test that declares the module.
+//! the fixture artifact and a version list, and a configuration naming it.
+//! Compiled into each integration test that declares the module.
 
 use std::{
     collections::VecDeque,
@@ -25,7 +25,10 @@ use hyper::{
 };
 
 use libid_bridge_rs::{
-    artifact::upstream::ARTIFACT_PATH,
+    artifact::upstream::{
+        ARTIFACT_PATH,
+        VERSIONS_PATH,
+    },
     config,
     state::AppState,
     Bridge,
@@ -48,6 +51,10 @@ pub const ARTIFACT: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/callback.html"
 ));
+
+/// The version list a healthy Distribution serves: one version of each
+/// platform this bridge knows.
+pub const VERSIONS: &str = r#"{"github":[1],"google":[1],"x":[1]}"#;
 
 /// The runtime shared fixtures are served on. `#[tokio::test]` drops each
 /// test's runtime, and every task on it, when the test returns; this one is
@@ -130,9 +137,33 @@ impl Reply {
             ..Reply::artifact()
         }
     }
+
+    /// The version list, as a healthy Distribution serves it.
+    pub fn versions() -> Reply {
+        Reply {
+            status: StatusCode::OK,
+            media: "application/json; charset=utf-8",
+            etag: Some("W/\"the-versions\""),
+            body: VERSIONS.to_owned(),
+            encoding: None,
+            chunked: false,
+            policy: None,
+        }
+    }
+
+    /// A version list of `body`, under no validator: every retrieval gets
+    /// the body, and the bridge decides whether it is a replacement.
+    pub fn listing(body: &str) -> Reply {
+        Reply {
+            etag: None,
+            body: body.to_owned(),
+            ..Reply::versions()
+        }
+    }
 }
 
-/// What the fixture has been told to say, and what it has been asked.
+/// What the fixture has been told to say about one resource, and what it has
+/// been asked.
 #[derive(Clone)]
 struct Answers {
     /// Every request the fixture saw, in order.
@@ -143,23 +174,34 @@ struct Answers {
     queued: Arc<Mutex<VecDeque<Reply>>>,
 }
 
-/// A Distribution, on loopback and in plaintext, served on [`runtime`].
-pub struct Distribution {
-    origin: String,
-    answers: Answers,
-}
-
-impl Distribution {
-    /// A Distribution answering with `reply`.
-    pub async fn serving(reply: Reply) -> Distribution {
-        let answers = Answers {
+impl Answers {
+    /// Answering `reply` until told otherwise.
+    fn standing(reply: Reply) -> Answers {
+        Answers {
             seen: Arc::default(),
             standing: Arc::new(Mutex::new(reply)),
             queued: Arc::default(),
-        };
+        }
+    }
+}
+
+/// A Distribution, on loopback and in plaintext, served on [`runtime`]. It
+/// serves the artifact and the version list, each answered as told.
+pub struct Distribution {
+    origin: String,
+    artifact: Answers,
+    versions: Answers,
+}
+
+impl Distribution {
+    /// A Distribution answering the artifact path with `reply`, and the
+    /// version list path with the healthy list.
+    pub async fn serving(reply: Reply) -> Distribution {
+        let artifact = Answers::standing(reply);
+        let versions = Answers::standing(Reply::versions());
         let router = Router::new()
-            .route(ARTIFACT_PATH, get(answer))
-            .with_state(answers.clone());
+            .route(ARTIFACT_PATH, get(answer).with_state(artifact.clone()))
+            .route(VERSIONS_PATH, get(answer).with_state(versions.clone()));
         let (bound, address) = tokio::sync::oneshot::channel();
         runtime().spawn(async move {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -167,10 +209,14 @@ impl Distribution {
             let _ = axum::serve(listener, router).await;
         });
         let origin = format!("http://{}", address.await.unwrap());
-        Distribution { origin, answers }
+        Distribution {
+            origin,
+            artifact,
+            versions,
+        }
     }
 
-    /// A Distribution serving the artifact.
+    /// A Distribution serving the artifact and the version list.
     pub async fn healthy() -> Distribution {
         Distribution::serving(Reply::artifact()).await
     }
@@ -180,24 +226,39 @@ impl Distribution {
         &self.origin
     }
 
-    /// Answer every request from now on with this.
+    /// Answer every artifact request from now on with this.
     pub fn now_serves(&self, reply: Reply) {
-        *self.answers.standing.lock().unwrap() = reply;
+        *self.artifact.standing.lock().unwrap() = reply;
     }
 
-    /// Answer the next request with this, once.
+    /// Answer the next artifact request with this, once.
     pub fn answers_next(&self, reply: Reply) {
-        self.answers.queued.lock().unwrap().push_back(reply);
+        self.artifact.queued.lock().unwrap().push_back(reply);
     }
 
-    /// How many queued answers are still waiting to be given.
+    /// How many queued artifact answers are still waiting to be given.
     pub fn still_queued(&self) -> usize {
-        self.answers.queued.lock().unwrap().len()
+        self.artifact.queued.lock().unwrap().len()
     }
 
-    /// Every request seen so far, in order.
+    /// Every artifact request seen so far, in order.
     pub fn requests(&self) -> Vec<HeaderMap> {
-        self.answers.seen.lock().unwrap().clone()
+        self.artifact.seen.lock().unwrap().clone()
+    }
+
+    /// Answer every version list request from now on with this.
+    pub fn now_serves_versions(&self, reply: Reply) {
+        *self.versions.standing.lock().unwrap() = reply;
+    }
+
+    /// Answer the next version list request with this, once.
+    pub fn answers_next_versions(&self, reply: Reply) {
+        self.versions.queued.lock().unwrap().push_back(reply);
+    }
+
+    /// Every version list request seen so far, in order.
+    pub fn versions_requests(&self) -> Vec<HeaderMap> {
+        self.versions.seen.lock().unwrap().clone()
     }
 }
 
@@ -303,7 +364,7 @@ pub fn config(args: &[&str]) -> config::Settings {
     let mut origins = "https://app.example".to_owned();
     let mut ccdp_origin = Distribution::shared().origin().to_owned();
     let mut platforms = format!(
-        r#"[{{"id":"github","client_id":"{CLIENT_ID}","versions":[1],"client_credential":"{CLIENT_CREDENTIAL}"}}]"#
+        r#"[{{"id":"github","default_client_id":"{CLIENT_ID}","default_client_credential":"{CLIENT_CREDENTIAL}"}}]"#
     );
     for pair in args.chunks(2) {
         let [flag, value] = pair else {
@@ -348,22 +409,35 @@ pub fn bridge(args: &[&str]) -> Bridge {
     Bridge::start(&config(args)).expect("a deployment the fixtures can serve")
 }
 
-/// One retrieval, as the refresher performs it: `Ok(true)` published a
-/// document, and an error left whatever is published in place.
+/// One tick of the refresher, as the loop performs it: `Ok(true)` published
+/// a document or a record, `Ok(false)` found both current, and an error
+/// names the first resource whose retrieval failed, with whatever was
+/// published left in place.
 pub async fn retrieve_once(bridge: &Bridge) -> Result<bool, String> {
-    bridge
-        .refresher
-        .revalidate()
-        .await
-        .map_err(|e| e.to_string())
+    let tick = bridge.refresher.revalidate().await;
+    match (tick.callback, tick.versions) {
+        (Ok(callback), Ok(versions)) => Ok(callback || versions),
+        (Err(e), _) | (_, Err(e)) => Err(e.to_string()),
+    }
 }
 
-/// The state of a deployment started from [`config`], with the artifact its
-/// Distribution answered with already published.
+/// The state of a deployment started from [`config`], with the artifact and
+/// the version list its Distribution answered with already published.
 pub async fn state(args: &[&str]) -> Arc<AppState> {
     let bridge = bridge(args);
     retrieve_once(&bridge)
         .await
-        .expect("the fixture Distribution answers the artifact");
+        .expect("the fixture Distribution answers the artifact and the version list");
     bridge.state
+}
+
+/// The record the configuration route serves, as published.
+pub fn record(state: &AppState) -> serde_json::Value {
+    let published = state
+        .ceremony_config
+        .current
+        .borrow()
+        .clone()
+        .expect("a record is published");
+    serde_json::from_slice(&published.record).expect("the record is JSON")
 }

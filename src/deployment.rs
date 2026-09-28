@@ -1,9 +1,14 @@
 //! What a deployment is, checked once at startup: the Distribution it
-//! selects, the origins it admits, the platforms it enables, and the public
-//! ceremony configuration projected from them. Nothing here is retrieved or
-//! bound.
+//! selects, the origins it admits, the platforms it enables with the OAuth
+//! clients their versions run, and the public ceremony configuration
+//! composed from those clients and the versions the Distribution bundles.
+//! Nothing here is retrieved or bound.
 
-use std::sync::Arc;
+use std::{
+    collections::BTreeMap,
+    fmt,
+    sync::Arc,
+};
 
 use bytes::Bytes;
 use serde::Deserialize;
@@ -23,6 +28,7 @@ use crate::{
         Admitted,
         Origin,
     },
+    versions::Versions,
 };
 
 /// The checked inputs of one deployment.
@@ -33,8 +39,8 @@ pub struct Deployment {
     /// rule the configuration route applies, and what the callback document
     /// is told. The CCDP origin is a member of it literally.
     pub allowed_origins: Arc<[Admitted]>,
-    /// The enabled platforms.
-    pub platforms: Vec<PlatformProfile>,
+    /// The enabled platforms, each with the clients its versions run.
+    pub platforms: Vec<Platform>,
 }
 
 impl Deployment {
@@ -64,20 +70,22 @@ impl Deployment {
         })
     }
 
-    /// The public ceremony configuration, as the bytes every admitted caller
-    /// receives.
-    pub fn ceremony_config(&self) -> Bytes {
+    /// The public ceremony configuration this deployment publishes for
+    /// `versions`, as the bytes every admitted caller receives: composed and
+    /// serialized once per accepted version list.
+    pub fn ceremony_config(&self, versions: &Versions) -> Bytes {
         CeremonyConfig {
             ccdp_origin: &self.ccdp_origin,
             platforms: &self.platforms,
+            versions,
         }
         .serialized()
     }
 }
 
 /// The platforms a ceremony can run against. A name outside this catalog is
-/// refused while parsing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+/// refused while parsing a file, and ignored in a version list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PlatformId {
     /// Keyed `google`.
@@ -96,7 +104,8 @@ impl PlatformId {
         matches!(self, PlatformId::Github)
     }
 
-    /// The wire spelling: the key in the public configuration.
+    /// The wire spelling: the key in the public configuration and in the
+    /// version list.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Google => "google",
@@ -104,99 +113,210 @@ impl PlatformId {
             Self::Github => "github",
         }
     }
+
+    /// The platform `name` keys, or `None` where this bridge knows none by
+    /// that name.
+    pub fn named(name: &str) -> Option<PlatformId> {
+        [Self::Google, Self::X, Self::Github]
+            .into_iter()
+            .find(|platform| platform.as_str() == name)
+    }
 }
 
-/// One enabled platform, as one `[[platforms]]` table.
+impl fmt::Display for PlatformId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One OAuth client: the public client identifier and, on the platforms
+/// whose ceremony sends one, the OAuth App's client secret, published as
+/// `clientCredential`. The file writes a platform's defaults as
+/// `default_client_id` and `default_client_credential` on the platform's
+/// own table, and the client of one version as a
+/// `[platforms.version_override.N]` table carrying these two keys.
 ///
-/// Every platform carries the same three things. Whether it also carries a
-/// credential is not a different shape, it is a rule, and [`platforms`]
-/// applies it: GitHub's ceremony sends one as `client_secret` and no other
-/// ceremony sends one at all.
+/// Whether a client carries a credential is not a different shape, it is a
+/// rule, and [`Client::checked`] applies it: GitHub's ceremony sends one as
+/// `client_secret` and no other ceremony sends one at all.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Client {
+    /// The public OAuth client identifier: nonempty printable ASCII without
+    /// whitespace.
+    pub client_id: String,
+    /// The client credential, on exactly the platforms whose ceremony sends
+    /// one: nonempty printable ASCII without whitespace.
+    #[serde(default)]
+    pub client_credential: Option<String>,
+}
+
+impl Client {
+    /// This client checked as `platform`'s: a client id of nonempty printable
+    /// ASCII without whitespace, and a credential of the same exactly where
+    /// the platform's ceremony sends one. A refusal names the key as the
+    /// file spells it, which is `under` and then `client_id` or
+    /// `client_credential`: `default_` on the platform's own table,
+    /// `version_override.N.` under it.
+    pub fn checked(self, platform: PlatformId, under: &str) -> Result<Client> {
+        let refuse = |detail: String| Error::Config {
+            detail: format!("platforms: {platform}{detail}"),
+        };
+        if self.client_id.is_empty() {
+            return Err(refuse(format!(" carries an empty {under}client_id")));
+        }
+        // A client id the platform could never issue is a typo the
+        // deployment publishes and every ceremony then fails on.
+        if !printable_without_whitespace(&self.client_id) {
+            return Err(refuse(format!(
+                "'s {under}client_id is not printable ASCII without whitespace"
+            )));
+        }
+        // A credential belongs to exactly the ceremonies that send one.
+        match (
+            platform.sends_a_credential(),
+            self.client_credential.as_deref(),
+        ) {
+            (false, Some(_)) => Err(refuse(format!(
+                " carries a {under}client_credential, and its ceremony sends none"
+            ))),
+            (true, None) => Err(refuse(format!(
+                " carries no {under}client_credential, and its ceremony sends one"
+            ))),
+            (_, Some("")) => Err(refuse(format!(
+                " carries an empty {under}client_credential"
+            ))),
+            (_, Some(credential)) if !printable_without_whitespace(credential) => {
+                Err(refuse(format!(
+                    "'s {under}client_credential is not printable ASCII without \
+                     whitespace"
+                )))
+            }
+            _ => Ok(self),
+        }
+    }
+}
+
+/// One enabled platform, as one `[[platforms]]` table: the platform, the
+/// client its versions run unless one is written for them, and the clients
+/// written for particular versions.
+///
+/// ```toml
+/// [[platforms]]
+/// id = "github"
+/// default_client_id = "Iv1.0123456789abcdef"
+/// default_client_credential = "..."
+///
+/// [platforms.version_override.2]
+/// client_id = "Iv1.fedcba9876543210"
+/// client_credential = "..."
+/// ```
+///
+/// Which versions the platform advertises is not written here: the
+/// Distribution lists the versions it bundles, and the record is composed
+/// from both.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlatformProfile {
     /// Which platform.
     pub id: PlatformId,
-    /// The public OAuth client identifier.
-    pub client_id: String,
-    /// Platform ceremony versions, nonempty and duplicate-free. List order
-    /// has no meaning.
-    pub versions: Vec<u16>,
-    /// The OAuth App's client secret, published as `clientCredential`:
-    /// public application configuration, nonempty printable ASCII without
-    /// whitespace.
+    /// The public OAuth client identifier every version runs unless
+    /// `version_override` names one for it.
+    pub default_client_id: String,
+    /// The client credential those versions send, on exactly the platforms
+    /// whose ceremony sends one.
     #[serde(default)]
-    pub client_credential: Option<String>,
+    pub default_client_credential: Option<String>,
+    /// The client of particular versions, keyed by the decimal spelling of
+    /// the version, bare or quoted. A TOML key is a string whatever it
+    /// spells; [`Platform::checked`] reads each as a version.
+    #[serde(default)]
+    pub version_override: BTreeMap<String, Client>,
 }
 
-/// Check the enabled set: nonempty, each platform once, each with a client id,
-/// a nonempty, duplicate-free version list, and a client credential on
-/// exactly the platforms whose ceremony sends one, of nonempty printable
-/// ASCII without whitespace.
-pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>> {
-    let refuse = |detail: String| Error::Config {
-        detail: format!("platforms: {detail}"),
-    };
+/// One enabled platform, checked: the client its versions run by default,
+/// and the versions with a client of their own. Which versions it
+/// advertises is the Distribution's to say; a record is composed from both.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Platform {
+    /// Which platform.
+    pub id: PlatformId,
+    /// The client every version runs unless `overrides` names it.
+    pub default: Client,
+    /// The clients written for particular versions, by version. One for a
+    /// version the Distribution does not list is ignored when the record is
+    /// composed; an override applies only on top of a version that exists.
+    pub overrides: BTreeMap<u16, Client>,
+}
 
+impl Platform {
+    /// `profile` checked: its defaults as a client, every `version_override`
+    /// key as a version, and every override as a client. The first rule
+    /// broken is the error.
+    pub fn checked(profile: PlatformProfile) -> Result<Platform> {
+        let id = profile.id;
+        let default = Client {
+            client_id: profile.default_client_id,
+            client_credential: profile.default_client_credential,
+        }
+        .checked(id, "default_")?;
+        let mut overrides = BTreeMap::new();
+        for (key, client) in profile.version_override {
+            let Some(version) = Platform::version_key(&key) else {
+                return Err(Error::Config {
+                    detail: format!(
+                        "platforms: {id}'s version_override key {key:?} is not a \
+                         version; a key is the decimal spelling of an unsigned \
+                         16-bit integer, bare or quoted, with no sign, leading \
+                         zero or whitespace"
+                    ),
+                });
+            };
+            let client = client.checked(id, &format!("version_override.{key}."))?;
+            overrides.insert(version, client);
+        }
+        Ok(Platform {
+            id,
+            default,
+            overrides,
+        })
+    }
+
+    /// The client `version` runs: the one written for it, or the defaults.
+    pub fn client_for(&self, version: u16) -> &Client {
+        self.overrides.get(&version).unwrap_or(&self.default)
+    }
+
+    /// `key` as a version: the canonical decimal spelling of an unsigned
+    /// 16-bit integer, digits alone with no leading zero, or `None`. `parse`
+    /// alone would take a sign and leading zeros, and two spellings of one
+    /// version would be two keys TOML cannot tell apart.
+    fn version_key(key: &str) -> Option<u16> {
+        let canonical = !key.is_empty()
+            && key.bytes().all(|b| b.is_ascii_digit())
+            && (key == "0" || !key.starts_with('0'));
+        canonical.then(|| key.parse().ok()).flatten()
+    }
+}
+
+/// Check the enabled set: nonempty, each platform once, and each as
+/// [`Platform::checked`] has it.
+pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<Platform>> {
     if profiles.is_empty() {
-        return Err(refuse(
-            "no platform is enabled; add a [[platforms]] table to the configuration file"
+        return Err(Error::Config {
+            detail: "platforms: no platform is enabled; add a [[platforms]] table to \
+                     the configuration file"
                 .into(),
-        ));
+        });
     }
-
     for p in &profiles {
-        let id = p.id.as_str();
         if profiles.iter().filter(|q| q.id == p.id).nth(1).is_some() {
-            return Err(refuse(format!("{id} appears more than once")));
-        }
-        if p.client_id.is_empty() {
-            return Err(refuse(format!("{id} carries no client_id")));
-        }
-        // A client id the platform could never issue is a typo the
-        // deployment publishes and every ceremony then fails on.
-        if !printable_without_whitespace(&p.client_id) {
-            return Err(refuse(format!(
-                "{id}'s client_id is not printable ASCII without whitespace"
-            )));
-        }
-        if p.versions.is_empty() {
-            return Err(refuse(format!("{id} advertises no version")));
-        }
-        for v in &p.versions {
-            if p.versions.iter().filter(|w| w == &v).nth(1).is_some() {
-                return Err(refuse(format!(
-                    "{id} advertises version {v} more than once"
-                )));
-            }
-        }
-        // A credential belongs to exactly the ceremonies that send one.
-        match (p.id.sends_a_credential(), p.client_credential.as_deref()) {
-            (false, Some(_)) => {
-                return Err(refuse(format!(
-                    "{id} carries a client_credential, and its ceremony sends none"
-                )))
-            }
-            (true, None) => {
-                return Err(refuse(format!("{id} carries no client_credential")))
-            }
-            (_, None) => {}
-            (_, Some(credential)) => {
-                if credential.is_empty() {
-                    return Err(refuse(format!(
-                        "{id} carries an empty client_credential"
-                    )));
-                }
-                if !printable_without_whitespace(credential) {
-                    return Err(refuse(format!(
-                        "{id}'s client_credential is not printable ASCII \
-                     without whitespace"
-                    )));
-                }
-            }
+            return Err(Error::Config {
+                detail: format!("platforms: {} appears more than once", p.id),
+            });
         }
     }
-    Ok(profiles)
+    profiles.into_iter().map(Platform::checked).collect()
 }
 
 /// Whether every byte of `value` is printable ASCII carrying no whitespace,
@@ -263,26 +383,58 @@ fn allowed_app_origins(list: &[String]) -> Result<Vec<Admitted>> {
     Ok(out)
 }
 
-/// The public ceremony configuration: what one deployment publishes.
+/// The public ceremony configuration: what one deployment publishes for one
+/// version list.
 pub struct CeremonyConfig<'a> {
     /// The CCDP Distribution this deployment selects.
-    pub ccdp_origin: &'a crate::origin::Origin,
+    pub ccdp_origin: &'a Origin,
     /// The enabled platforms, checked.
-    pub platforms: &'a [PlatformProfile],
+    pub platforms: &'a [Platform],
+    /// The versions the Distribution bundles, accepted.
+    pub versions: &'a Versions,
 }
 
 impl CeremonyConfig<'_> {
+    /// The record: each configured platform the list names, with one entry
+    /// per listed version, ascending, carrying the client that version
+    /// runs. A configured platform the list does not name is left out, an
+    /// override for a version the list does not carry is ignored, and each
+    /// is logged. A listed platform the file does not configure has no
+    /// client to publish and is not advertised.
     fn record(&self) -> Value {
         let mut by_id = Map::new();
         for p in self.platforms {
-            let mut entry = json!({
-                "clientId": p.client_id,
-                "ceremonyVersions": p.versions,
-            });
-            if let Some(credential) = p.client_credential.as_deref() {
-                entry["clientCredential"] = Value::from(credential);
+            let Some(listed) = self.versions.bundled_for(p.id) else {
+                tracing::warn!(
+                    platform = %p.id,
+                    "the platform is left out of the ceremony configuration: the \
+                     Distribution lists no version for it"
+                );
+                continue;
+            };
+            for version in p.overrides.keys().filter(|v| !listed.contains(v)) {
+                tracing::warn!(
+                    platform = %p.id,
+                    version,
+                    "the version override is ignored: the Distribution does not list \
+                     the version"
+                );
             }
-            by_id.insert(p.id.as_str().to_owned(), entry);
+            let versions: Vec<Value> = listed
+                .iter()
+                .map(|&version| {
+                    let client = p.client_for(version);
+                    let mut entry = json!({
+                        "version": version,
+                        "clientId": client.client_id,
+                    });
+                    if let Some(credential) = client.client_credential.as_deref() {
+                        entry["clientCredential"] = Value::from(credential);
+                    }
+                    entry
+                })
+                .collect();
+            by_id.insert(p.id.as_str().to_owned(), json!({ "versions": versions }));
         }
         json!({
             "ccdpOrigin": self.ccdp_origin,
@@ -290,11 +442,27 @@ impl CeremonyConfig<'_> {
         })
     }
 
-    /// That record as the bytes it is served in, serialized once at startup.
+    /// That record as the bytes it is served in, serialized once.
     pub fn serialized(&self) -> Bytes {
         Bytes::from(
             serde_json::to_vec(&self.record())
                 .expect("a Value of string keys serializes into memory"),
         )
     }
+}
+
+/// The public ceremony configuration as published: one record, composed once
+/// from this deployment's clients and one accepted version list, and the
+/// validator that list arrived with.
+///
+/// One value, published as one unit, as the callback document is: the ETag
+/// advances only where a record does, so a list this bridge refuses cannot
+/// leave the next revalidation asking after it.
+pub struct PublishedConfig {
+    /// The record: the exact bytes every admitted caller receives.
+    pub record: Bytes,
+    /// The version list it was composed from.
+    pub versions: Versions,
+    /// The `ETag` the list arrived with, sent back as `If-None-Match`.
+    pub etag: Option<String>,
 }

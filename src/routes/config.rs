@@ -1,8 +1,12 @@
 //! The public ceremony configuration: `{ ccdpOrigin, platforms }`, one record
-//! built at startup and served to every admitted origin, and to a same-origin
-//! read. It carries no secret, no admitted origin, no asset URL and no notary
-//! setting. A browser that must preflight its `GET` is answered here too, by
-//! the same admission rule.
+//! composed from this deployment's clients and the versions the Distribution
+//! bundles, served to every admitted origin, and to a same-origin read. It
+//! carries no secret, no admitted origin, no asset URL and no notary setting.
+//!
+//! The record depends on the Distribution, so until the first accepted
+//! version list there is none, and an admitted caller is told to retry.
+//! A browser that must preflight its `GET` is answered here too, by the same
+//! admission rule.
 
 use std::sync::Arc;
 
@@ -28,6 +32,7 @@ use serde_json::json;
 
 use crate::{
     origin::Observed,
+    routes::RETRY_AFTER,
     state::AppState,
 };
 
@@ -55,6 +60,17 @@ enum Admission {
     /// No `Origin`: a same-origin browser `GET`, which carries none, on
     /// `Sec-Fetch-Site: same-origin`. It needs no CORS header.
     SameOrigin,
+}
+
+impl Admission {
+    /// The origin to echo as the allow-origin: the one admitted, where one
+    /// was. A same-origin read gets none.
+    fn echoed(&self) -> Option<HeaderValue> {
+        match self {
+            Admission::Listed(origin) => Some(origin.clone()),
+            Admission::SameOrigin => None,
+        }
+    }
 }
 
 /// How this request may read the configuration, or `None`.
@@ -96,7 +112,8 @@ fn admission(state: &AppState, headers: &HeaderMap) -> Option<Admission> {
 /// It admits what the `GET` admits: exactly one `Origin`, in the effective
 /// set. A preflight carries one by definition, so the same-origin case is not
 /// one and is refused like any other. The answer grants `GET`, the headers the
-/// request asked for, and no credentials.
+/// request asked for, and no credentials. It is answered whether or not a
+/// record is available: what it grants does not depend on one.
 pub async fn preflight(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -146,16 +163,18 @@ pub async fn config(
     };
 
     if query.is_some_and(|q| !q.is_empty()) {
-        let admitted = match &admission {
-            Admission::Listed(origin) => Some(origin.clone()),
-            Admission::SameOrigin => None,
-        };
         return refuse(
             StatusCode::BAD_REQUEST,
             "this route takes no query",
-            admitted,
+            admission.echoed(),
         );
     }
+
+    // The borrow guard is released before the response is built.
+    let published = state.ceremony_config.current.borrow().clone();
+    let Some(published) = published else {
+        return unavailable(&state.ceremony_config.why_nothing(), admission.echoed());
+    };
 
     // `insert`, not append: the `Bytes` body would otherwise add its own
     // content type.
@@ -167,11 +186,27 @@ pub async fn config(
     );
     // The exact origin that asked, never `*`; no credentials. A same-origin
     // read gets no allow-origin.
-    if let Admission::Listed(origin) = admission {
+    if let Some(origin) = admission.echoed() {
         out.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
     }
 
-    (StatusCode::OK, out, state.ceremony_config.clone()).into_response()
+    (StatusCode::OK, out, published.record.clone()).into_response()
+}
+
+/// The answer while there is no record: a `503` carrying the CORS headers a
+/// `200` would, so an admitted caller's browser can read the status and
+/// retry after `RETRY_AFTER` seconds. `why` names the Distribution URL this
+/// deployment is waiting on.
+fn unavailable(why: &str, admitted: Option<HeaderValue>) -> Response {
+    let mut response = refuse(
+        StatusCode::SERVICE_UNAVAILABLE,
+        &format!("the ceremony configuration is not available yet: {why}"),
+        admitted,
+    );
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static(RETRY_AFTER));
+    response
 }
 
 /// A refusal carries no configuration, so a caller cannot read the record out

@@ -21,19 +21,20 @@ use axum::{
     },
 };
 
-use crate::state::AppState;
+use crate::{
+    routes::RETRY_AFTER,
+    state::AppState,
+};
 
 /// `cross-origin-opener-policy`, which is not one of the constants `header`
 /// names.
 const COOP: HeaderName = HeaderName::from_static("cross-origin-opener-policy");
 
 /// What a deployment with no document answers with: no script, no link, no
-/// form, and nothing derived from the request. `why` is the last retrieval
-/// failure, which names this deployment's own Distribution and no secret.
-fn no_document(why: Option<&str>) -> String {
-    let detail = why.map(escaped).unwrap_or_else(|| {
-        "The ceremony documents have not been retrieved yet.".to_owned()
-    });
+/// form, and nothing derived from the request. `why` is why there is none,
+/// which names this deployment's own Distribution and no secret.
+fn no_document(why: &str) -> String {
+    let detail = escaped(why);
     format!(
         "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
@@ -54,18 +55,12 @@ fn escaped(text: &str) -> String {
 /// The policy of the inert page: everything denied.
 const NO_DOCUMENT_POLICY: &str = "default-src 'none'; style-src 'unsafe-inline'";
 
-/// How long a caller is asked to wait before the ceremony is retried. The
-/// retrieval that would end this answer is already in its own backoff, which
-/// starts a second after a failure.
-const RETRY_AFTER: &str = "5";
-
 /// `GET {callback path}`.
 pub async fn callback(State(state): State<Arc<AppState>>) -> Response {
     // The borrow guard is released before the response is built.
-    let published = state.callback.borrow().clone();
+    let published = state.callback.current.borrow().clone();
     let Some(published) = published else {
         state.metrics.callback_unavailable();
-        let why = state.failure.borrow().clone();
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             [
@@ -75,7 +70,7 @@ pub async fn callback(State(state): State<Arc<AppState>>) -> Response {
                 (header::RETRY_AFTER, RETRY_AFTER),
                 (header::CONTENT_SECURITY_POLICY, NO_DOCUMENT_POLICY),
             ],
-            no_document(why.as_deref()),
+            no_document(&state.callback.why_nothing()),
         )
             .into_response();
     };

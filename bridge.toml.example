@@ -48,29 +48,41 @@
 # named below with pattern support first, then configure the member.
 allowed_app_origins = ["https://app.example", "https://wallet.example"]
 
-# The CCDP Distribution: the origin serving the Callback artifact and
-# everything the browser runs after it. Omit for the canonical libID
-# Distribution.
+# The CCDP Distribution: the origin serving the Callback artifact, the list of
+# the platform ceremony versions it bundles, and everything the browser runs
+# after the callback. Omit for the canonical libID Distribution.
 ccdp_origin = "https://lib.id"
 
 
-# The enabled platforms: one table per platform, with its public client id and
-# the ceremony versions it advertises. The github table also carries the OAuth
-# App's client secret, which the bridge publishes as clientCredential:
-# public application configuration the browser's token request sends as
-# client_secret.
+# The enabled platforms: one table per platform, naming the OAuth client its
+# ceremony versions run. Which versions are advertised is not written here:
+# the Distribution publishes the versions it bundles, and the bridge
+# advertises exactly those, each with the client below. A platform the
+# Distribution lists no version for is not advertised.
+#
+# The github table also carries the OAuth App's client secret, which the
+# bridge publishes as clientCredential: public application configuration the
+# browser's token request sends as client_secret. No other platform's
+# ceremony sends one, and a credential on another table is refused.
 [[platforms]]
 id = "github"
-client_id = "Iv1.0123456789abcdef"
-versions = [1]
-client_credential = "0123456789abcdef0123456789abcdef01234567"
+default_client_id = "Iv1.0123456789abcdef"
+default_client_credential = "0123456789abcdef0123456789abcdef01234567"
+
+# A version may run a client of its own: a version_override table keyed by
+# the version, bare or quoted, carrying a whole client -- client_id, and
+# client_credential exactly where the platform's ceremony sends one. The
+# defaults above stay required. An override for a version the Distribution
+# does not list is ignored, and logged when the configuration is composed.
+#
+#     [platforms.version_override.2]
+#     client_id = "Iv1.fedcba9876543210"
+#     client_credential = "76543210fedcba9876543210fedcba9876543210"
 
 # [[platforms]]
 # id = "google"
-# client_id = "000000000000-xxxxxxxxxxxxxxxxxxxxxxxxxxxx.apps.googleusercontent.com"
-# versions = [1]
+# default_client_id = "000000000000-xxxxxxxxxxxxxxxxxxxxxxxxxxxx.apps.googleusercontent.com"
 
 # [[platforms]]
 # id = "x"
-# client_id = "XXXXXXXXXXXXXXXXXXXXXXXXXX"
-# versions = [1]
+# default_client_id = "XXXXXXXXXXXXXXXXXXXXXXXXXX"

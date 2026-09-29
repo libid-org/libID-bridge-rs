@@ -19,12 +19,11 @@ gas, keeps no database, and talks to no chain.
 ## How a claim works
 
 1. The application reads `GET /api/v1/ceremony/config` from an admitted
-   origin: the CCDP Distribution to load and, per enabled platform, the OAuth
-   client its ceremony versions run — the public client id and, for GitHub,
-   the public `clientCredential` — with a client of its own for any version
-   the file overrides. It reads the ceremony versions that Distribution
-   bundles from `{ccdpOrigin}/ccdp/versions.json` itself, and derives the
-   redirect URI from the bridge origin it already knows:
+   origin: the CCDP Distribution to load and, per enabled platform, the one
+   OAuth client its ceremony runs — the public client id and, for GitHub,
+   the public `clientCredential`. It reads the platform ceremony versions
+   that Distribution bundles from `{ccdpOrigin}/ccdp/versions.json`, and
+   derives the redirect URI from the bridge origin it already knows:
    `{bridgeOrigin}/auth/callback`.
 2. The browser derives its PKCE verifier, opens the provider's authorization
    page, and is redirected to `GET /auth/callback` on this bridge: one
@@ -76,37 +75,26 @@ Any other path, `POST /api/v1/ceremony/github-token` included, is answered
 {
   "ccdpOrigin": "https://lib.id",
   "platforms": {
-    "github": {
-      "clientId": "Iv1.0123456789abcdef",
-      "clientCredential": "…",
-      "versionOverrides": {
-        "2": { "clientId": "Iv1.fedcba9876543210", "clientCredential": "…" }
-      }
-    },
+    "github": { "clientId": "Iv1.0123456789abcdef", "clientCredential": "…" },
     "x": { "clientId": "…" }
   }
 }
 ```
 
 A platform is present exactly when the configuration file enables it. Its
-entry is the OAuth client its ceremony versions run: `clientId` and, on
-exactly the platforms whose ceremony sends one — GitHub — `clientCredential`.
-`versionOverrides` is present only when the file overrides at least one
-version, and maps the decimal spelling of a version, the same grammar as the
-file's keys, to the whole client that version runs instead. Every client id
-and credential is nonempty printable ASCII without whitespace, checked at
-startup. The record carries no redirect URI, no allowlist, no notary setting
-and no user token.
+entry is the one OAuth client every version of its ceremony runs: `clientId`
+and, on exactly the platforms whose ceremony sends one — GitHub —
+`clientCredential`. Both are nonempty printable ASCII without whitespace,
+checked at startup. The record carries no redirect URI, no allowlist, no
+notary setting and no user token.
 
 The record names no version. The Distribution publishes the platform
 ceremony versions it bundles at `{ccdpOrigin}/ccdp/versions.json`, and the
-application reads that list itself: it keeps the versions it implements, runs
-each with the override the record names for it or the platform's client
-otherwise, and enables no platform the list omits or the record does not
-configure. An override for a version the list does not carry applies to
-nothing. The record is composed and serialized once at startup, so an
-admitted caller is answered `200` whether or not the Distribution has been
-reached.
+application reads that list itself: it keeps the versions it implements,
+runs each with the platform's client, and enables no platform the list
+omits or the record does not configure. The record is composed and
+serialized once at startup, so an admitted caller is answered `200` whether
+or not the Distribution has been reached.
 
 ## The CCDP Distribution
 
@@ -121,8 +109,7 @@ notarization client — is served by a separate static **CCDP Distribution** at
 bridge publishes configuration and serves one callback document. It serves no
 CCDP resource and no proving asset. The Distribution also publishes the
 platform ceremony versions it bundles, at `/ccdp/versions.json`; the
-application reads that list directly, and the bridge's record names no
-version.
+application reads that list directly, and the bridge holds no version list.
 
 ### The callback document
 
@@ -214,33 +201,20 @@ complete starting point:
 allowed_app_origins = ["https://app.example", "https://wallet.example"]
 
 [[platforms]]
-id                        = "github"
-default_client_id         = "Iv1.0123456789abcdef"
-default_client_credential = "…"
-
-[platforms.version_override.2]
-client_id         = "Iv1.fedcba9876543210"
+id                = "github"
+client_id         = "Iv1.0123456789abcdef"
 client_credential = "…"
 ```
 
 An unknown key is refused at startup, `host` and `port` among them: where the
 process listens is set with `HOST`/`PORT` or `--host`/`--port`. The platforms
 are set only in the file, one `[[platforms]]` table per enabled platform: its
-`id` (`github`, `google` or `x`), the public `default_client_id` its ceremony
-versions run and, for `github`, the App's client secret as
-`default_client_credential`, which the bridge publishes. The versions
-themselves are not written here: the Distribution publishes the ones it
-bundles, and the application reads them. There is no notary setting and no
-environment variable for the credential.
-
-A version may run a client of its own: `version_override` is a table keyed by
-the version, the decimal spelling of an unsigned 16-bit integer, bare or
-quoted, with no sign, leading zero or whitespace; any other key is refused at
-startup, and TOML itself refuses a version written twice. An override is a
-whole client — `client_id`, and `client_credential` exactly where the
-platform's ceremony sends one — under the same byte rules as the defaults,
-and the defaults stay required whatever is overridden. An override for a
-version the Distribution does not list applies to nothing.
+`id` (`github`, `google` or `x`), its public `client_id` and, for `github`,
+the App's client secret as `client_credential`, which the bridge publishes.
+That is the platform's one OAuth registration, and every version of its
+ceremony the Distribution bundles runs it; the versions themselves are not
+written here. There is no notary setting and no environment variable for the
+credential.
 
 | Key | Environment | Default | Meaning |
 |---|---|---|---|
@@ -248,7 +222,7 @@ version the Distribution does not list applies to nothing.
 | — | `PORT`, `--port` | `8722` | Bind port. Not a file key, for the same reason. |
 | `allowed_app_origins` | — | *(required)* | The application allowlist. A member is an exact origin, an origin pattern or `*`, as described below. A repeated spelling is refused; a pattern and an origin it covers are two members. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once and by its literal spelling. It is the one admission rule: the configuration route admits exactly one `Origin` that a member admits, and echoes that origin itself; the callback document is told the same set. A same-origin read carries no `Origin` and is admitted on `Sec-Fetch-Site: same-origin` alone. |
 | `ccdp_origin` | — | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/callback.html`, `/ccdp/versions.json` and everything the browser runs after the callback, HTTPS, or HTTP on `localhost` or `127.0.0.1`. Published in the configuration and inserted into the callback document, and named as the one `frame-src` source of its policy, so a host a policy source expression cannot name, an IPv6 literal or an underscore among them, is refused. Omitting it selects the canonical libID Distribution. |
-| `platforms` | — | *(required)* | The enabled platforms, as `[[platforms]]` tables: `id`, `default_client_id`, for `github` its `default_client_credential`, and any `version_override` tables. |
+| `platforms` | — | *(required)* | The enabled platforms, as `[[platforms]]` tables: `id`, `client_id` and, for `github`, its `client_credential`. |
 | — | `LIBID_CONFIG`, `--config` | *(none)* | Path to the configuration file. |
 
 ### Allowlist members
@@ -294,11 +268,11 @@ configure the member.
 
 ### Per platform
 
-GitHub's clients carry the App's client secret as the public
+GitHub's entry carries the App's client secret as the public
 `clientCredential`; the browser's token request sends it as
 `client_secret`. X runs a public PKCE client, browser to notary, and Google's
 identity evidence is a signed ID Token the browser reads out of the redirect
-fragment: neither carries a credential, and nothing here takes part in
+fragment: neither entry carries a credential, and nothing here takes part in
 either ceremony beyond the configuration and the callback document.
 
 ## Running with Docker

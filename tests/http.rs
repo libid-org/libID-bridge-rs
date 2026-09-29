@@ -381,7 +381,7 @@ async fn config_publishes_an_x_entry_of_exactly_its_client_id() {
     let state = deployment(&[
         "--platforms",
         &format!(
-            r#"[{{"id":"github","default_client_id":"{}","default_client_credential":"{}"}},{{"id":"x","default_client_id":"WHRlc3RjbGllbnQ6MTpjaQ"}}]"#,
+            r#"[{{"id":"github","client_id":"{}","client_credential":"{}"}},{{"id":"x","client_id":"WHRlc3RjbGllbnQ6MTpjaQ"}}]"#,
             crate::common::CLIENT_ID,
             crate::common::CLIENT_CREDENTIAL
         ),
@@ -541,8 +541,7 @@ async fn config_refuses_a_query_but_reads_the_origin_first() {
 #[tokio::test]
 async fn a_path_this_bridge_does_not_serve_answers_nothing() {
     const TOKEN_BODY: &str = r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"iMSTNh6gQkRnBGlY1c0MUOsD7MCO4G8C7ph1_gIZs5I","notaryAddress":"https://127.0.0.1:7048"}"#;
-    let x_only =
-        deployment(&["--platforms", r#"[{"id":"x","default_client_id":"abc"}]"#]).await;
+    let x_only = deployment(&["--platforms", r#"[{"id":"x","client_id":"abc"}]"#]).await;
 
     for path in ["/api/v1/ceremony/github-token", "/does-not-exist"] {
         for state in [test_state().await, x_only.clone()] {

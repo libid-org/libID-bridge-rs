@@ -102,20 +102,13 @@ pub struct Settings {
     pub ccdp_origin: String,
 
     /// The enabled platforms, as `[[platforms]]` tables: each names a
-    /// platform, the public client id its ceremony versions run by default,
-    /// for `github` the public client credential they send, and, under
-    /// `version_override`, the client of any version that runs another.
-    /// Which versions exist is not written here: the Distribution publishes
-    /// the versions it bundles, and the application reads that list.
+    /// platform, the public client id of the one OAuth registration its
+    /// ceremony runs and, for `github`, the public client credential.
     ///
     /// ```toml
     /// [[platforms]]
     /// id = "github"
-    /// default_client_id = "Iv1.0123456789abcdef"
-    /// default_client_credential = "..."
-    ///
-    /// [platforms.version_override.2]
-    /// client_id = "Iv1.fedcba9876543210"
+    /// client_id = "Iv1.0123456789abcdef"
     /// client_credential = "..."
     /// ```
     #[serde(default)]

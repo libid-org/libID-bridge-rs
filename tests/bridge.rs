@@ -224,14 +224,7 @@ mod root {
                 "a github platform whose credential carries whitespace",
                 vec![
                     "--platforms",
-                    r#"[{"id":"github","default_client_id":"gh","default_client_credential":"c0f fee"}]"#,
-                ],
-            ),
-            (
-                "a version override keyed by something that is not a version",
-                vec![
-                    "--platforms",
-                    r#"[{"id":"x","default_client_id":"xc","version_override":{"02":{"client_id":"x2"}}}]"#,
+                    r#"[{"id":"github","client_id":"gh","client_credential":"c0f fee"}]"#,
                 ],
             ),
         ] {
@@ -249,7 +242,7 @@ mod root {
     async fn the_published_configuration_keys_every_enabled_platform_by_name() {
         let state = started(&[
             "--platforms",
-            r#"[{"id":"google","default_client_id":"g"},{"id":"x","default_client_id":"xc"},{"id":"github","default_client_id":"gh","default_client_credential":"c0ffee"}]"#,
+            r#"[{"id":"google","client_id":"g"},{"id":"x","client_id":"xc"},{"id":"github","client_id":"gh","client_credential":"c0ffee"}]"#,
         ])
         .await;
         let record: serde_json::Value =

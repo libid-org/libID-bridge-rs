@@ -6,8 +6,6 @@
 mod common;
 
 mod deployment {
-    use std::collections::BTreeMap;
-
     use libid_bridge_rs::{
         deployment::*,
         error::{
@@ -21,18 +19,18 @@ mod deployment {
         Value,
     };
 
-    const ONE: &str = r#"[{"id":"github","default_client_id":"Iv1.0","default_client_credential":"c0ffee"}]"#;
+    /// GitHub, with the credential its ceremony sends.
+    const ONE: &str =
+        r#"[{"id":"github","client_id":"Iv1.0","client_credential":"c0ffee"}]"#;
 
-    /// GitHub with a client of its own for version 2, and X with one for
-    /// version 1.
-    const OVERRIDDEN: &str = r#"[
-        {"id":"github","default_client_id":"Iv1.0","default_client_credential":"c0ffee",
-         "version_override":{"2":{"client_id":"Iv1.2","client_credential":"decaf"}}},
-        {"id":"x","default_client_id":"xc","version_override":{"1":{"client_id":"x1"}}}
+    /// GitHub and X, each with the one client its ceremony runs.
+    const TWO: &str = r#"[
+        {"id":"github","client_id":"Iv1.0","client_credential":"c0ffee"},
+        {"id":"x","client_id":"xc"}
     ]"#;
 
     /// Parse records as the configuration file would, then check them.
-    fn checked(json: &str) -> Result<Vec<Platform>> {
+    fn checked(json: &str) -> Result<Vec<PlatformProfile>> {
         let records: Vec<PlatformProfile> =
             serde_json::from_str(json).map_err(|e| Error::Config {
                 detail: e.to_string(),
@@ -40,28 +38,23 @@ mod deployment {
         platforms(records)
     }
 
-    /// One github entry whose `default_client_credential` is `credential`.
+    /// One github entry whose `client_credential` is `credential`.
     fn github_with(credential: impl Into<Value>) -> String {
         json!([{
             "id": "github",
-            "default_client_id": "a",
-            "default_client_credential": credential.into(),
+            "client_id": "a",
+            "client_credential": credential.into(),
         }])
         .to_string()
     }
 
-    /// One x entry whose `version_override` is `overrides`.
-    fn x_overriding(overrides: Value) -> String {
-        json!([{
-            "id": "x",
-            "default_client_id": "a",
-            "version_override": overrides,
-        }])
-        .to_string()
+    /// One x entry whose `client_id` is `client_id`.
+    fn x_with(client_id: impl Into<Value>) -> String {
+        json!([{ "id": "x", "client_id": client_id.into() }]).to_string()
     }
 
     /// The record `platforms` publish, as the bytes it is served in.
-    fn serialized(platforms: &[Platform]) -> String {
+    fn serialized(platforms: &[PlatformProfile]) -> String {
         let ccdp_origin = Origin::parse("CCDP_ORIGIN", "https://lib.id").unwrap();
         let bytes = CeremonyConfig {
             ccdp_origin: &ccdp_origin,
@@ -72,7 +65,7 @@ mod deployment {
     }
 
     /// The record `platforms` publish.
-    fn record(platforms: &[Platform]) -> Value {
+    fn record(platforms: &[PlatformProfile]) -> Value {
         serde_json::from_str(&serialized(platforms)).unwrap()
     }
 
@@ -89,112 +82,31 @@ mod deployment {
 
     #[test]
     fn a_well_formed_set_parses() {
-        let p = checked(ONE).unwrap();
-        assert_eq!(p.len(), 1);
-        assert_eq!(p[0].id, PlatformId::Github);
         assert_eq!(
-            p[0].default,
-            Client {
+            checked(ONE).unwrap(),
+            [PlatformProfile {
+                id: PlatformId::Github,
                 client_id: "Iv1.0".into(),
                 client_credential: Some("c0ffee".into()),
-            }
-        );
-        assert!(p[0].overrides.is_empty());
-    }
-
-    /// An override is a whole client, keyed by its version, beside the
-    /// defaults it leaves in place.
-    #[test]
-    fn an_override_is_a_whole_client_keyed_by_its_version() {
-        let p = checked(OVERRIDDEN).unwrap();
-        let github = &p[0];
-        assert_eq!(github.default.client_id, "Iv1.0");
-        assert_eq!(
-            github.overrides,
-            BTreeMap::from([(
-                2,
-                Client {
-                    client_id: "Iv1.2".into(),
-                    client_credential: Some("decaf".into()),
-                },
-            )])
-        );
-        let x = &p[1];
-        assert_eq!(x.default.client_id, "xc");
-        assert_eq!(
-            x.overrides,
-            BTreeMap::from([(
-                1,
-                Client {
-                    client_id: "x1".into(),
-                    client_credential: None,
-                },
-            )])
+            }]
         );
     }
 
-    /// The canonical spellings of a version key are read, zero and the
-    /// largest version included, and published under the same spellings.
+    /// The record carries each enabled platform under its id, as the one
+    /// client its ceremony runs: `clientId` and, on exactly github's entry,
+    /// `clientCredential`. Nothing else travels, and no version is named.
     #[test]
-    fn a_version_key_is_the_canonical_decimal_spelling() {
-        let p = checked(&x_overriding(json!({
-            "0": {"client_id": "z"},
-            "7": {"client_id": "s"},
-            "65535": {"client_id": "m"},
-        })))
-        .unwrap();
-        let keys: Vec<u16> = p[0].overrides.keys().copied().collect();
-        assert_eq!(keys, [0, 7, 65535]);
-        let record = record(&p);
-        assert_eq!(
-            sorted_keys(&record["platforms"]["x"]["versionOverrides"]),
-            ["0", "65535", "7"]
-        );
-    }
-
-    /// The record carries each enabled platform under its id: the client its
-    /// versions run and, under `versionOverrides`, each override keyed by the
-    /// decimal version. `clientCredential` is on exactly github's clients,
-    /// and nothing of the former shape survives.
-    #[test]
-    fn the_record_carries_each_platforms_client_and_its_overrides() {
-        let platforms = checked(OVERRIDDEN).unwrap();
-        let record = record(&platforms);
+    fn the_record_carries_each_platforms_client_and_nothing_else() {
+        let record = record(&checked(TWO).unwrap());
 
         assert_eq!(sorted_keys(&record), ["ccdpOrigin", "platforms"]);
         assert_eq!(record["ccdpOrigin"], "https://lib.id");
         assert_eq!(sorted_keys(&record["platforms"]), ["github", "x"]);
         assert_eq!(
             record["platforms"]["github"],
-            json!({
-                "clientId": "Iv1.0",
-                "clientCredential": "c0ffee",
-                "versionOverrides": {
-                    "2": { "clientId": "Iv1.2", "clientCredential": "decaf" }
-                }
-            })
+            json!({ "clientId": "Iv1.0", "clientCredential": "c0ffee" })
         );
-        assert_eq!(
-            record["platforms"]["x"],
-            json!({
-                "clientId": "xc",
-                "versionOverrides": { "1": { "clientId": "x1" } }
-            })
-        );
-        let raw = record.to_string();
-        assert!(!raw.contains("ceremonyVersions"), "{raw}");
-        assert!(!raw.contains("\"versions\""), "{raw}");
-    }
-
-    /// `versionOverrides` is present only where the file overrides a
-    /// version: a platform overriding none is its client alone.
-    #[test]
-    fn a_platform_overriding_no_version_carries_no_version_overrides() {
-        let record = record(&checked(ONE).unwrap());
-        assert_eq!(
-            sorted_keys(&record["platforms"]["github"]),
-            ["clientCredential", "clientId"]
-        );
+        assert_eq!(record["platforms"]["x"], json!({ "clientId": "xc" }));
     }
 
     /// The platforms are keyed by id in the bytes served, sorted as
@@ -202,7 +114,7 @@ mod deployment {
     #[test]
     fn the_record_keys_the_platforms_in_sorted_order() {
         let platforms = checked(
-            r#"[{"id":"x","default_client_id":"xc"},{"id":"github","default_client_id":"gh","default_client_credential":"c"},{"id":"google","default_client_id":"g"}]"#,
+            r#"[{"id":"x","client_id":"xc"},{"id":"github","client_id":"gh","client_credential":"c"},{"id":"google","client_id":"g"}]"#,
         )
         .unwrap();
         let raw = serialized(&platforms);
@@ -224,109 +136,45 @@ mod deployment {
             ("empty", "[]".to_owned()),
             (
                 "unknown platform",
-                r#"[{"id":"twitter","default_client_id":"a"}]"#.to_owned(),
+                r#"[{"id":"twitter","client_id":"a"}]"#.to_owned(),
             ),
             (
                 "duplicate platform",
-                r#"[{"id":"x","default_client_id":"a"},{"id":"x","default_client_id":"b"}]"#
-                    .to_owned(),
+                r#"[{"id":"x","client_id":"a"},{"id":"x","client_id":"b"}]"#.to_owned(),
             ),
             (
                 "additional member",
-                r#"[{"id":"x","default_client_id":"a","label":"X"}]"#.to_owned(),
+                r#"[{"id":"x","client_id":"a","label":"X"}]"#.to_owned(),
             ),
             (
-                "the former client_id key",
-                r#"[{"id":"x","client_id":"a"}]"#.to_owned(),
+                "a version list",
+                r#"[{"id":"x","client_id":"a","versions":[1]}]"#.to_owned(),
             ),
-            (
-                "the former versions key",
-                r#"[{"id":"x","default_client_id":"a","versions":[1]}]"#.to_owned(),
-            ),
-            (
-                "the former client_credential key",
-                r#"[{"id":"github","default_client_id":"a","client_credential":"c"}]"#
-                    .to_owned(),
-            ),
-            (
-                "an empty default client id",
-                r#"[{"id":"x","default_client_id":""}]"#.to_owned(),
-            ),
-            (
-                "a default client id carrying a space",
-                r#"[{"id":"x","default_client_id":"a b"}]"#.to_owned(),
-            ),
+            ("no client id", r#"[{"id":"x"}]"#.to_owned()),
+            ("a null client id", x_with(Value::Null)),
+            ("a client id that is not a string", x_with(1)),
+            ("an empty client id", x_with("")),
+            ("a client id carrying a space", x_with("a b")),
+            ("a client id outside ASCII", x_with(around(0xE9))),
             (
                 "a github entry with no credential",
-                r#"[{"id":"github","default_client_id":"a"}]"#.to_owned(),
+                r#"[{"id":"github","client_id":"a"}]"#.to_owned(),
             ),
             ("a null credential", github_with(Value::Null)),
             ("a credential that is not a string", github_with(1)),
             ("an empty credential", github_with("")),
             ("a credential carrying a space", github_with(around(b' '))),
             ("a credential carrying a tab", github_with(around(b'\t'))),
-            ("a credential carrying a control byte", github_with(around(7))),
+            (
+                "a credential carrying a control byte",
+                github_with(around(7)),
+            ),
             ("a credential carrying DEL", github_with(around(0x7F))),
             ("a credential outside ASCII", github_with(around(0xE9))),
             (
                 "a credential on a platform that has none",
-                r#"[{"id":"x","default_client_id":"a","default_client_credential":"c0ffee"}]"#
-                    .to_owned(),
+                r#"[{"id":"x","client_id":"a","client_credential":"c0ffee"}]"#.to_owned(),
             ),
-            (
-                "an override with no client_id",
-                x_overriding(json!({"2": {}})),
-            ),
-            (
-                "an override spelled with the defaults' key",
-                x_overriding(json!({"2": {"default_client_id": "b"}})),
-            ),
-            (
-                "an override with an empty client_id",
-                x_overriding(json!({"2": {"client_id": ""}})),
-            ),
-            (
-                "an override whose client_id carries a space",
-                x_overriding(json!({"2": {"client_id": "a b"}})),
-            ),
-            (
-                "an override carrying an unknown key",
-                x_overriding(json!({"2": {"client_id": "b", "versions": [2]}})),
-            ),
-            (
-                "a github override with no credential",
-                r#"[{"id":"github","default_client_id":"a","default_client_credential":"c","version_override":{"2":{"client_id":"b"}}}]"#.to_owned(),
-            ),
-            (
-                "a github override with an empty credential",
-                r#"[{"id":"github","default_client_id":"a","default_client_credential":"c","version_override":{"2":{"client_id":"b","client_credential":""}}}]"#.to_owned(),
-            ),
-            (
-                "an x override carrying a credential",
-                x_overriding(json!({"2": {"client_id": "b", "client_credential": "c"}})),
-            ),
-            (
-                "a version_override that is not a table",
-                r#"[{"id":"x","default_client_id":"a","version_override":[1]}]"#.to_owned(),
-            ),
-            (
-                "an override that is not a table",
-                x_overriding(json!({"2": "b"})),
-            ),
-            ("an override keyed by nothing", x_overriding(json!({"": {"client_id": "b"}}))),
-            ("an override keyed by a name", x_overriding(json!({"two": {"client_id": "b"}}))),
-            ("a signed key", x_overriding(json!({"+2": {"client_id": "b"}}))),
-            ("a negative key", x_overriding(json!({"-1": {"client_id": "b"}}))),
-            ("a key with a leading zero", x_overriding(json!({"02": {"client_id": "b"}}))),
-            ("a key that is only zeros", x_overriding(json!({"00": {"client_id": "b"}}))),
-            ("a key with leading whitespace", x_overriding(json!({" 2": {"client_id": "b"}}))),
-            ("a key with trailing whitespace", x_overriding(json!({"2 ": {"client_id": "b"}}))),
-            ("a key over 16 bits", x_overriding(json!({"65536": {"client_id": "b"}}))),
-            ("a key with a fraction", x_overriding(json!({"1.5": {"client_id": "b"}}))),
-            ("a key in scientific notation", x_overriding(json!({"1e3": {"client_id": "b"}}))),
-            ("a hexadecimal key", x_overriding(json!({"0x10": {"client_id": "b"}}))),
-            ("a key with a separator", x_overriding(json!({"1_000": {"client_id": "b"}}))),
-            ("a key in other digits", x_overriding(json!({"٢": {"client_id": "b"}}))),
         ] {
             assert!(checked(&json).is_err(), "{why} must be refused");
         }
@@ -334,34 +182,17 @@ mod deployment {
 
     /// A refusal names the key as the file spells it, never the value.
     #[test]
-    fn a_refused_credential_is_named_and_not_quoted() {
+    fn a_refused_key_is_named_and_not_quoted() {
         let err =
             checked(&github_with("zzMarkerzz fee")).expect_err("a space is refused");
         let text = err.to_string();
-        assert!(text.contains("default_client_credential"), "{text}");
+        assert!(text.contains("client_credential"), "{text}");
         assert!(!text.contains("zzMarkerzz"), "{text}");
 
-        let err = checked(
-            r#"[{"id":"github","default_client_id":"a","default_client_credential":"c","version_override":{"2":{"client_id":"b","client_credential":"zzMarkerzz fee"}}}]"#,
-        )
-        .expect_err("a space is refused in an override too");
+        let err = checked(&x_with("zzMarkerzz id")).expect_err("a space is refused");
         let text = err.to_string();
-        assert!(
-            text.contains("version_override.2.client_credential"),
-            "{text}"
-        );
+        assert!(text.contains("client_id"), "{text}");
         assert!(!text.contains("zzMarkerzz"), "{text}");
-    }
-
-    /// A refused version key is named, with what a key is.
-    #[test]
-    fn a_refused_version_key_is_named() {
-        let err = checked(&x_overriding(json!({"02": {"client_id": "b"}})))
-            .expect_err("a leading zero is refused");
-        let text = err.to_string();
-        assert!(text.contains("version_override"), "{text}");
-        assert!(text.contains("\"02\""), "{text}");
-        assert!(text.contains("unsigned 16-bit integer"), "{text}");
     }
 }
 
@@ -751,8 +582,8 @@ mod config {
         },
         deployment::{
             platforms,
-            Client,
             PlatformId,
+            PlatformProfile,
         },
         error::Result,
     };
@@ -763,9 +594,9 @@ mod config {
         Settings::read(file.path())
     }
 
-    /// One `x` table with `rest` after its defaults.
+    /// One `x` table with `rest` after its client id.
     fn x_table(rest: &str) -> String {
-        format!("[[platforms]]\nid = \"x\"\ndefault_client_id = \"a\"\n{rest}")
+        format!("[[platforms]]\nid = \"x\"\nclient_id = \"a\"\n{rest}")
     }
 
     /// What an invocation names, with no environment variable reaching a
@@ -777,8 +608,7 @@ mod config {
         Cli::parsed_by(Cli::command().mut_args(|a| a.env(None::<&str>)), argv)
     }
 
-    /// A file supplies what nothing else did, the platform table and the
-    /// client of one version included.
+    /// A file supplies what nothing else did, the platform table included.
     #[test]
     fn a_file_supplies_what_no_flag_and_no_variable_named() {
         let cfg = resolved(
@@ -788,12 +618,8 @@ mod config {
 
             [[platforms]]
             id = "github"
-            default_client_id = "Iv1.0123456789abcdef"
-            default_client_credential = "c0ffee_from_the_file"
-
-            [platforms.version_override.2]
-            client_id = "Iv1.fedcba9876543210"
-            client_credential = "decaf_from_the_file"
+            client_id = "Iv1.0123456789abcdef"
+            client_credential = "c0ffee_from_the_file"
             "#,
         )
         .expect("a file this deployment can read");
@@ -803,100 +629,30 @@ mod config {
             cfg.allowed_app_origins,
             ["https://app.example", "https://wallet.example"]
         );
-        let platforms =
-            platforms(cfg.platforms).expect("the records the table describes");
-        assert_eq!(platforms.len(), 1);
         assert_eq!(
-            platforms[0].default,
-            Client {
+            platforms(cfg.platforms).expect("the records the table describes"),
+            [PlatformProfile {
+                id: PlatformId::Github,
                 client_id: "Iv1.0123456789abcdef".into(),
                 client_credential: Some("c0ffee_from_the_file".into()),
-            }
-        );
-        assert_eq!(
-            platforms[0].overrides.get(&2),
-            Some(&Client {
-                client_id: "Iv1.fedcba9876543210".into(),
-                client_credential: Some("decaf_from_the_file".into()),
-            })
+            }]
         );
     }
 
-    /// A version key is read bare or quoted, as a table header, a dotted
-    /// key or an inline table.
+    /// A platform table carries `id`, `client_id` and `client_credential`
+    /// and nothing else. A version list, the redirect URI an application
+    /// derives, GitHub's own name for the credential: each is refused at
+    /// startup by name.
     #[test]
-    fn a_version_key_is_read_bare_or_quoted() {
-        for rest in [
-            "[platforms.version_override.2]\nclient_id = \"b\"\n",
-            "[platforms.version_override.\"2\"]\nclient_id = \"b\"\n",
-            "[platforms.version_override]\n2 = { client_id = \"b\" }\n",
-            "version_override.2.client_id = \"b\"\n",
-            "version_override = { \"2\" = { client_id = \"b\" } }\n",
+    fn a_platform_key_this_bridge_does_not_read_is_refused() {
+        for unread in [
+            "versions = [1]\n",
+            "redirect_uri = \"https://bridge.example/auth/callback\"\n",
+            "client_secret = \"s\"\n",
         ] {
-            let cfg = resolved(&x_table(rest)).unwrap_or_else(|e| panic!("{rest}: {e}"));
-            let platforms =
-                platforms(cfg.platforms).unwrap_or_else(|e| panic!("{rest}: {e}"));
-            let keys: Vec<u16> = platforms[0].overrides.keys().copied().collect();
-            assert_eq!(keys, [2], "{rest}");
-            assert_eq!(platforms[0].overrides[&2].client_id, "b", "{rest}");
-        }
-    }
-
-    /// Bare and quoted, one version is one key, and TOML refuses a key written
-    /// twice. A bare key with a dot is a path, not a version, and is refused
-    /// while the file is read.
-    #[test]
-    fn toml_refuses_what_is_not_one_key_per_version() {
-        let err = resolved(&x_table(
-            "[platforms.version_override.2]\nclient_id = \"b\"\n\
-             [platforms.version_override.\"2\"]\nclient_id = \"c\"\n",
-        ))
-        .expect_err("one version written twice");
-        assert!(err.to_string().contains("duplicate"), "{err}");
-
-        resolved(&x_table(
-            "[platforms.version_override.1.5]\nclient_id = \"b\"\n",
-        ))
-        .expect_err("a dotted path is not a version");
-    }
-
-    /// Any key that is not the canonical decimal spelling of an unsigned
-    /// 16-bit integer is refused at startup, by name: a leading zero, a sign,
-    /// whitespace, a fraction, a name, anything over 16 bits.
-    #[test]
-    fn a_version_key_that_is_not_a_version_is_refused() {
-        for key in [
-            "02", "00", "\"+2\"", "\"-1\"", "-1", "\" 2\"", "\"2 \"", "\"\"", "65536",
-            "\"1.5\"", "two", "0x10", "1e3", "1_000", "\"٢\"",
-        ] {
-            let toml = x_table(&format!(
-                "[platforms.version_override.{key}]\nclient_id = \"b\"\n"
-            ));
-            let cfg =
-                resolved(&toml).unwrap_or_else(|e| panic!("{key}: the file reads, {e}"));
-            let err = platforms(cfg.platforms).expect_err(key);
-            assert!(err.to_string().contains("version_override"), "{key}: {err}");
-        }
-    }
-
-    /// The keys of the former format are unknown keys, refused at startup by
-    /// name.
-    #[test]
-    fn the_former_keys_are_refused() {
-        for (key, toml) in [
-            (
-                "client_id",
-                "[[platforms]]\nid = \"x\"\nclient_id = \"a\"\n".to_owned(),
-            ),
-            ("versions", x_table("versions = [1]\n")),
-            (
-                "client_credential",
-                "[[platforms]]\nid = \"github\"\ndefault_client_id = \"a\"\n\
-                 client_credential = \"c\"\n"
-                    .to_owned(),
-            ),
-        ] {
-            let err = resolved(&toml).expect_err(key);
+            let err =
+                resolved(&x_table(unread)).expect_err("a key this bridge does not read");
+            let key = unread.split(' ').next().unwrap();
             assert!(
                 err.to_string().contains(&format!("`{key}`")),
                 "{key}: {err}"
@@ -904,19 +660,16 @@ mod config {
         }
     }
 
-    /// The defaults are required whatever is overridden.
+    /// A table without a client id is refused while the file is read, with
+    /// the missing key named.
     #[test]
-    fn the_defaults_are_required_whatever_is_overridden() {
-        let err = resolved(
-            "[[platforms]]\nid = \"x\"\n[platforms.version_override.1]\nclient_id = \"b\"\n",
-        )
-        .expect_err("no default client");
-        assert!(err.to_string().contains("default_client_id"), "{err}");
+    fn a_table_without_a_client_id_is_refused_by_name() {
+        let err = resolved("[[platforms]]\nid = \"x\"\n").expect_err("no client id");
+        assert!(err.to_string().contains("client_id"), "{err}");
     }
 
     /// A `github` table without its credential is refused, with the missing
-    /// key named, and so is a `github` override without one; a credential
-    /// where the ceremony sends none is refused wherever it is written.
+    /// key named; a credential where the ceremony sends none is refused.
     #[test]
     fn a_credential_belongs_to_the_ceremonies_that_send_one() {
         // The table parses either way: whether a platform carries one is a
@@ -925,44 +678,15 @@ mod config {
             r#"
             [[platforms]]
             id = "github"
-            default_client_id = "Iv1.0123456789abcdef"
+            client_id = "Iv1.0123456789abcdef"
             "#,
         )
         .expect("a table with no credential is still a table");
         let err = platforms(without.platforms).expect_err("github's ceremony sends one");
-        assert!(
-            err.to_string().contains("default_client_credential"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("client_credential"), "{err}");
 
-        let spurious = resolved(&x_table("default_client_credential = \"c0ffee\"\n"))
+        let spurious = resolved(&x_table("client_credential = \"c0ffee\"\n"))
             .expect("a table carrying one is still a table");
-        let err = platforms(spurious.platforms).expect_err("x's ceremony sends none");
-        assert!(err.to_string().contains("sends none"), "{err}");
-
-        let without = resolved(
-            r#"
-            [[platforms]]
-            id = "github"
-            default_client_id = "Iv1.0123456789abcdef"
-            default_client_credential = "c0ffee"
-
-            [platforms.version_override.2]
-            client_id = "Iv1.fedcba9876543210"
-            "#,
-        )
-        .expect("an override with no credential is still a table");
-        let err = platforms(without.platforms).expect_err("github's ceremony sends one");
-        assert!(
-            err.to_string()
-                .contains("version_override.2.client_credential"),
-            "{err}"
-        );
-
-        let spurious = resolved(&x_table(
-            "[platforms.version_override.2]\nclient_id = \"b\"\nclient_credential = \"c\"\n",
-        ))
-        .expect("an override carrying one is still a table");
         let err = platforms(spurious.platforms).expect_err("x's ceremony sends none");
         assert!(err.to_string().contains("sends none"), "{err}");
     }
@@ -974,17 +698,18 @@ mod config {
             r#"
             [[platforms]]
             id = "x"
-            default_client_id = "WHRlc3RjbGllbnQ6MTpjaQ"
+            client_id = "WHRlc3RjbGllbnQ6MTpjaQ"
             "#,
         )
         .expect("a file this deployment can read");
-        let platforms =
-            platforms(cfg.platforms).expect("the records the table describes");
-        assert_eq!(platforms.len(), 1);
-        assert_eq!(platforms[0].id, PlatformId::X);
-        assert_eq!(platforms[0].default.client_id, "WHRlc3RjbGllbnQ6MTpjaQ");
-        assert!(platforms[0].default.client_credential.is_none());
-        assert!(platforms[0].overrides.is_empty());
+        assert_eq!(
+            platforms(cfg.platforms).expect("the records the table describes"),
+            [PlatformProfile {
+                id: PlatformId::X,
+                client_id: "WHRlc3RjbGllbnQ6MTpjaQ".into(),
+                client_credential: None,
+            }]
+        );
     }
 
     /// A flag beats the file.
@@ -1050,7 +775,7 @@ mod config {
             .iter()
             .find(|p| p.id == PlatformId::Github)
             .expect("the example enables github");
-        assert!(github.default.client_credential.is_some());
+        assert!(github.client_credential.is_some());
     }
 
     /// A run that names no file is told that, not that the platforms the

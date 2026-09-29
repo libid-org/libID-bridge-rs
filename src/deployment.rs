@@ -1,18 +1,12 @@
 //! What a deployment is, checked once at startup: the Distribution it
 //! selects, the origins it admits, the platforms it enables with the OAuth
-//! clients their ceremony versions run, and the public ceremony configuration
-//! composed from them. Nothing here is retrieved or bound.
+//! client each runs, and the public ceremony configuration composed from
+//! them. Nothing here is retrieved or bound.
 
-use std::{
-    collections::BTreeMap,
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use bytes::Bytes;
-use serde::{
-    Deserialize,
-    Serialize,
-};
+use serde::Deserialize;
 use serde_json::{
     json,
     Map,
@@ -39,8 +33,8 @@ pub struct Deployment {
     /// rule the configuration route applies, and what the callback document
     /// is told. The CCDP origin is a member of it literally.
     pub allowed_origins: Arc<[Admitted]>,
-    /// The enabled platforms, each with the clients its versions run.
-    pub platforms: Vec<Platform>,
+    /// The enabled platforms, each with the client its ceremony runs.
+    pub platforms: Vec<PlatformProfile>,
 }
 
 impl Deployment {
@@ -105,67 +99,70 @@ impl PlatformId {
     }
 }
 
-/// One OAuth client: the public client identifier and, on the platforms
-/// whose ceremony sends one, the OAuth App's client secret. The file writes
-/// a platform's defaults as `default_client_id` and
-/// `default_client_credential` on the platform's own table, and the client
-/// of one version as a `[platforms.version_override.N]` table carrying
-/// `client_id` and `client_credential`. The public record carries it as
-/// `clientId` and, where there is one, `clientCredential`.
+/// One enabled platform, as one `[[platforms]]` table: the platform and the
+/// one OAuth client every version of its ceremony runs. Its entry in the
+/// public record is that client, as `clientId` and, where there is one,
+/// `clientCredential`.
 ///
-/// Whether a client carries a credential is not a different shape, it is a
-/// rule, and [`Client::checked`] applies it: GitHub's ceremony sends one as
-/// `client_secret` and no other ceremony sends one at all.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all(serialize = "camelCase"))]
-pub struct Client {
+/// ```toml
+/// [[platforms]]
+/// id = "github"
+/// client_id = "Iv1.0123456789abcdef"
+/// client_credential = "..."
+/// ```
+///
+/// Whether a platform carries a credential is not a different shape, it is a
+/// rule, and [`PlatformProfile::checked`] applies it: GitHub's ceremony sends
+/// one as `client_secret` and no other ceremony sends one at all.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlatformProfile {
+    /// Which platform: the key its entry is published under.
+    pub id: PlatformId,
     /// The public OAuth client identifier: nonempty printable ASCII without
     /// whitespace.
     pub client_id: String,
-    /// The client credential, on exactly the platforms whose ceremony sends
-    /// one: nonempty printable ASCII without whitespace.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The OAuth App's client secret, on exactly the platforms whose ceremony
+    /// sends one: public application configuration, nonempty printable ASCII
+    /// without whitespace.
+    #[serde(default)]
     pub client_credential: Option<String>,
 }
 
-impl Client {
-    /// This client checked as `platform`'s: a client id of nonempty printable
-    /// ASCII without whitespace, and a credential of the same exactly where
-    /// the platform's ceremony sends one. A refusal names the key as the
-    /// file spells it, which is `under` and then `client_id` or
-    /// `client_credential`: `default_` on the platform's own table,
-    /// `version_override.N.` under it.
-    pub fn checked(self, platform: PlatformId, under: &str) -> Result<Client> {
+impl PlatformProfile {
+    /// This table checked: a client id of nonempty printable ASCII without
+    /// whitespace, and a credential of the same exactly where the platform's
+    /// ceremony sends one. A refusal names the key as the file spells it,
+    /// never the value.
+    pub fn checked(self) -> Result<PlatformProfile> {
+        let id = self.id;
         let refuse = |detail: String| Error::Config {
-            detail: format!("platforms: {platform}{detail}"),
+            detail: format!("platforms: {detail}"),
         };
         if self.client_id.is_empty() {
-            return Err(refuse(format!(" carries an empty {under}client_id")));
+            return Err(refuse(format!("{id} carries an empty client_id")));
         }
         // A client id the platform could never issue is a typo the
         // deployment publishes and every ceremony then fails on.
         if !printable_without_whitespace(&self.client_id) {
             return Err(refuse(format!(
-                "'s {under}client_id is not printable ASCII without whitespace"
+                "{id}'s client_id is not printable ASCII without whitespace"
             )));
         }
         // A credential belongs to exactly the ceremonies that send one.
-        match (
-            platform.sends_a_credential(),
-            self.client_credential.as_deref(),
-        ) {
+        match (id.sends_a_credential(), self.client_credential.as_deref()) {
             (false, Some(_)) => Err(refuse(format!(
-                " carries a {under}client_credential, and its ceremony sends none"
+                "{id} carries a client_credential, and its ceremony sends none"
             ))),
             (true, None) => Err(refuse(format!(
-                " carries no {under}client_credential, and its ceremony sends one"
+                "{id} carries no client_credential, and its ceremony sends one"
             ))),
-            (_, Some("")) => Err(refuse(format!(
-                " carries an empty {under}client_credential"
-            ))),
+            (_, Some("")) => {
+                Err(refuse(format!("{id} carries an empty client_credential")))
+            }
             (_, Some(credential)) if !printable_without_whitespace(credential) => {
                 Err(refuse(format!(
-                    "'s {under}client_credential is not printable ASCII without \
+                    "{id}'s client_credential is not printable ASCII without \
                      whitespace"
                 )))
             }
@@ -174,114 +171,9 @@ impl Client {
     }
 }
 
-/// One enabled platform, as one `[[platforms]]` table: the platform, the
-/// client its versions run unless one is written for them, and the clients
-/// written for particular versions.
-///
-/// ```toml
-/// [[platforms]]
-/// id = "github"
-/// default_client_id = "Iv1.0123456789abcdef"
-/// default_client_credential = "..."
-///
-/// [platforms.version_override.2]
-/// client_id = "Iv1.fedcba9876543210"
-/// client_credential = "..."
-/// ```
-///
-/// Which versions exist is not written here: the Distribution publishes the
-/// versions it bundles, and the application reads that list and runs each
-/// with the client this table assigns it.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PlatformProfile {
-    /// Which platform.
-    pub id: PlatformId,
-    /// The public OAuth client identifier every version runs unless
-    /// `version_override` names one for it.
-    pub default_client_id: String,
-    /// The client credential those versions send, on exactly the platforms
-    /// whose ceremony sends one.
-    #[serde(default)]
-    pub default_client_credential: Option<String>,
-    /// The client of particular versions, keyed by the decimal spelling of
-    /// the version, bare or quoted. A TOML key is a string whatever it
-    /// spells; [`Platform::checked`] reads each as a version.
-    #[serde(default)]
-    pub version_override: BTreeMap<String, Client>,
-}
-
-/// One enabled platform, checked: the client its versions run by default,
-/// and the versions with a client of their own. Serialized, it is the
-/// platform's entry in the public record: the default client's `clientId`
-/// and `clientCredential` and, where any override is written,
-/// `versionOverrides` keyed by the decimal spelling of the version.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct Platform {
-    /// Which platform: the key its entry is published under.
-    #[serde(skip_serializing)]
-    pub id: PlatformId,
-    /// The client every version runs unless `overrides` names it.
-    #[serde(flatten)]
-    pub default: Client,
-    /// The clients written for particular versions, by version. Every one
-    /// written is published: whether a version exists is the Distribution's
-    /// to say and the application's to check.
-    #[serde(
-        rename = "versionOverrides",
-        skip_serializing_if = "BTreeMap::is_empty"
-    )]
-    pub overrides: BTreeMap<u16, Client>,
-}
-
-impl Platform {
-    /// `profile` checked: its defaults as a client, every `version_override`
-    /// key as a version, and every override as a client. The first rule
-    /// broken is the error.
-    pub fn checked(profile: PlatformProfile) -> Result<Platform> {
-        let id = profile.id;
-        let default = Client {
-            client_id: profile.default_client_id,
-            client_credential: profile.default_client_credential,
-        }
-        .checked(id, "default_")?;
-        let mut overrides = BTreeMap::new();
-        for (key, client) in profile.version_override {
-            let Some(version) = Platform::version_key(&key) else {
-                return Err(Error::Config {
-                    detail: format!(
-                        "platforms: {id}'s version_override key {key:?} is not a \
-                         version; a key is the decimal spelling of an unsigned \
-                         16-bit integer, bare or quoted, with no sign, leading \
-                         zero or whitespace"
-                    ),
-                });
-            };
-            let client = client.checked(id, &format!("version_override.{key}."))?;
-            overrides.insert(version, client);
-        }
-        Ok(Platform {
-            id,
-            default,
-            overrides,
-        })
-    }
-
-    /// `key` as a version: the canonical decimal spelling of an unsigned
-    /// 16-bit integer, digits alone with no leading zero, or `None`. `parse`
-    /// alone would take a sign and leading zeros, and two spellings of one
-    /// version would be two keys TOML cannot tell apart.
-    fn version_key(key: &str) -> Option<u16> {
-        let canonical = !key.is_empty()
-            && key.bytes().all(|b| b.is_ascii_digit())
-            && (key == "0" || !key.starts_with('0'));
-        canonical.then(|| key.parse().ok()).flatten()
-    }
-}
-
 /// Check the enabled set: nonempty, each platform once, and each as
-/// [`Platform::checked`] has it.
-pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<Platform>> {
+/// [`PlatformProfile::checked`] has it.
+pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>> {
     if profiles.is_empty() {
         return Err(Error::Config {
             detail: "platforms: no platform is enabled; add a [[platforms]] table to \
@@ -296,7 +188,7 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<Platform>> {
             });
         }
     }
-    profiles.into_iter().map(Platform::checked).collect()
+    profiles.into_iter().map(PlatformProfile::checked).collect()
 }
 
 /// Whether every byte of `value` is printable ASCII carrying no whitespace,
@@ -368,19 +260,23 @@ pub struct CeremonyConfig<'a> {
     /// The CCDP Distribution this deployment selects.
     pub ccdp_origin: &'a Origin,
     /// The enabled platforms, checked.
-    pub platforms: &'a [Platform],
+    pub platforms: &'a [PlatformProfile],
 }
 
 impl CeremonyConfig<'_> {
     /// The record: `ccdpOrigin`, and under `platforms` each enabled
     /// platform's entry by its id, in the order `serde_json::Map` keeps its
-    /// keys.
+    /// keys. An entry is the platform's `clientId` and, where its ceremony
+    /// sends one, `clientCredential`.
     fn record(&self) -> Value {
-        let by_id: Map<String, Value> = self
-            .platforms
-            .iter()
-            .map(|p| (p.id.to_string(), json!(p)))
-            .collect();
+        let mut by_id = Map::new();
+        for p in self.platforms {
+            let mut entry = json!({ "clientId": p.client_id });
+            if let Some(credential) = p.client_credential.as_deref() {
+                entry["clientCredential"] = Value::from(credential);
+            }
+            by_id.insert(p.id.to_string(), entry);
+        }
         json!({
             "ccdpOrigin": self.ccdp_origin,
             "platforms": Value::Object(by_id),

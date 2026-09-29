@@ -303,7 +303,7 @@ pub fn config(args: &[&str]) -> config::Settings {
     let mut origins = "https://app.example".to_owned();
     let mut ccdp_origin = Distribution::shared().origin().to_owned();
     let mut platforms = format!(
-        r#"[{{"id":"github","default_client_id":"{CLIENT_ID}","default_client_credential":"{CLIENT_CREDENTIAL}"}}]"#
+        r#"[{{"id":"github","client_id":"{CLIENT_ID}","client_credential":"{CLIENT_CREDENTIAL}"}}]"#
     );
     for pair in args.chunks(2) {
         let [flag, value] = pair else {

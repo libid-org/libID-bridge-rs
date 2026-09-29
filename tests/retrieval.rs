@@ -457,7 +457,10 @@ mod upstream {
 
         let requests = distribution.requests();
         let [first, second] = &requests[..] else {
-            panic!("startup and one revalidation, got {}", requests.len())
+            panic!(
+                "the first retrieval and one revalidation, got {}",
+                requests.len()
+            )
         };
         for request in [first, second] {
             for absent in [

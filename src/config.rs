@@ -102,14 +102,13 @@ pub struct Settings {
     pub ccdp_origin: String,
 
     /// The enabled platforms, as `[[platforms]]` tables: each names a
-    /// platform, its public client id, the ceremony versions it advertises
-    /// and, for `github`, the public client credential.
+    /// platform, the public client id of the one OAuth registration its
+    /// ceremony runs and, for `github`, the public client credential.
     ///
     /// ```toml
     /// [[platforms]]
     /// id = "github"
     /// client_id = "Iv1.0123456789abcdef"
-    /// versions = [1]
     /// client_credential = "..."
     /// ```
     #[serde(default)]

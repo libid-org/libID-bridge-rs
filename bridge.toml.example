@@ -48,29 +48,29 @@
 # named below with pattern support first, then configure the member.
 allowed_app_origins = ["https://app.example", "https://wallet.example"]
 
-# The CCDP Distribution: the origin serving the Callback artifact and
-# everything the browser runs after it. Omit for the canonical libID
-# Distribution.
+# The CCDP Distribution: the origin serving the Callback artifact, the list of
+# the platform ceremony versions it bundles, and everything the browser runs
+# after the callback. Omit for the canonical libID Distribution.
 ccdp_origin = "https://lib.id"
 
 
-# The enabled platforms: one table per platform, with its public client id and
-# the ceremony versions it advertises. The github table also carries the OAuth
-# App's client secret, which the bridge publishes as clientCredential:
-# public application configuration the browser's token request sends as
-# client_secret.
+# The enabled platforms: one table per platform, naming the one OAuth
+# registration every version of its ceremony runs, by its public client id.
+# The versions are not written here: the Distribution publishes the ones it
+# bundles, and the application reads that list. The github table also carries
+# the OAuth App's client secret, which the bridge publishes as
+# clientCredential: public application configuration the browser's token
+# request sends as client_secret. No other platform's ceremony sends one, and
+# a credential on another table is refused.
 [[platforms]]
 id = "github"
 client_id = "Iv1.0123456789abcdef"
-versions = [1]
 client_credential = "0123456789abcdef0123456789abcdef01234567"
 
 # [[platforms]]
 # id = "google"
 # client_id = "000000000000-xxxxxxxxxxxxxxxxxxxxxxxxxxxx.apps.googleusercontent.com"
-# versions = [1]
 
 # [[platforms]]
 # id = "x"
 # client_id = "XXXXXXXXXXXXXXXXXXXXXXXXXX"
-# versions = [1]

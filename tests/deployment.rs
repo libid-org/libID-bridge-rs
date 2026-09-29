@@ -1,4 +1,5 @@
-//! What a deployment must be: its origins, its platforms and where its settings come from.
+//! What a deployment must be: its origins, its platforms and their clients, the
+//! record composed from them, and where its settings come from.
 
 // Each suite uses its part of the module.
 #[allow(dead_code)]
@@ -11,13 +12,22 @@ mod deployment {
             Error,
             Result,
         },
+        origin::Origin,
     };
     use serde_json::{
         json,
         Value,
     };
 
-    const ONE: &str = r#"[{"id":"github","client_id":"Iv1.0","versions":[1],"client_credential":"c0ffee"}]"#;
+    /// GitHub, with the credential its ceremony sends.
+    const ONE: &str =
+        r#"[{"id":"github","client_id":"Iv1.0","client_credential":"c0ffee"}]"#;
+
+    /// GitHub and X, each with the one client its ceremony runs.
+    const TWO: &str = r#"[
+        {"id":"github","client_id":"Iv1.0","client_credential":"c0ffee"},
+        {"id":"x","client_id":"xc"}
+    ]"#;
 
     /// Parse records as the configuration file would, then check them.
     fn checked(json: &str) -> Result<Vec<PlatformProfile>> {
@@ -33,53 +43,89 @@ mod deployment {
         json!([{
             "id": "github",
             "client_id": "a",
-            "versions": [1],
             "client_credential": credential.into(),
         }])
         .to_string()
     }
 
-    #[test]
-    fn a_well_formed_set_parses() {
-        let p = checked(ONE).unwrap();
-        assert_eq!(p.len(), 1);
-        assert_eq!(p[0].id, PlatformId::Github);
-        assert_eq!(p[0].client_id, "Iv1.0");
-        assert_eq!(p[0].versions, [1]);
-        assert_eq!(p[0].client_credential.as_deref(), Some("c0ffee"));
+    /// One x entry whose `client_id` is `client_id`.
+    fn x_with(client_id: impl Into<Value>) -> String {
+        json!([{ "id": "x", "client_id": client_id.into() }]).to_string()
     }
 
-    /// The record carries a github entry's credential as
-    /// `clientCredential`, and an entry that has none carries no such
-    /// key.
+    /// The record `platforms` publish, as the bytes it is served in.
+    fn serialized(platforms: &[PlatformProfile]) -> String {
+        let ccdp_origin = Origin::parse("CCDP_ORIGIN", "https://lib.id").unwrap();
+        let bytes = CeremonyConfig {
+            ccdp_origin: &ccdp_origin,
+            platforms,
+        }
+        .serialized();
+        String::from_utf8(bytes.to_vec()).expect("the record is JSON text")
+    }
+
+    /// The record `platforms` publish.
+    fn record(platforms: &[PlatformProfile]) -> Value {
+        serde_json::from_str(&serialized(platforms)).unwrap()
+    }
+
+    fn sorted_keys(value: &Value) -> Vec<&str> {
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        keys
+    }
+
     #[test]
-    fn the_record_publishes_the_credential_where_there_is_one() {
+    fn a_well_formed_set_parses() {
+        assert_eq!(
+            checked(ONE).unwrap(),
+            [PlatformProfile {
+                id: PlatformId::Github,
+                client_id: "Iv1.0".into(),
+                client_credential: Some("c0ffee".into()),
+            }]
+        );
+    }
+
+    /// The record carries each enabled platform under its id, as the one
+    /// client its ceremony runs: `clientId` and, on exactly github's entry,
+    /// `clientCredential`. Nothing else travels, and no version is named.
+    #[test]
+    fn the_record_carries_each_platforms_client_and_nothing_else() {
+        let record = record(&checked(TWO).unwrap());
+
+        assert_eq!(sorted_keys(&record), ["ccdpOrigin", "platforms"]);
+        assert_eq!(record["ccdpOrigin"], "https://lib.id");
+        assert_eq!(sorted_keys(&record["platforms"]), ["github", "x"]);
+        assert_eq!(
+            record["platforms"]["github"],
+            json!({ "clientId": "Iv1.0", "clientCredential": "c0ffee" })
+        );
+        assert_eq!(record["platforms"]["x"], json!({ "clientId": "xc" }));
+    }
+
+    /// The platforms are keyed by id in the bytes served, sorted as
+    /// `serde_json::Map` sorts keys, whatever order the file enables them in.
+    #[test]
+    fn the_record_keys_the_platforms_in_sorted_order() {
         let platforms = checked(
-            r#"[{"id":"github","client_id":"Iv1.0","versions":[1],"client_credential":"c0ffee"},{"id":"x","client_id":"xc","versions":[2]}]"#,
+            r#"[{"id":"x","client_id":"xc"},{"id":"github","client_id":"gh","client_credential":"c"},{"id":"google","client_id":"g"}]"#,
         )
         .unwrap();
-        let ccdp_origin =
-            libid_bridge_rs::origin::Origin::parse("CCDP_ORIGIN", "https://lib.id")
-                .unwrap();
-        let record: Value = serde_json::from_slice(
-            &CeremonyConfig {
-                ccdp_origin: &ccdp_origin,
-                platforms: &platforms,
-            }
-            .serialized(),
-        )
-        .unwrap();
-
-        let github = record["platforms"]["github"].as_object().unwrap();
-        let mut keys: Vec<&str> = github.keys().map(String::as_str).collect();
-        keys.sort_unstable();
-        assert_eq!(keys, ["ceremonyVersions", "clientCredential", "clientId"]);
-        assert_eq!(github["clientCredential"], "c0ffee");
-
-        let x = record["platforms"]["x"].as_object().unwrap();
-        let mut keys: Vec<&str> = x.keys().map(String::as_str).collect();
-        keys.sort_unstable();
-        assert_eq!(keys, ["ceremonyVersions", "clientId"]);
+        let raw = serialized(&platforms);
+        let at = |key: &str| {
+            raw.find(&format!("\"{key}\":"))
+                .unwrap_or_else(|| panic!("{key} is missing from {raw}"))
+        };
+        assert!(
+            at("github") < at("google") && at("google") < at("x"),
+            "{raw}"
+        );
     }
 
     /// Each of these is refused at startup.
@@ -90,52 +136,62 @@ mod deployment {
             ("empty", "[]".to_owned()),
             (
                 "unknown platform",
-                r#"[{"id":"twitter","client_id":"a","versions":[1]}]"#.to_owned(),
+                r#"[{"id":"twitter","client_id":"a"}]"#.to_owned(),
             ),
             (
                 "duplicate platform",
-                r#"[{"id":"x","client_id":"a","versions":[1]},{"id":"x","client_id":"b","versions":[1]}]"#.to_owned(),
-            ),
-            (
-                "no versions",
-                r#"[{"id":"x","client_id":"a","versions":[]}]"#.to_owned(),
-            ),
-            (
-                "duplicate version",
-                r#"[{"id":"x","client_id":"a","versions":[1,1]}]"#.to_owned(),
+                r#"[{"id":"x","client_id":"a"},{"id":"x","client_id":"b"}]"#.to_owned(),
             ),
             (
                 "additional member",
-                r#"[{"id":"x","client_id":"a","label":"X","versions":[1]}]"#.to_owned(),
+                r#"[{"id":"x","client_id":"a","label":"X"}]"#.to_owned(),
             ),
             (
+                "a version list",
+                r#"[{"id":"x","client_id":"a","versions":[1]}]"#.to_owned(),
+            ),
+            ("no client id", r#"[{"id":"x"}]"#.to_owned()),
+            ("a null client id", x_with(Value::Null)),
+            ("a client id that is not a string", x_with(1)),
+            ("an empty client id", x_with("")),
+            ("a client id carrying a space", x_with("a b")),
+            ("a client id outside ASCII", x_with(around(0xE9))),
+            (
                 "a github entry with no credential",
-                r#"[{"id":"github","client_id":"a","versions":[1]}]"#.to_owned(),
+                r#"[{"id":"github","client_id":"a"}]"#.to_owned(),
             ),
             ("a null credential", github_with(Value::Null)),
             ("a credential that is not a string", github_with(1)),
             ("an empty credential", github_with("")),
             ("a credential carrying a space", github_with(around(b' '))),
             ("a credential carrying a tab", github_with(around(b'\t'))),
-            ("a credential carrying a control byte", github_with(around(7))),
+            (
+                "a credential carrying a control byte",
+                github_with(around(7)),
+            ),
             ("a credential carrying DEL", github_with(around(0x7F))),
             ("a credential outside ASCII", github_with(around(0xE9))),
             (
                 "a credential on a platform that has none",
-                r#"[{"id":"x","client_id":"a","versions":[1],"client_credential":"c0ffee"}]"#.to_owned(),
+                r#"[{"id":"x","client_id":"a","client_credential":"c0ffee"}]"#.to_owned(),
             ),
         ] {
             assert!(checked(&json).is_err(), "{why} must be refused");
         }
     }
 
-    /// A refusal names the field, never the value.
+    /// A refusal names the key as the file spells it, never the value.
     #[test]
-    fn a_refused_credential_is_named_and_not_quoted() {
+    fn a_refused_key_is_named_and_not_quoted() {
         let err =
             checked(&github_with("zzMarkerzz fee")).expect_err("a space is refused");
         let text = err.to_string();
         assert!(text.contains("client_credential"), "{text}");
+        assert!(!text.contains("zzMarkerzz"), "{text}");
+
+        let err = checked(&x_with("zzMarkerzz id")).expect_err("a space is refused");
+        let text = err.to_string();
+        assert!(text.contains("client_id"), "{text}");
         assert!(!text.contains("zzMarkerzz"), "{text}");
     }
 }
@@ -524,7 +580,11 @@ mod config {
             Cli,
             Settings,
         },
-        deployment::PlatformId,
+        deployment::{
+            platforms,
+            PlatformId,
+            PlatformProfile,
+        },
         error::Result,
     };
 
@@ -532,6 +592,11 @@ mod config {
     fn resolved(toml: &str) -> Result<Settings> {
         let file = crate::common::ScratchFile::holding(toml);
         Settings::read(file.path())
+    }
+
+    /// One `x` table with `rest` after its client id.
+    fn x_table(rest: &str) -> String {
+        format!("[[platforms]]\nid = \"x\"\nclient_id = \"a\"\n{rest}")
     }
 
     /// What an invocation names, with no environment variable reaching a
@@ -554,7 +619,6 @@ mod config {
             [[platforms]]
             id = "github"
             client_id = "Iv1.0123456789abcdef"
-            versions = [1]
             client_credential = "c0ffee_from_the_file"
             "#,
         )
@@ -565,18 +629,47 @@ mod config {
             cfg.allowed_app_origins,
             ["https://app.example", "https://wallet.example"]
         );
-        let platforms = libid_bridge_rs::deployment::platforms(cfg.platforms)
-            .expect("the records the table describes");
-        assert_eq!(platforms.len(), 1);
-        assert_eq!(platforms[0].client_id, "Iv1.0123456789abcdef");
         assert_eq!(
-            platforms[0].client_credential.as_deref(),
-            Some("c0ffee_from_the_file")
+            platforms(cfg.platforms).expect("the records the table describes"),
+            [PlatformProfile {
+                id: PlatformId::Github,
+                client_id: "Iv1.0123456789abcdef".into(),
+                client_credential: Some("c0ffee_from_the_file".into()),
+            }]
         );
     }
 
+    /// A platform table carries `id`, `client_id` and `client_credential`
+    /// and nothing else. A version list, the redirect URI an application
+    /// derives, GitHub's own name for the credential: each is refused at
+    /// startup by name.
+    #[test]
+    fn a_platform_key_this_bridge_does_not_read_is_refused() {
+        for unread in [
+            "versions = [1]\n",
+            "redirect_uri = \"https://bridge.example/auth/callback\"\n",
+            "client_secret = \"s\"\n",
+        ] {
+            let err =
+                resolved(&x_table(unread)).expect_err("a key this bridge does not read");
+            let key = unread.split(' ').next().unwrap();
+            assert!(
+                err.to_string().contains(&format!("`{key}`")),
+                "{key}: {err}"
+            );
+        }
+    }
+
+    /// A table without a client id is refused while the file is read, with
+    /// the missing key named.
+    #[test]
+    fn a_table_without_a_client_id_is_refused_by_name() {
+        let err = resolved("[[platforms]]\nid = \"x\"\n").expect_err("no client id");
+        assert!(err.to_string().contains("client_id"), "{err}");
+    }
+
     /// A `github` table without its credential is refused, with the missing
-    /// key named.
+    /// key named; a credential where the ceremony sends none is refused.
     #[test]
     fn a_credential_belongs_to_the_ceremonies_that_send_one() {
         // The table parses either way: whether a platform carries one is a
@@ -586,30 +679,19 @@ mod config {
             [[platforms]]
             id = "github"
             client_id = "Iv1.0123456789abcdef"
-            versions = [1]
             "#,
         )
         .expect("a table with no credential is still a table");
-        let err = libid_bridge_rs::deployment::platforms(without.platforms)
-            .expect_err("github's ceremony sends one");
+        let err = platforms(without.platforms).expect_err("github's ceremony sends one");
         assert!(err.to_string().contains("client_credential"), "{err}");
 
-        let spurious = resolved(
-            r#"
-            [[platforms]]
-            id = "x"
-            client_id = "XXXXXXXXXXXXXXXXXXXXXXXXXX"
-            versions = [1]
-            client_credential = "c0ffee"
-            "#,
-        )
-        .expect("a table carrying one is still a table");
-        let err = libid_bridge_rs::deployment::platforms(spurious.platforms)
-            .expect_err("x's ceremony sends none");
+        let spurious = resolved(&x_table("client_credential = \"c0ffee\"\n"))
+            .expect("a table carrying one is still a table");
+        let err = platforms(spurious.platforms).expect_err("x's ceremony sends none");
         assert!(err.to_string().contains("sends none"), "{err}");
     }
 
-    /// An `x` table carries a client id and versions and no credential.
+    /// An `x` table carries a client id and no credential.
     #[test]
     fn an_x_table_is_a_public_client_with_no_credential() {
         let cfg = resolved(
@@ -617,17 +699,17 @@ mod config {
             [[platforms]]
             id = "x"
             client_id = "WHRlc3RjbGllbnQ6MTpjaQ"
-            versions = [1]
             "#,
         )
         .expect("a file this deployment can read");
-        let platforms = libid_bridge_rs::deployment::platforms(cfg.platforms)
-            .expect("the records the table describes");
-        assert_eq!(platforms.len(), 1);
-        assert_eq!(platforms[0].id, PlatformId::X);
-        assert_eq!(platforms[0].client_id, "WHRlc3RjbGllbnQ6MTpjaQ");
-        assert_eq!(platforms[0].versions, [1]);
-        assert!(platforms[0].client_credential.as_deref().is_none());
+        assert_eq!(
+            platforms(cfg.platforms).expect("the records the table describes"),
+            [PlatformProfile {
+                id: PlatformId::X,
+                client_id: "WHRlc3RjbGllbnQ6MTpjaQ".into(),
+                client_credential: None,
+            }]
+        );
     }
 
     /// A flag beats the file.
@@ -672,8 +754,7 @@ mod config {
         let cfg = resolved("allowed_app_origins = [\"https://app.example\"]\n")
             .expect("readable");
         assert!(cfg.platforms.is_empty());
-        let err = libid_bridge_rs::deployment::platforms(cfg.platforms)
-            .expect_err("no platform");
+        let err = platforms(cfg.platforms).expect_err("no platform");
         assert!(err.to_string().contains("[[platforms]]"), "{err}");
     }
 
@@ -689,13 +770,12 @@ mod config {
             cfg.allowed_app_origins,
             ["https://app.example", "https://wallet.example"]
         );
-        let platforms = libid_bridge_rs::deployment::platforms(cfg.platforms)
-            .expect("the example's platform table");
+        let platforms = platforms(cfg.platforms).expect("the example's platform table");
         let github = platforms
             .iter()
             .find(|p| p.id == PlatformId::Github)
             .expect("the example enables github");
-        assert!(github.client_credential.as_deref().is_some());
+        assert!(github.client_credential.is_some());
     }
 
     /// A run that names no file is told that, not that the platforms the

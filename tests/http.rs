@@ -339,8 +339,8 @@ async fn config_does_not_infer_admission_from_fetch_metadata_alone() {
 }
 
 /// The record carries exactly `ccdpOrigin` and `platforms`; the github entry
-/// carries exactly its client id, its versions and its public client
-/// credential. No allowlist, redirect URI or notary setting travels.
+/// carries exactly its client id and its public client credential. No
+/// allowlist, redirect URI, notary setting or version travels.
 #[tokio::test]
 async fn config_carries_the_public_credential_and_no_allowlist() {
     let body = body_of(get_config(Some(APP_ORIGIN), "").await).await;
@@ -353,9 +353,8 @@ async fn config_carries_the_public_credential_and_no_allowlist() {
     let github = body["platforms"]["github"].as_object().unwrap();
     let mut keys: Vec<_> = github.keys().map(String::as_str).collect();
     keys.sort_unstable();
-    assert_eq!(keys, ["ceremonyVersions", "clientCredential", "clientId"]);
+    assert_eq!(keys, ["clientCredential", "clientId"]);
     assert_eq!(github["clientId"], crate::common::CLIENT_ID);
-    assert_eq!(github["ceremonyVersions"], serde_json::json!([1]));
     assert_eq!(github["clientCredential"], crate::common::CLIENT_CREDENTIAL);
 
     let raw = body.to_string();
@@ -374,15 +373,15 @@ async fn config_carries_the_public_credential_and_no_allowlist() {
     );
 }
 
-/// An enabled X platform is published as its client id and versions, and
-/// nothing else: X's ceremony runs browser to notary as a public client, and
-/// its entry carries no credential.
+/// An enabled X platform is published as its client id and nothing else:
+/// X's ceremony runs browser to notary as a public client, and its entry
+/// carries no credential.
 #[tokio::test]
-async fn config_publishes_an_x_entry_of_exactly_client_id_and_versions() {
+async fn config_publishes_an_x_entry_of_exactly_its_client_id() {
     let state = deployment(&[
         "--platforms",
         &format!(
-            r#"[{{"id":"github","client_id":"{}","versions":[1],"client_credential":"{}"}},{{"id":"x","client_id":"WHRlc3RjbGllbnQ6MTpjaQ","versions":[1]}}]"#,
+            r#"[{{"id":"github","client_id":"{}","client_credential":"{}"}},{{"id":"x","client_id":"WHRlc3RjbGllbnQ6MTpjaQ"}}]"#,
             crate::common::CLIENT_ID,
             crate::common::CLIENT_CREDENTIAL
         ),
@@ -390,16 +389,24 @@ async fn config_publishes_an_x_entry_of_exactly_client_id_and_versions() {
     .await;
     let body = body_of(config_with(state, &[("origin", APP_ORIGIN)], "").await).await;
 
-    let x = body["platforms"]["x"].as_object().expect("an x entry");
-    let mut keys: Vec<_> = x.keys().map(String::as_str).collect();
-    keys.sort_unstable();
-    assert_eq!(keys, ["ceremonyVersions", "clientId"]);
-    assert_eq!(x["clientId"], "WHRlc3RjbGllbnQ6MTpjaQ");
-    assert_eq!(x["ceremonyVersions"], serde_json::json!([1]));
+    assert_eq!(
+        body["platforms"]["x"],
+        serde_json::json!({ "clientId": "WHRlc3RjbGllbnQ6MTpjaQ" })
+    );
     assert_eq!(
         body["platforms"]["github"]["clientId"],
         crate::common::CLIENT_ID
     );
+}
+
+/// The record is composed at startup and waits on nothing: an admitted
+/// caller reads it before the refresher has run once.
+#[tokio::test]
+async fn config_answers_an_admitted_caller_before_any_retrieval() {
+    let state = crate::common::bridge(&[]).state;
+    let resp = config_with(state, &[("origin", APP_ORIGIN)], "").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_of(resp).await["ccdpOrigin"], ccdp_origin());
 }
 
 /// A caller that must preflight its read is answered by the same admission
@@ -534,11 +541,7 @@ async fn config_refuses_a_query_but_reads_the_origin_first() {
 #[tokio::test]
 async fn a_path_this_bridge_does_not_serve_answers_nothing() {
     const TOKEN_BODY: &str = r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"iMSTNh6gQkRnBGlY1c0MUOsD7MCO4G8C7ph1_gIZs5I","notaryAddress":"https://127.0.0.1:7048"}"#;
-    let x_only = deployment(&[
-        "--platforms",
-        r#"[{"id":"x","client_id":"abc","versions":[1]}]"#,
-    ])
-    .await;
+    let x_only = deployment(&["--platforms", r#"[{"id":"x","client_id":"abc"}]"#]).await;
 
     for path in ["/api/v1/ceremony/github-token", "/does-not-exist"] {
         for state in [test_state().await, x_only.clone()] {
@@ -717,6 +720,7 @@ async fn the_bridge_serves_no_ccdp_document_and_no_alias() {
     for path in [
         "/ccdp/callback",
         "/ccdp/prover",
+        "/ccdp/versions.json",
         "/auth/v1/callback",
         "/api/v1/ceremony/callback",
     ] {
@@ -726,7 +730,8 @@ async fn the_bridge_serves_no_ccdp_document_and_no_alias() {
 }
 
 /// A deployment whose Distribution has not answered serves everything else,
-/// and says of the callback that it has no document and why.
+/// the record included, and says of the callback that it has no document and
+/// why.
 #[tokio::test]
 async fn a_deployment_without_its_distribution_serves_everything_else() {
     let unreachable = crate::common::unreachable_origin().await;
@@ -749,6 +754,14 @@ async fn a_deployment_without_its_distribution_serves_everything_else() {
             .unwrap();
         assert_eq!(resp.status(), expected, "{path}");
     }
+
+    // The record needs nothing from the Distribution.
+    let resp = config_with(state.clone(), &[("origin", APP_ORIGIN)], "").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        body_of(resp).await["platforms"]["github"]["clientId"],
+        crate::common::CLIENT_ID
+    );
 
     let resp = app(state.clone())
         .oneshot(

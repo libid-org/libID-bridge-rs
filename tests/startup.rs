@@ -144,7 +144,7 @@ impl Started {
 #[test]
 fn the_binary_serves_until_interrupted() {
     let config = config_file(&format!(
-        "[[platforms]]\nid = \"github\"\nclient_id = \"{}\"\nversions = [1]\n\
+        "[[platforms]]\nid = \"github\"\nclient_id = \"{}\"\n\
          client_credential = \"{}\"\n",
         crate::common::CLIENT_ID,
         crate::common::CLIENT_CREDENTIAL
@@ -165,8 +165,7 @@ fn the_binary_serves_until_interrupted() {
 #[test]
 fn an_x_only_deployment_starts_and_serves_no_token_route() {
     let config = config_file(
-        "[[platforms]]\nid = \"x\"\nclient_id = \"WHRlc3RjbGllbnQ6MTpjaQ\"\n\
-         versions = [1]\n",
+        "[[platforms]]\nid = \"x\"\nclient_id = \"WHRlc3RjbGllbnQ6MTpjaQ\"\n",
     );
     let bridge = Started::on(config.path());
 
@@ -179,12 +178,8 @@ fn an_x_only_deployment_starts_and_serves_no_token_route() {
     assert_eq!(status, 200, "{body}");
     let record: serde_json::Value = serde_json::from_str(&body).expect("a JSON record");
     assert_eq!(
-        record["platforms"]["x"]["clientId"],
-        "WHRlc3RjbGllbnQ6MTpjaQ"
-    );
-    assert_eq!(
-        record["platforms"]["x"]["ceremonyVersions"],
-        serde_json::json!([1])
+        record["platforms"]["x"],
+        serde_json::json!({ "clientId": "WHRlc3RjbGllbnQ6MTpjaQ" })
     );
     assert!(record["platforms"].get("github").is_none());
 
@@ -212,6 +207,19 @@ fn a_configuration_the_binary_cannot_serve_stops_it() {
     assert!(!output.status.success(), "{}", output.status);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("[[platforms]]"), "{stderr}");
+}
+
+/// A configuration naming the versions stops the binary before it binds,
+/// with the key it does not read named: the Distribution publishes them.
+#[test]
+fn a_configuration_naming_versions_stops_the_binary() {
+    let config = config_file(
+        "[[platforms]]\nid = \"x\"\nclient_id = \"WHRlc3RjbGllbnQ6MTpjaQ\"\nversions = [1]\n",
+    );
+    let output = binary(config.path()).wait_with_output().unwrap();
+    assert!(!output.status.success(), "{}", output.status);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("`versions`"), "{stderr}");
 }
 
 /// A run that names no configuration file stops before it binds, naming the

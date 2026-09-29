@@ -1,7 +1,6 @@
 //! What the tests build a deployment from: a Distribution on loopback serving
-//! the fixture artifact, and a configuration naming it. Compiled for the
-//! crate's own tests and, under the `fixtures` feature, for the integration
-//! tests.
+//! the fixture artifact, and a configuration naming it. Compiled into each
+//! integration test that declares the module.
 
 use std::{
     collections::VecDeque,
@@ -304,7 +303,7 @@ pub fn config(args: &[&str]) -> config::Settings {
     let mut origins = "https://app.example".to_owned();
     let mut ccdp_origin = Distribution::shared().origin().to_owned();
     let mut platforms = format!(
-        r#"[{{"id":"github","client_id":"{CLIENT_ID}","versions":[1],"client_credential":"{CLIENT_CREDENTIAL}"}}]"#
+        r#"[{{"id":"github","client_id":"{CLIENT_ID}","client_credential":"{CLIENT_CREDENTIAL}"}}]"#
     );
     for pair in args.chunks(2) {
         let [flag, value] = pair else {

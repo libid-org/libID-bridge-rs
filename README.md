@@ -19,10 +19,12 @@ gas, keeps no database, and talks to no chain.
 ## How a claim works
 
 1. The application reads `GET /api/v1/ceremony/config` from an admitted
-   origin: the CCDP Distribution to load and, per enabled platform, the public
-   client id, the ceremony versions and, for GitHub, the public
-   `clientCredential`. It derives the redirect URI itself from the
-   bridge origin it already knows: `{bridgeOrigin}/auth/callback`.
+   origin: the CCDP Distribution to load and, per enabled platform, the one
+   OAuth client its ceremony runs — the public client id and, for GitHub,
+   the public `clientCredential`. It reads the platform ceremony versions
+   that Distribution bundles from `{ccdpOrigin}/ccdp/versions.json`, and
+   derives the redirect URI from the bridge origin it already knows:
+   `{bridgeOrigin}/auth/callback`.
 2. The browser derives its PKCE verifier, opens the provider's authorization
    page, and is redirected to `GET /auth/callback` on this bridge: one
    document, the same bytes for every request, written by the Distribution.
@@ -73,23 +75,26 @@ Any other path, `POST /api/v1/ceremony/github-token` included, is answered
 {
   "ccdpOrigin": "https://lib.id",
   "platforms": {
-    "github": {
-      "clientId": "Iv1.0123456789abcdef",
-      "ceremonyVersions": [1],
-      "clientCredential": "…"
-    },
-    "x": {
-      "clientId": "…",
-      "ceremonyVersions": [1]
-    }
+    "github": { "clientId": "Iv1.0123456789abcdef", "clientCredential": "…" },
+    "x": { "clientId": "…" }
   }
 }
 ```
 
-`clientCredential` is present on exactly the entries whose ceremony
-sends one: GitHub's. It is nonempty printable ASCII without whitespace,
+A platform is present exactly when the configuration file enables it. Its
+entry is the one OAuth client every version of its ceremony runs: `clientId`
+and, on exactly the platforms whose ceremony sends one — GitHub —
+`clientCredential`. Both are nonempty printable ASCII without whitespace,
 checked at startup. The record carries no redirect URI, no allowlist, no
 notary setting and no user token.
+
+The record names no version. The Distribution publishes the platform
+ceremony versions it bundles at `{ccdpOrigin}/ccdp/versions.json`, and the
+application reads that list itself: it keeps the versions it implements,
+runs each with the platform's client, and enables no platform the list
+omits or the record does not configure. The record is composed and
+serialized once at startup, so an admitted caller is answered `200` whether
+or not the Distribution has been reached.
 
 ## The CCDP Distribution
 
@@ -102,7 +107,9 @@ executes — the Callback implementation, the prover, the circuits and
 notarization client — is served by a separate static **CCDP Distribution** at
 `CCDP_ORIGIN`, which may be cross-site and knows nothing about this bridge. The
 bridge publishes configuration and serves one callback document. It serves no
-CCDP resource and no proving asset.
+CCDP resource and no proving asset. The Distribution also publishes the
+platform ceremony versions it bundles, at `/ccdp/versions.json`; the
+application reads that list directly, and the bridge holds no version list.
 
 ### The callback document
 
@@ -194,28 +201,28 @@ complete starting point:
 allowed_app_origins = ["https://app.example", "https://wallet.example"]
 
 [[platforms]]
-id                        = "github"
-client_id                 = "Iv1.0123456789abcdef"
-versions                  = [1]
+id                = "github"
+client_id         = "Iv1.0123456789abcdef"
 client_credential = "…"
 ```
 
 An unknown key is refused at startup, `host` and `port` among them: where the
 process listens is set with `HOST`/`PORT` or `--host`/`--port`. The platforms
-are set only in the file,
-one `[[platforms]]` table per enabled platform: its `id` (`github`, `google` or
-`x`), its public `client_id`, the ceremony `versions` it advertises and, for
-`github`, the App's client secret as `client_credential`, which the
-bridge publishes. There is no notary setting and no environment variable for
-the credential.
+are set only in the file, one `[[platforms]]` table per enabled platform: its
+`id` (`github`, `google` or `x`), its public `client_id` and, for `github`,
+the App's client secret as `client_credential`, which the bridge publishes.
+That is the platform's one OAuth registration, and every version of its
+ceremony the Distribution bundles runs it; the versions themselves are not
+written here. There is no notary setting and no environment variable for the
+credential.
 
 | Key | Environment | Default | Meaning |
 |---|---|---|---|
 | — | `HOST`, `--host` | `127.0.0.1` | Bind address (`0.0.0.0` in the container image). Not a file key: the image sets it in the environment, which beats a file. |
 | — | `PORT`, `--port` | `8722` | Bind port. Not a file key, for the same reason. |
 | `allowed_app_origins` | — | *(required)* | The application allowlist. A member is an exact origin, an origin pattern or `*`, as described below. A repeated spelling is refused; a pattern and an origin it covers are two members. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once and by its literal spelling. It is the one admission rule: the configuration route admits exactly one `Origin` that a member admits, and echoes that origin itself; the callback document is told the same set. A same-origin read carries no `Origin` and is admitted on `Sec-Fetch-Site: same-origin` alone. |
-| `ccdp_origin` | — | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/callback.html` and everything the browser runs after it, HTTPS, or HTTP on `localhost` or `127.0.0.1`. Published in the configuration and inserted into the callback document, and named as the one `frame-src` source of its policy, so a host a policy source expression cannot name, an IPv6 literal or an underscore among them, is refused. Omitting it selects the canonical libID Distribution. |
-| `platforms` | — | *(required)* | The enabled platforms, as `[[platforms]]` tables: `id`, `client_id`, `versions`, and for `github` its `client_credential`. |
+| `ccdp_origin` | — | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/callback.html`, `/ccdp/versions.json` and everything the browser runs after the callback, HTTPS, or HTTP on `localhost` or `127.0.0.1`. Published in the configuration and inserted into the callback document, and named as the one `frame-src` source of its policy, so a host a policy source expression cannot name, an IPv6 literal or an underscore among them, is refused. Omitting it selects the canonical libID Distribution. |
+| `platforms` | — | *(required)* | The enabled platforms, as `[[platforms]]` tables: `id`, `client_id` and, for `github`, its `client_credential`. |
 | — | `LIBID_CONFIG`, `--config` | *(none)* | Path to the configuration file. |
 
 ### Allowlist members

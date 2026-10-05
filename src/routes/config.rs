@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use axum::{
+    body::Body,
     extract::{
         RawQuery,
         State,
@@ -135,6 +136,7 @@ pub async fn config(
     State(state): State<Arc<AppState>>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
+    body: Body,
 ) -> Response {
     // Admission is decided before anything else is looked at.
     let Some(admission) = admission(&state, &headers) else {
@@ -147,7 +149,7 @@ pub async fn config(
 
     let malformed = if query.is_some_and(|q| !q.is_empty()) {
         Some("this route takes no query")
-    } else if crate::routes::carries_body(&headers) {
+    } else if crate::routes::carries_body(&body) {
         Some("this route takes no request body")
     } else {
         None

@@ -22,9 +22,12 @@ pub mod config;
 use std::sync::Arc;
 
 use axum::{
+    body::{
+        Body,
+        HttpBody as _,
+    },
     http::{
         header,
-        HeaderMap,
         HeaderValue,
         StatusCode,
     },
@@ -65,16 +68,11 @@ impl<'a> Origins<'a> {
     }
 }
 
-/// Whether a request's framing announces a body: any `Transfer-Encoding`, or
-/// a `Content-Length` other than zero. Neither ceremony route takes one.
-pub fn carries_body(headers: &HeaderMap) -> bool {
-    headers.contains_key(header::TRANSFER_ENCODING)
-        || headers
-            .get_all(header::CONTENT_LENGTH)
-            .iter()
-            .any(|length| {
-                length.to_str().ok().and_then(|n| n.parse::<u64>().ok()) != Some(0)
-            })
+/// Whether a request carries a body: whether its body stream is still open
+/// after the head, as any `Transfer-Encoding` or a `Content-Length` above zero
+/// leaves it over HTTP/1. Neither ceremony route takes one.
+pub fn carries_body(body: &Body) -> bool {
+    !body.is_end_stream()
 }
 
 /// `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, put on

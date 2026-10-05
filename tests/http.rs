@@ -602,6 +602,63 @@ async fn a_declared_empty_body_is_no_body() {
     }
 }
 
+/// A body is refused for being there, whatever header framed it: one that
+/// arrives with neither a length nor an encoding is refused too.
+#[tokio::test]
+async fn an_unframed_request_body_is_refused() {
+    let state = test_state().await;
+    for path in [routes::CONFIG_PATH, routes::CALLBACK_PATH] {
+        let req = Request::get(path)
+            .header("origin", APP_ORIGIN)
+            .body(Body::from("{}"))
+            .unwrap();
+        let resp = app(state.clone()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{path}");
+    }
+}
+
+/// Over HTTP/1, a body framed by a length or by chunked encoding, an empty
+/// chunked one included, reaches both routes as a body; a zero length does
+/// not.
+#[tokio::test]
+async fn http1_framing_decides_whether_a_body_is_carried() {
+    use tokio::io::{
+        AsyncReadExt,
+        AsyncWriteExt,
+    };
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = app(test_state().await);
+    tokio::spawn(async move { axum::serve(listener, router).await });
+
+    for path in [routes::CONFIG_PATH, routes::CALLBACK_PATH] {
+        for (framing, status) in [
+            ("content-length: 2\r\n\r\n{}", "400"),
+            (
+                "transfer-encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n",
+                "400",
+            ),
+            ("transfer-encoding: chunked\r\n\r\n0\r\n\r\n", "400"),
+            ("content-length: 0\r\n\r\n", "200"),
+        ] {
+            let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+            let request = format!(
+                "GET {path} HTTP/1.1\r\nhost: bridge\r\norigin: {APP_ORIGIN}\r\n\
+                 connection: close\r\n{framing}"
+            );
+            socket.write_all(request.as_bytes()).await.unwrap();
+            let mut answer = Vec::new();
+            socket.read_to_end(&mut answer).await.unwrap();
+            let answer = String::from_utf8_lossy(&answer);
+            assert!(
+                answer.starts_with(&format!("HTTP/1.1 {status} ")),
+                "{path} {framing:?}: {answer}"
+            );
+        }
+    }
+}
+
 /// A path this bridge does not serve is a `404` with no CORS header, whatever
 /// the request carries: no preflight is answered there, no origin is granted
 /// a relationship, and `/api/v1/ceremony/github-token` performs no exchange

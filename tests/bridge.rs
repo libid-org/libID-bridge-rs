@@ -184,6 +184,32 @@ mod root {
         }
     }
 
+    /// A canonical CCDP origin whose host no HTTP request can carry stops the
+    /// process, naming `CCDP_ORIGIN`: the artifact could never be retrieved
+    /// from it.
+    #[tokio::test]
+    async fn a_ccdp_origin_no_request_can_carry_stops_the_process() {
+        for spelling in [
+            "https://a\"b.example",
+            "https://a`b.example",
+            "https://a{b.example",
+            "https://a}b.example",
+        ] {
+            assert!(
+                origin::Origin::listed("CCDP_ORIGIN", spelling).is_ok(),
+                "{spelling} is a canonical origin"
+            );
+            let err = Bridge::start(&common::config(&["--ccdp-origin", spelling]))
+                .err()
+                .unwrap_or_else(|| panic!("no request carries {spelling}"));
+            let text = err.to_string();
+            assert!(
+                text.contains("CCDP_ORIGIN") && text.contains("no HTTP request"),
+                "{text}"
+            );
+        }
+    }
+
     /// A member the operator did not mean to write is refused rather than
     /// skipped.
     #[tokio::test]

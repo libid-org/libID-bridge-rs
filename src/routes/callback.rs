@@ -1,6 +1,7 @@
 //! The registered OAuth callback: one document, served at the configured
-//! path, identical for every request. The handler reads nothing from the
-//! request: no URI, query, `Origin` or `Referer`.
+//! path, identical for every request. The handler reads no URI, query,
+//! `Origin` or `Referer`, only whether the request carries a body, and it
+//! refuses one.
 //!
 //! A deployment whose Distribution has not answered yet has no document, and
 //! says so with an inert page carrying no script, style, link or form. The
@@ -12,6 +13,7 @@ use axum::{
     extract::State,
     http::{
         header,
+        HeaderMap,
         HeaderName,
         StatusCode,
     },
@@ -60,7 +62,14 @@ const NO_DOCUMENT_POLICY: &str = "default-src 'none'; style-src 'unsafe-inline'"
 const RETRY_AFTER: &str = "5";
 
 /// `GET {callback path}`.
-pub async fn callback(State(state): State<Arc<AppState>>) -> Response {
+pub async fn callback(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if crate::routes::carries_body(&headers) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+
     // The borrow guard is released before the response is built.
     let published = state.callback.borrow().clone();
     let Some(published) = published else {

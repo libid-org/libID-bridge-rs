@@ -145,16 +145,19 @@ pub async fn config(
         );
     };
 
-    if query.is_some_and(|q| !q.is_empty()) {
+    let malformed = if query.is_some_and(|q| !q.is_empty()) {
+        Some("this route takes no query")
+    } else if crate::routes::carries_body(&headers) {
+        Some("this route takes no request body")
+    } else {
+        None
+    };
+    if let Some(message) = malformed {
         let admitted = match &admission {
             Admission::Listed(origin) => Some(origin.clone()),
             Admission::SameOrigin => None,
         };
-        return refuse(
-            StatusCode::BAD_REQUEST,
-            "this route takes no query",
-            admitted,
-        );
+        return refuse(StatusCode::BAD_REQUEST, message, admitted);
     }
 
     // `insert`, not append: the `Bytes` body would otherwise add its own

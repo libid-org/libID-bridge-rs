@@ -28,8 +28,8 @@ gas, keeps no database, and talks to no chain.
 2. The browser derives its PKCE verifier, opens the provider's authorization
    page, and is redirected to `GET /auth/callback` on this bridge: one
    document, the same bytes for every request, written by the Distribution.
-   The handler reads nothing from the request; the code in the query never
-   reaches this process.
+   The handler reads only whether the request carries a body; the code in
+   the query never reaches this process.
 3. Everything after that runs in the browser on the Distribution's code: the
    token exchange, the notarized sessions, the proof. GitHub's token request
    carries the published credential as `client_secret` and is revealed whole.
@@ -58,13 +58,13 @@ out; origin checks and a closed input surface cannot constrain its owner.
 |---|---|---|
 | `GET` | `/health` | Liveness probe. Returns `OK`, whether or not a callback document is available. Not one of the contract's routes — see below. |
 | `GET` | `/metrics` | What this deployment counts, in the Prometheus text exposition format. Not one of the contract's routes. |
-| `GET`, `OPTIONS` | `/api/v1/ceremony/config` | The public ceremony configuration: `{ ccdpOrigin, platforms }`. Readable from an admitted origin, or by a same-origin `GET` without `Origin` on `Sec-Fetch-Site: same-origin`. `403` for any other origin, `400` for a query. `OPTIONS` answers the preflight a caller sending its own header needs, by the same admission rule: `GET`, the headers asked for, no credentials. |
+| `GET`, `OPTIONS` | `/api/v1/ceremony/config` | The public ceremony configuration: `{ ccdpOrigin, platforms }`. Readable from an admitted origin, or by a same-origin `GET` without `Origin` on `Sec-Fetch-Site: same-origin`. `403` for any other origin, `400` for a query or a request body. `OPTIONS` answers the preflight a caller sending its own header needs, by the same admission rule: `GET`, the headers asked for, no credentials. |
 | `GET` | `/auth/callback` | The registered OAuth callback document: the CCDP Distribution's artifact with this deployment's data inserted, identical for every request. |
 
 `/health` is not one of the contract's two routes. The published image's
 `HEALTHCHECK` targets it; it reads nothing from the request and answers two
 bytes. The configuration route is the one that refuses a query; the callback
-takes the provider's and ignores it.
+takes the provider's and ignores it. Both refuse a request body with `400`.
 
 Any other path, `POST /api/v1/ceremony/github-token` included, is answered
 `404` with no CORS header. Any other method on the configuration or callback
@@ -140,10 +140,10 @@ character a parser reads as markup, and the marker occurs once.
 
 The document never varies: no request field —
 `Origin`, `Referer`, query, fragment — changes a byte of it or its policy. The
-server never sees the provider's return: the handler reads nothing from the
-request, and there is no request-logging middleware. **Any proxy in front of
-this server must redact the callback path's query string from its access
-logs** — that half of the contract is the operator's.
+server never sees the provider's return: the handler reads only whether the
+request carries a body, and there is no request-logging middleware. **Any
+proxy in front of this server must redact the callback path's query string
+from its access logs** — that half of the contract is the operator's.
 
 The artifact is **retrieved from the Distribution**: `{CCDP_ORIGIN}/ccdp/callback.html`,
 first as soon as the process runs and then every five minutes, conditionally on

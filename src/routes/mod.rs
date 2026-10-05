@@ -13,7 +13,8 @@
 //! caller sending its own header needs. The callback carries no CORS: it is a
 //! top-level navigation. No other path is served, and no route performs a
 //! token exchange or opens a notary connection. Any other method on either
-//! ceremony route, `HEAD` included, is a `405` naming the methods it serves.
+//! ceremony route, `HEAD` included, is a `405` naming the methods it serves,
+//! and a request carrying a body is a `400`.
 
 pub mod callback;
 pub mod config;
@@ -23,6 +24,7 @@ use std::sync::Arc;
 use axum::{
     http::{
         header,
+        HeaderMap,
         HeaderValue,
         StatusCode,
     },
@@ -61,6 +63,18 @@ impl<'a> Origins<'a> {
             (None, _) => Origins::Absent,
         }
     }
+}
+
+/// Whether a request's framing announces a body: any `Transfer-Encoding`, or
+/// a `Content-Length` other than zero. Neither ceremony route takes one.
+pub fn carries_body(headers: &HeaderMap) -> bool {
+    headers.contains_key(header::TRANSFER_ENCODING)
+        || headers
+            .get_all(header::CONTENT_LENGTH)
+            .iter()
+            .any(|length| {
+                length.to_str().ok().and_then(|n| n.parse::<u64>().ok()) != Some(0)
+            })
 }
 
 /// `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, put on

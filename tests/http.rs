@@ -559,6 +559,49 @@ async fn config_refuses_a_query_but_reads_the_origin_first() {
     );
 }
 
+/// A request body is refused like a query, after the origin is decided,
+/// whether its length is declared or it is chunked; an admitted caller can
+/// read the refusal.
+#[tokio::test]
+async fn config_refuses_a_request_body_but_reads_the_origin_first() {
+    let state = test_state().await;
+    for (name, value) in [("content-length", "2"), ("transfer-encoding", "chunked")] {
+        for (origin, status, allowed) in [
+            (APP_ORIGIN, StatusCode::BAD_REQUEST, Some(APP_ORIGIN)),
+            ("https://evil.example", StatusCode::FORBIDDEN, None),
+        ] {
+            let req = Request::get(routes::CONFIG_PATH)
+                .header("origin", origin)
+                .header(name, value)
+                .body(Body::from("{}"))
+                .unwrap();
+            let resp = app(state.clone()).oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), status, "{name} from {origin}");
+            let allow = resp.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN);
+            assert_eq!(
+                allow.map(|v| v.to_str().unwrap()),
+                allowed,
+                "{name} from {origin}"
+            );
+        }
+    }
+}
+
+/// A `Content-Length` of zero announces no body, so it is no reason to refuse.
+#[tokio::test]
+async fn a_declared_empty_body_is_no_body() {
+    let state = test_state().await;
+    for path in [routes::CONFIG_PATH, routes::CALLBACK_PATH] {
+        let req = Request::get(path)
+            .header("origin", APP_ORIGIN)
+            .header("content-length", "0")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app(state.clone()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{path}");
+    }
+}
+
 /// A path this bridge does not serve is a `404` with no CORS header, whatever
 /// the request carries: no preflight is answered there, no origin is granted
 /// a relationship, and `/api/v1/ceremony/github-token` performs no exchange
@@ -747,6 +790,27 @@ async fn the_callback_document_admits_only_get() {
         assert_eq!(resp.headers()[header::ALLOW], "GET", "{method}");
     }
     // The handler counts every request it answers.
+    let counted = state.metrics.rendered();
+    assert!(
+        !counted.contains("libid_bridge_callback_requests_total{"),
+        "{counted}"
+    );
+}
+
+/// A callback request carrying a body is refused before the document is
+/// looked at, whether its length is declared or it is chunked.
+#[tokio::test]
+async fn the_callback_refuses_a_request_body() {
+    let state = test_state().await;
+    for (name, value) in [("content-length", "2"), ("transfer-encoding", "chunked")] {
+        let req = Request::get("/auth/callback?code=abc&state=v1.9e1f")
+            .header(name, value)
+            .body(Body::from("{}"))
+            .unwrap();
+        let resp = app(state.clone()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{name}");
+    }
+    // The handler counts every document and every unavailable answer.
     let counted = state.metrics.rendered();
     assert!(
         !counted.contains("libid_bridge_callback_requests_total{"),

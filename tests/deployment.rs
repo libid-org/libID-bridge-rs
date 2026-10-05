@@ -208,16 +208,20 @@ mod deployment {
     /// A refusal names the key as the file spells it, never the value.
     #[test]
     fn a_refused_key_is_named_and_not_quoted() {
-        let err =
-            checked(&github_with("zzMarkerzz fee")).expect_err("a space is refused");
-        let text = err.to_string();
-        assert!(text.contains("client_credential"), "{text}");
-        assert!(!text.contains("zzMarkerzz"), "{text}");
-
-        let err = checked(&x_with("zzMarkerzz id")).expect_err("a space is refused");
-        let text = err.to_string();
-        assert!(text.contains("client_id"), "{text}");
-        assert!(!text.contains("zzMarkerzz"), "{text}");
+        let over = |bound: usize| format!("zzMarkerzz{}", "a".repeat(bound));
+        for (key, json) in [
+            ("client_credential", github_with("zzMarkerzz fee")),
+            ("client_id", x_with("zzMarkerzz id")),
+            (
+                "client_credential",
+                github_with(over(MAX_CLIENT_CREDENTIAL_BYTES)),
+            ),
+            ("client_id", x_with(over(MAX_CLIENT_ID_BYTES))),
+        ] {
+            let text = checked(&json).expect_err("each value is refused").to_string();
+            assert!(text.contains(key), "{text}");
+            assert!(!text.contains("zzMarkerzz"), "{text}");
+        }
     }
 }
 

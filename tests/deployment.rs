@@ -218,7 +218,9 @@ mod deployment {
             ),
             ("client_id", x_with(over(MAX_CLIENT_ID_BYTES))),
         ] {
-            let text = checked(&json).expect_err("each value is refused").to_string();
+            let text = checked(&json)
+                .expect_err("each value is refused")
+                .to_string();
             assert!(text.contains(key), "{text}");
             assert!(!text.contains("zzMarkerzz"), "{text}");
         }

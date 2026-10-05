@@ -198,25 +198,9 @@ fn printable_without_whitespace(value: &str) -> bool {
     value.bytes().all(|b| (0x21..=0x7E).contains(&b))
 }
 
-/// The CCDP Distribution this deployment selects, in canonical form. A host a
-/// policy cannot name is refused: the callback document's policy names this
-/// origin as a `frame-src` source, and a browser discards a source whose
-/// grammar it cannot parse, leaving the document framing nothing. An IPv6
-/// literal and an underscore are both outside that grammar. The admitted
-/// application origins reach the document as escaped data rather than as
-/// policy, so they are not held to this.
+/// The CCDP Distribution this deployment selects, in canonical form.
 fn ccdp_origin(spelling: &str) -> Result<Origin> {
-    let origin = Origin::parse("CCDP_ORIGIN", spelling)?;
-    if !origin.names_a_policy_host() {
-        return Err(Error::Config {
-            detail: format!(
-                "CCDP_ORIGIN {spelling} names a host a Content-Security-Policy \
-                 cannot carry as a source, which admits letters, digits, `-` \
-                 and `.`; name the Distribution by a host made of those"
-            ),
-        });
-    }
-    Ok(origin)
+    Origin::parse("CCDP_ORIGIN", spelling)
 }
 
 /// The application allowlist admitted to read the configuration, each member

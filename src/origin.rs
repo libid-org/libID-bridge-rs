@@ -4,7 +4,7 @@
 //! An application allowlist is written in the wider vocabulary of
 //! [`Admitted`]: an exact origin, an origin pattern admitting the subdomains
 //! of one host suffix, or `*`. Everything else — the Distribution this bridge
-//! dials, the origin its policy names — is an [`Origin`] and nothing else.
+//! dials and publishes — is an [`Origin`] and nothing else.
 //!
 //! What a request arrived under is an [`Observed`], read from the `Origin`
 //! header once and carrying the proof that it is canonical. Membership takes
@@ -84,26 +84,6 @@ impl Origin {
             });
         }
         Ok(origin)
-    }
-
-    /// Whether a Content-Security-Policy source expression can name this
-    /// origin's host. Its grammar admits letters, digits, `-` and the `.`
-    /// between labels, so an IPv6 literal and an underscore are both outside
-    /// it, and a browser discards a source it cannot parse.
-    pub fn names_a_policy_host(&self) -> bool {
-        let after_scheme = self
-            .0
-            .split_once("://")
-            .map(|(_, rest)| rest)
-            .unwrap_or(&self.0);
-        let host = after_scheme
-            .split_once(':')
-            .map(|(host, _)| host)
-            .unwrap_or(after_scheme);
-        !host.is_empty()
-            && host
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
     }
 
     /// The canonical spelling.

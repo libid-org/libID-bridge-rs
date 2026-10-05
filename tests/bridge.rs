@@ -149,6 +149,22 @@ mod root {
         assert_eq!(members, ["*.handles.link", "https://dist.handles.link"]);
     }
 
+    /// A canonical HTTPS CCDP origin starts the bridge whatever its host
+    /// carries: an IPv6 literal or an underscore is published and joins the
+    /// effective set as written.
+    #[tokio::test]
+    async fn a_ccdp_origin_on_any_canonical_host_starts_the_bridge() {
+        for ccdp in ["https://[::1]:8787", "https://dev_box.example"] {
+            let state = started(&["--ccdp-origin", ccdp]).await;
+            let record: serde_json::Value =
+                serde_json::from_slice(&state.ceremony_config).unwrap();
+            assert_eq!(record["ccdpOrigin"], ccdp);
+            let members: Vec<&str> =
+                state.allowed_origins.iter().map(|m| m.as_str()).collect();
+            assert_eq!(members, ["https://app.example", ccdp]);
+        }
+    }
+
     /// A member the operator did not mean to write is refused rather than
     /// skipped.
     #[tokio::test]
@@ -191,22 +207,8 @@ mod root {
             ),
             (
                 "a CCDP origin written as an origin pattern, which names no \
-                 Distribution and which a policy could not carry",
+                 Distribution",
                 vec!["--ccdp-origin", "*.handles.link"],
-            ),
-            (
-                "a CCDP origin whose host carries a CSP directive separator",
-                vec!["--ccdp-origin", "https://a;b.example"],
-            ),
-            (
-                "a CCDP origin written as an IPv6 literal, which its policy \
-                 could not name",
-                vec!["--ccdp-origin", "https://[::1]:8787"],
-            ),
-            (
-                "a CCDP origin whose host carries an underscore, which a \
-                 policy source expression has no form for",
-                vec!["--ccdp-origin", "https://dev_box.example"],
             ),
             (
                 "an admitted origin carrying a trailing slash",

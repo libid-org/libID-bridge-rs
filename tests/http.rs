@@ -660,10 +660,9 @@ async fn the_callback_document_carries_the_exact_response_policy() {
     ] {
         assert_eq!(directive(name), format!("{name} 'none'"));
     }
-    assert_eq!(
-        directive("frame-src"),
-        format!("frame-src {}", ccdp_origin())
-    );
+    assert_eq!(directive("frame-src"), "frame-src 'none'");
+    // The Distribution is where Callback navigates, never a policy source.
+    assert!(!csp.contains(ccdp_origin()), "{csp}");
     assert_eq!(directive("connect-src"), "connect-src 'none'");
     assert_eq!(directive("style-src"), "style-src 'unsafe-inline'");
 

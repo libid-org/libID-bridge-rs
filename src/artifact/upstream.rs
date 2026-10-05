@@ -168,8 +168,7 @@ enum Fetched {
 /// The Distribution this deployment retrieves its artifact from, parsed once
 /// at startup from the canonical CCDP origin.
 pub struct Upstream {
-    /// The origin as configured: what `compose` inserts and what the policy
-    /// admits a frame from.
+    /// The origin as configured: what `compose` inserts.
     origin: Origin,
     /// The artifact's absolute URL, built once.
     url: String,

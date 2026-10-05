@@ -47,8 +47,9 @@ impl CallbackDocument {
     ///
     /// `hashes` are the script sources the artifact's own policy named, and
     /// become the only script sources the composed policy admits. The marker
-    /// occurs once and is replaced by escaped data, so no byte those hashes
-    /// cover moves and nothing inserted can be read as markup.
+    /// occurs once, as the whole content of the non-executable data block,
+    /// and is replaced by escaped data, so no byte those hashes cover moves
+    /// and nothing inserted can be read as markup.
     pub fn compose(
         html: &str,
         hashes: &[String],
@@ -57,6 +58,16 @@ impl CallbackDocument {
         let markers = html.matches(policy::MARKER).count();
         if markers != 1 {
             return Err(ArtifactError::Markers(markers));
+        }
+        // Anywhere else the inserted data could land in script source.
+        let slot = format!(
+            "{}{}{}",
+            policy::SLOT_START,
+            policy::MARKER,
+            policy::SLOT_END
+        );
+        if !html.contains(&slot) {
+            return Err(ArtifactError::Slot);
         }
 
         // One unversioned list: `[allowedOrigins, ccdpOrigin]`, written in

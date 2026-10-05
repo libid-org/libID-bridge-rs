@@ -10,6 +10,15 @@
 /// contract, and the one thing substitution touches.
 pub const MARKER: &str = "__LIBID_CALLBACK_CONFIG__";
 
+/// The start tag of the data block the marker is the whole content of: a
+/// script element of a type the browser does not run. Fixed by the artifact
+/// contract.
+pub const SLOT_START: &str =
+    r#"<script id="libid-callback-config" type="application/json">"#;
+
+/// The end tag of that data block.
+pub const SLOT_END: &str = "</script>";
+
 /// The largest artifact this bridge will read. The retrieval stops at it,
 /// which is the one place the bytes arrive.
 pub const MAX_ARTIFACT_BYTES: usize = 4 * 1024 * 1024;
@@ -21,6 +30,10 @@ pub enum ArtifactError {
     /// The document does not carry the one configuration marker.
     #[error("the document carries {0} configuration markers, and must carry one")]
     Markers(usize),
+    /// The one marker is not the whole content of the configuration data
+    /// block.
+    #[error("the configuration marker is not the whole content of its data block")]
+    Slot,
     /// The artifact's own policy names something this bridge will not serve.
     #[error("the artifact's own policy {0}")]
     UpstreamPolicy(String),

@@ -150,15 +150,15 @@ mod root {
     }
 
     /// A canonical HTTPS CCDP origin starts the bridge whatever its host
-    /// carries: an IPv6 literal or an underscore is published and joins the
+    /// carries: an IPv6 literal or an underscore is selected and joins the
     /// effective set as written.
     #[tokio::test]
     async fn a_ccdp_origin_on_any_canonical_host_starts_the_bridge() {
         for ccdp in ["https://[::1]:8787", "https://dev_box.example"] {
-            let state = started(&["--ccdp-origin", ccdp]).await;
-            let record: serde_json::Value =
-                serde_json::from_slice(&state.ceremony_config).unwrap();
-            assert_eq!(record["ccdpOrigin"], ccdp);
+            let settings = common::config(&["--ccdp-origin", ccdp]);
+            let selected = deployment::Deployment::checked(&settings).unwrap();
+            assert_eq!(selected.ccdp_origin.as_str(), ccdp);
+            let state = Bridge::start(&settings).unwrap().state;
             let members: Vec<&str> =
                 state.allowed_origins.iter().map(|m| m.as_str()).collect();
             assert_eq!(members, ["https://app.example", ccdp]);

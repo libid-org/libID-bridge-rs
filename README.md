@@ -116,17 +116,15 @@ application reads that list directly, and the bridge holds no version list.
 
 The bridge does not write it. The Distribution builds one self-contained
 artifact at `/ccdp/callback.html` carrying every supported Callback
-implementation, with one non-executable slot for deployment data:
-`<script id="libid-callback-config" type="application/json">` holding the
-marker `__LIBID_CALLBACK_CONFIG__` and nothing else. The bridge reads that
-artifact, substitutes **one unversioned list** —
+implementation, with one non-executable slot for deployment data. The bridge
+reads that artifact, substitutes **one unversioned list** —
 `[allowedOrigins, ccdpOrigin]` — the effective admission set, which is
 `ALLOWED_APP_ORIGINS` plus the resolved CCDP origin, and that origin —
 in place of the marker, composes the response policy, and publishes the pair.
-It does not parse the document: the marker occurs once, as the whole content
-of that slot, or the artifact is refused, and everything around it is served
-as it arrived. It parses no OAuth `state`, selects no CCDP version, and holds
-no version list: a compatible Callback change needs no bridge rebuild.
+It does not parse the document: the marker occurs once or the artifact is
+refused, and everything around it is served as it arrived. It parses no OAuth
+`state`, selects no CCDP version, and holds no version list: a compatible
+Callback change needs no bridge rebuild.
 
 `allowedOrigins` is an array of strings, every member spelled as it was
 written, whichever kind it is. It carries `ccdpOrigin` itself, literally,

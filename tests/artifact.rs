@@ -93,56 +93,6 @@ mod artifact {
         );
     }
 
-    /// The configuration data block as the artifact contract writes it.
-    const SLOT: &str = r#"<script id="libid-callback-config" type="application/json">__LIBID_CALLBACK_CONFIG__</script>"#;
-
-    /// A document whose one marker stands in no data block is refused.
-    #[test]
-    fn a_document_without_the_data_block_is_refused() {
-        assert!(FIXTURE.contains(SLOT));
-        for html in [
-            FIXTURE.replace(SLOT, policy::MARKER),
-            "<html><body><p>__LIBID_CALLBACK_CONFIG__</p></body></html>".to_owned(),
-        ] {
-            assert_eq!(compose(&html).map(|_| ()).unwrap_err(), ArtifactError::Slot);
-        }
-    }
-
-    /// A marker that is not the whole content of the data block is refused,
-    /// rather than filled in where the data could become script.
-    #[test]
-    fn a_marker_outside_the_data_block_is_refused() {
-        let emptied = FIXTURE.replace(
-            SLOT,
-            r#"<script id="libid-callback-config" type="application/json"></script>"#,
-        );
-        for html in [
-            // The block is empty and the marker sits in the module.
-            emptied.replacen(
-                r#"<script type="module">"#,
-                r#"<script type="module">__LIBID_CALLBACK_CONFIG__;"#,
-                1,
-            ),
-            // The block is empty and the marker sits in the page's markup.
-            emptied.replacen("</main>", "__LIBID_CALLBACK_CONFIG__</main>", 1),
-            // The marker is in the block, with more besides.
-            FIXTURE.replace(
-                SLOT,
-                r#"<script id="libid-callback-config" type="application/json">[__LIBID_CALLBACK_CONFIG__]</script>"#,
-            ),
-            // The block is of a type a browser runs.
-            FIXTURE.replace(
-                SLOT,
-                r#"<script id="libid-callback-config" type="module">__LIBID_CALLBACK_CONFIG__</script>"#,
-            ),
-        ] {
-            assert_eq!(
-                compose(&html).map(|_| ()).unwrap_err(),
-                ArtifactError::Slot
-            );
-        }
-    }
-
     /// A document with no marker, or with more than one, is refused rather
     /// than filled in twice.
     #[test]

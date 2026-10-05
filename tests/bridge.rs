@@ -149,6 +149,67 @@ mod root {
         assert_eq!(members, ["*.handles.link", "https://dist.handles.link"]);
     }
 
+    /// A canonical HTTPS CCDP origin starts the bridge whatever its host
+    /// carries: an IPv6 literal or an underscore is selected and joins the
+    /// effective set as written.
+    #[tokio::test]
+    async fn a_ccdp_origin_on_any_canonical_host_starts_the_bridge() {
+        for ccdp in ["https://[::1]:8787", "https://dev_box.example"] {
+            let settings = common::config(&["--ccdp-origin", ccdp]);
+            let selected = deployment::Deployment::checked(&settings).unwrap();
+            assert_eq!(selected.ccdp_origin.as_str(), ccdp);
+            let state = Bridge::start(&settings).unwrap().state;
+            let members: Vec<&str> =
+                state.allowed_origins.iter().map(|m| m.as_str()).collect();
+            assert_eq!(members, ["https://app.example", ccdp]);
+        }
+    }
+
+    /// The CCDP origin is read as written, as an exact member is: a spelling
+    /// that is not canonical stops the process, naming the one to write,
+    /// rather than being folded into it.
+    #[tokio::test]
+    async fn a_noncanonical_ccdp_origin_is_refused_rather_than_folded() {
+        for spelling in [
+            "https://Dist.example",
+            "https://dist.example/",
+            "https://dist.example:443",
+        ] {
+            let err = Bridge::start(&common::config(&["--ccdp-origin", spelling]))
+                .err()
+                .unwrap_or_else(|| panic!("{spelling} is not canonical"));
+            let text = err.to_string();
+            assert!(text.contains("CCDP_ORIGIN"), "{text}");
+            assert!(text.contains("write it as https://dist.example"), "{text}");
+        }
+    }
+
+    /// A canonical CCDP origin whose host no HTTP request can carry stops the
+    /// process, naming `CCDP_ORIGIN`: the artifact could never be retrieved
+    /// from it.
+    #[tokio::test]
+    async fn a_ccdp_origin_no_request_can_carry_stops_the_process() {
+        for spelling in [
+            "https://a\"b.example",
+            "https://a`b.example",
+            "https://a{b.example",
+            "https://a}b.example",
+        ] {
+            assert!(
+                origin::Origin::listed("CCDP_ORIGIN", spelling).is_ok(),
+                "{spelling} is a canonical origin"
+            );
+            let err = Bridge::start(&common::config(&["--ccdp-origin", spelling]))
+                .err()
+                .unwrap_or_else(|| panic!("no request carries {spelling}"));
+            let text = err.to_string();
+            assert!(
+                text.contains("CCDP_ORIGIN") && text.contains("no HTTP request"),
+                "{text}"
+            );
+        }
+    }
+
     /// A member the operator did not mean to write is refused rather than
     /// skipped.
     #[tokio::test]
@@ -191,22 +252,8 @@ mod root {
             ),
             (
                 "a CCDP origin written as an origin pattern, which names no \
-                 Distribution and which a policy could not carry",
+                 Distribution",
                 vec!["--ccdp-origin", "*.handles.link"],
-            ),
-            (
-                "a CCDP origin whose host carries a CSP directive separator",
-                vec!["--ccdp-origin", "https://a;b.example"],
-            ),
-            (
-                "a CCDP origin written as an IPv6 literal, which its policy \
-                 could not name",
-                vec!["--ccdp-origin", "https://[::1]:8787"],
-            ),
-            (
-                "a CCDP origin whose host carries an underscore, which a \
-                 policy source expression has no form for",
-                vec!["--ccdp-origin", "https://dev_box.example"],
             ),
             (
                 "an admitted origin carrying a trailing slash",

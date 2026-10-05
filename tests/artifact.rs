@@ -111,10 +111,10 @@ mod artifact {
         }
     }
 
-    /// The policy names the hashes the artifact arrived with, admits a frame
-    /// only from the configured Distribution, and admits no connection.
+    /// The policy names the hashes the artifact arrived with, admits no frame
+    /// and no connection, and names no origin of the deployment.
     #[test]
-    fn the_policy_carries_the_hashes_and_this_deployments_sources() {
+    fn the_policy_carries_the_hashes_and_no_deployment_origin() {
         let doc = compose(FIXTURE).unwrap();
         let csp = doc.csp.to_str().unwrap();
         assert!(csp.starts_with(
@@ -124,7 +124,8 @@ mod artifact {
         for source in crate::common::artifact_hashes() {
             assert!(csp.contains(&source), "{csp}");
         }
-        assert!(csp.contains("frame-src https://ccdp.example"));
+        assert!(csp.contains("frame-src 'none'"), "{csp}");
+        assert!(!csp.contains("ccdp.example"), "{csp}");
         assert!(csp.contains("connect-src 'none'"));
         assert!(!csp.contains("'unsafe-eval'"));
         assert!(!csp.contains("'unsafe-inline'; script"), "{csp}");

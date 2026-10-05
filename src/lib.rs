@@ -52,7 +52,7 @@ impl Bridge {
     /// document and stops nothing.
     pub fn start(settings: &config::Settings) -> Result<Bridge> {
         let deployment = deployment::Deployment::checked(settings)?;
-        let upstream = artifact::upstream::Upstream::new(&deployment.ccdp_origin);
+        let upstream = artifact::upstream::Upstream::new(&deployment.ccdp_origin)?;
         let (sender, callback) = tokio::sync::watch::channel(None);
         let (failed, failure) = tokio::sync::watch::channel(None);
         let metrics = Arc::new(metrics::Metrics::new());

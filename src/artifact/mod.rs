@@ -1,7 +1,7 @@
 //! The callback document this bridge serves: the CCDP Distribution's artifact
 //! with one unversioned list in place of its one marker, under a
-//! Content-Security-Policy composed here from this deployment's own sources
-//! and the script hashes the artifact arrived with.
+//! Content-Security-Policy composed here around the script hashes the artifact
+//! arrived with.
 //!
 //! The document is not parsed. The marker is substituted for, the hashes are
 //! carried, and the policy admits those hashes and no other script source, so
@@ -20,10 +20,10 @@ use crate::origin::{
     Origin,
 };
 
-/// What the deployment contributes to the document and its policy.
+/// What the deployment contributes to the document.
 pub struct DeploymentInputs<'a> {
-    /// The CCDP Distribution this bridge selects: in the inserted list, and
-    /// the one origin the policy admits a frame from.
+    /// The CCDP Distribution this bridge selects: the inserted list's second
+    /// position.
     pub ccdp_origin: &'a Origin,
     /// The effective admission set, which the Callback authenticates an
     /// application against. It contains the CCDP origin, literally.
@@ -66,7 +66,7 @@ impl CallbackDocument {
         let record = serde_json::json!([inputs.allowed_origins, inputs.ccdp_origin]);
         let body = html.replace(policy::MARKER, &json(&record));
 
-        let csp = policy(hashes, inputs.ccdp_origin.as_str());
+        let csp = policy(hashes);
         let csp = HeaderValue::from_str(&csp)
             .map_err(|e| ArtifactError::Policy(format!("{csp:?}: {e}")))?;
         Ok(CallbackDocument {
@@ -90,9 +90,9 @@ pub struct Published {
     pub etag: Option<String>,
 }
 
-/// The response policy: this deployment's own sources, and the script hashes
-/// the artifact arrived with.
-pub fn policy(hashes: &[String], ccdp_origin: &str) -> String {
+/// The response policy: the same directives for every deployment, with the
+/// script hashes the artifact arrived with as its only script sources.
+pub fn policy(hashes: &[String]) -> String {
     [
         "default-src 'none'".to_owned(),
         "object-src 'none'".to_owned(),
@@ -103,8 +103,8 @@ pub fn policy(hashes: &[String], ccdp_origin: &str) -> String {
         format!("script-src {}", hashes.join(" ")),
         // The artifact's own inline styles.
         "style-src 'unsafe-inline'".to_owned(),
-        // Callback may frame the Distribution it came from, and nothing else.
-        format!("frame-src {ccdp_origin}"),
+        // Callback navigates its window to the Distribution and frames nothing.
+        "frame-src 'none'".to_owned(),
         "connect-src 'none'".to_owned(),
     ]
     .join("; ")

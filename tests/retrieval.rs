@@ -37,7 +37,7 @@ mod upstream {
 
     /// A Distribution as a deployment retrieves from it.
     fn upstream(distribution: &Distribution) -> Upstream {
-        Upstream::new(&origin(distribution.origin()))
+        Upstream::new(&origin(distribution.origin())).expect("a URL the tests dial")
     }
 
     /// An `https` origin that presents a certificate nothing trusts.
@@ -503,7 +503,7 @@ mod upstream {
     async fn an_untrusted_certificate_is_refused_as_a_certificate() {
         let untrusted = untrusted_tls_origin().await;
         let refusal = refused(
-            Upstream::new(&origin(&untrusted)),
+            Upstream::new(&origin(&untrusted)).expect("a URL the tests dial"),
             "an untrusted peer is not a Distribution",
         )
         .await;
@@ -574,7 +574,9 @@ mod upstream {
             .1;
         assert_eq!(host, format!("127.0.0.1:{port}"));
         assert_eq!(
-            Upstream::new(&origin("https://lib.id:443")).url(),
+            Upstream::new(&origin("https://lib.id:443"))
+                .expect("a URL the tests dial")
+                .url(),
             format!("https://lib.id{ARTIFACT_PATH}"),
             "a default port is not part of the URL the client dials"
         );

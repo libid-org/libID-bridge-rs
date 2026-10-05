@@ -180,19 +180,50 @@ mod deployment {
         }
     }
 
+    /// A client id and a credential as long as CCDP's `ProveIdentity` carries
+    /// are accepted, and a byte longer is refused, naming the key.
+    #[test]
+    fn a_client_is_bounded_by_what_prove_identity_carries() {
+        let at_bound = json!([{
+            "id": "github",
+            "client_id": "a".repeat(MAX_CLIENT_ID_BYTES),
+            "client_credential": "c".repeat(MAX_CLIENT_CREDENTIAL_BYTES),
+        }])
+        .to_string();
+        let accepted = checked(&at_bound).unwrap();
+        assert_eq!(accepted[0].client_id.len(), MAX_CLIENT_ID_BYTES);
+
+        for (key, over) in [
+            ("client_id", x_with("a".repeat(MAX_CLIENT_ID_BYTES + 1))),
+            (
+                "client_credential",
+                github_with("c".repeat(MAX_CLIENT_CREDENTIAL_BYTES + 1)),
+            ),
+        ] {
+            let text = checked(&over).unwrap_err().to_string();
+            assert!(text.contains(key) && text.contains("longer than"), "{text}");
+        }
+    }
+
     /// A refusal names the key as the file spells it, never the value.
     #[test]
     fn a_refused_key_is_named_and_not_quoted() {
-        let err =
-            checked(&github_with("zzMarkerzz fee")).expect_err("a space is refused");
-        let text = err.to_string();
-        assert!(text.contains("client_credential"), "{text}");
-        assert!(!text.contains("zzMarkerzz"), "{text}");
-
-        let err = checked(&x_with("zzMarkerzz id")).expect_err("a space is refused");
-        let text = err.to_string();
-        assert!(text.contains("client_id"), "{text}");
-        assert!(!text.contains("zzMarkerzz"), "{text}");
+        let over = |bound: usize| format!("zzMarkerzz{}", "a".repeat(bound));
+        for (key, json) in [
+            ("client_credential", github_with("zzMarkerzz fee")),
+            ("client_id", x_with("zzMarkerzz id")),
+            (
+                "client_credential",
+                github_with(over(MAX_CLIENT_CREDENTIAL_BYTES)),
+            ),
+            ("client_id", x_with(over(MAX_CLIENT_ID_BYTES))),
+        ] {
+            let text = checked(&json)
+                .expect_err("each value is refused")
+                .to_string();
+            assert!(text.contains(key), "{text}");
+            assert!(!text.contains("zzMarkerzz"), "{text}");
+        }
     }
 }
 
@@ -205,34 +236,6 @@ mod origin {
     fn admits(members: &[Admitted], observed: &str) -> bool {
         Observed::stamped(observed)
             .is_some_and(|observed| members.iter().any(|m| m.admits(observed)))
-    }
-
-    /// What a policy source expression can name: letters, digits, `-` and
-    /// the `.` between labels, and nothing else.
-    #[test]
-    fn a_host_a_policy_cannot_name_is_known_for_one() {
-        for named in [
-            "https://lib.id",
-            "https://a-b.example:8443",
-            "http://localhost:3000",
-        ] {
-            assert!(
-                Origin::parse("T", named).unwrap().names_a_policy_host(),
-                "{named}"
-            );
-        }
-        for unnamed in [
-            "https://dev_box.example",
-            "https://[::1]:8787",
-            "http://127.0.0.1:8787",
-        ] {
-            let origin = Origin::parse("T", unnamed).unwrap();
-            assert_eq!(
-                origin.names_a_policy_host(),
-                !unnamed.contains('_') && !unnamed.contains('['),
-                "{unnamed}"
-            );
-        }
     }
 
     /// `parse` folds; `listed` refuses what is not already canonical and names
@@ -274,9 +277,8 @@ mod origin {
         }
     }
 
-    /// A host is an origin's host whatever bytes it carries. Only the CCDP
-    /// origin becomes a policy source, and `names_a_policy_host` is what
-    /// holds it to the alphabet a source expression can carry.
+    /// A host is an origin's host whatever bytes it carries, and the
+    /// canonical spelling is the one written.
     #[test]
     fn an_underscore_in_a_host_is_an_origin_like_any_other() {
         for spelling in [
@@ -287,10 +289,7 @@ mod origin {
         ] {
             let origin = Origin::parse("T", spelling)
                 .unwrap_or_else(|e| panic!("{spelling}: {e}"));
-            assert_eq!(
-                origin.names_a_policy_host(),
-                !spelling.contains(['_', ';', '\''])
-            );
+            assert_eq!(origin.as_str(), spelling);
         }
     }
 
@@ -429,11 +428,6 @@ mod origin {
             let observed = Observed::stamped(spelling)
                 .unwrap_or_else(|| panic!("{spelling} must be an observed origin"));
             assert!(member.admits(observed));
-            assert!(
-                !Origin::parse("CCDP_ORIGIN", spelling)
-                    .is_ok_and(|o| o.names_a_policy_host()),
-                "{spelling} must not name a policy host"
-            );
         }
     }
 

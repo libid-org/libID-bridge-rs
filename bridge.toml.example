@@ -50,7 +50,8 @@ allowed_app_origins = ["https://app.example", "https://wallet.example"]
 
 # The CCDP Distribution: the origin serving the Callback artifact, the list of
 # the platform ceremony versions it bundles, and everything the browser runs
-# after the callback. Omit for the canonical libID Distribution.
+# after the callback. Written in canonical form, as an exact origin above. Omit
+# for the canonical libID Distribution.
 ccdp_origin = "https://lib.id"
 
 

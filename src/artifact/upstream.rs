@@ -18,6 +18,7 @@ use http_body_util::{
 use hyper::{
     header,
     StatusCode,
+    Uri,
 };
 use hyper_util::{
     client::legacy::connect::HttpConnector,
@@ -31,9 +32,12 @@ use super::{
     DeploymentInputs,
     Published,
 };
-use crate::origin::{
-    Admitted,
-    Origin,
+use crate::{
+    error::Error,
+    origin::{
+        Admitted,
+        Origin,
+    },
 };
 
 /// The artifact's path under the CCDP origin.
@@ -168,18 +172,26 @@ enum Fetched {
 /// The Distribution this deployment retrieves its artifact from, parsed once
 /// at startup from the canonical CCDP origin.
 pub struct Upstream {
-    /// The origin as configured: what `compose` inserts and what the policy
-    /// admits a frame from.
+    /// The origin as configured: what `compose` inserts.
     origin: Origin,
     /// The artifact's absolute URL, built once.
-    url: String,
+    uri: Uri,
     /// The connections this deployment retrieves over.
     client: Client,
 }
 
 impl Upstream {
-    /// A canonical origin as something retrievable.
-    pub fn new(origin: &Origin) -> Upstream {
+    /// A canonical origin as something retrievable, its artifact URL checked
+    /// once as an HTTP request target: the URL standard admits a host holding
+    /// `"`, `` ` ``, `{` or `}`, and no request carries one.
+    pub fn new(origin: &Origin) -> Result<Upstream, Error> {
+        let uri = format!("{origin}{ARTIFACT_PATH}")
+            .parse::<Uri>()
+            .map_err(|e| Error::Config {
+                detail: format!(
+                    "CCDP_ORIGIN {origin} names a host no HTTP request can carry: {e}"
+                ),
+            })?;
         // The connector dials by URL, so `enforce_http` must be off for the
         // https wrapper to see an `https` one.
         let mut http = HttpConnector::new();
@@ -192,17 +204,17 @@ impl Upstream {
             .https_or_http()
             .enable_http1()
             .wrap_connector(http);
-        Upstream {
-            url: format!("{origin}{ARTIFACT_PATH}"),
+        Ok(Upstream {
+            uri,
             origin: origin.clone(),
             client: hyper_util::client::legacy::Client::builder(TokioExecutor::new())
                 .build(https),
-        }
+        })
     }
 
     /// The URL this bridge retrieves, for a log line or a failure message.
     pub fn url(&self) -> String {
-        self.url.clone()
+        self.uri.to_string()
     }
 
     /// One log line naming a document of this Distribution: its URL,
@@ -273,7 +285,7 @@ impl Upstream {
     fn request(&self, etag: Option<&str>) -> hyper::Request<Empty<Bytes>> {
         let mut request = hyper::Request::builder()
             .method(hyper::Method::GET)
-            .uri(&self.url)
+            .uri(self.uri.clone())
             .header(header::ACCEPT, "text/html")
             .header(header::ACCEPT_ENCODING, "identity")
             .header(
@@ -285,7 +297,7 @@ impl Upstream {
         }
         request
             .body(Empty::new())
-            .expect("a request built from a validated origin and fixed headers")
+            .expect("a request of a URI checked at startup and valid header values")
     }
 }
 

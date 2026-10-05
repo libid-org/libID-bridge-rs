@@ -25,6 +25,15 @@ use crate::{
     },
 };
 
+/// The longest `client_id` a platform entry carries, in bytes. The Application
+/// forwards it unchanged into CCDP's `ProveIdentity`, whose wire limits refuse
+/// a longer one, so every ceremony would fail on it.
+pub const MAX_CLIENT_ID_BYTES: usize = 512;
+
+/// The longest `client_credential` a platform entry carries, in bytes, under
+/// the same `ProveIdentity` wire limits.
+pub const MAX_CLIENT_CREDENTIAL_BYTES: usize = 512;
+
 /// The checked inputs of one deployment.
 pub struct Deployment {
     /// The CCDP Distribution this deployment selects.
@@ -42,7 +51,9 @@ impl Deployment {
     /// applied to the resolved configuration; the first rule broken is the
     /// error.
     pub fn checked(settings: &Settings) -> Result<Deployment> {
-        let ccdp_origin = ccdp_origin(&settings.ccdp_origin)?;
+        // Held to its spelling, as an exact allowlist member is, so the file
+        // states the origin published and inserted byte for byte.
+        let ccdp_origin = Origin::listed("CCDP_ORIGIN", &settings.ccdp_origin)?;
         // The resolved CCDP origin joins the admitted set once; an overridden
         // `CCDP_ORIGIN` does not keep `https://lib.id` admitted unless it is
         // listed. Membership is the literal spelling: the Callback asserts
@@ -120,18 +131,19 @@ pub struct PlatformProfile {
     /// Which platform: the key its entry is published under.
     pub id: PlatformId,
     /// The public OAuth client identifier: nonempty printable ASCII without
-    /// whitespace.
+    /// whitespace, at most [`MAX_CLIENT_ID_BYTES`].
     pub client_id: String,
     /// The OAuth App's client secret, on exactly the platforms whose ceremony
     /// sends one: public application configuration, nonempty printable ASCII
-    /// without whitespace.
+    /// without whitespace, at most [`MAX_CLIENT_CREDENTIAL_BYTES`].
     #[serde(default)]
     pub client_credential: Option<String>,
 }
 
 impl PlatformProfile {
     /// This table checked: a client id of nonempty printable ASCII without
-    /// whitespace, and a credential of the same exactly where the platform's
+    /// whitespace within [`MAX_CLIENT_ID_BYTES`], and a credential of the same
+    /// within [`MAX_CLIENT_CREDENTIAL_BYTES`] exactly where the platform's
     /// ceremony sends one. A refusal names the key as the file spells it,
     /// never the value.
     pub fn checked(self) -> Result<PlatformProfile> {
@@ -149,6 +161,11 @@ impl PlatformProfile {
                 "{id}'s client_id is not printable ASCII without whitespace"
             )));
         }
+        if self.client_id.len() > MAX_CLIENT_ID_BYTES {
+            return Err(refuse(format!(
+                "{id}'s client_id is longer than {MAX_CLIENT_ID_BYTES} bytes"
+            )));
+        }
         // A credential belongs to exactly the ceremonies that send one.
         match (id.sends_a_credential(), self.client_credential.as_deref()) {
             (false, Some(_)) => Err(refuse(format!(
@@ -164,6 +181,12 @@ impl PlatformProfile {
                 Err(refuse(format!(
                     "{id}'s client_credential is not printable ASCII without \
                      whitespace"
+                )))
+            }
+            (_, Some(credential)) if credential.len() > MAX_CLIENT_CREDENTIAL_BYTES => {
+                Err(refuse(format!(
+                    "{id}'s client_credential is longer than \
+                     {MAX_CLIENT_CREDENTIAL_BYTES} bytes"
                 )))
             }
             _ => Ok(self),
@@ -196,27 +219,6 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>>
 /// are made of.
 fn printable_without_whitespace(value: &str) -> bool {
     value.bytes().all(|b| (0x21..=0x7E).contains(&b))
-}
-
-/// The CCDP Distribution this deployment selects, in canonical form. A host a
-/// policy cannot name is refused: the callback document's policy names this
-/// origin as a `frame-src` source, and a browser discards a source whose
-/// grammar it cannot parse, leaving the document framing nothing. An IPv6
-/// literal and an underscore are both outside that grammar. The admitted
-/// application origins reach the document as escaped data rather than as
-/// policy, so they are not held to this.
-fn ccdp_origin(spelling: &str) -> Result<Origin> {
-    let origin = Origin::parse("CCDP_ORIGIN", spelling)?;
-    if !origin.names_a_policy_host() {
-        return Err(Error::Config {
-            detail: format!(
-                "CCDP_ORIGIN {spelling} names a host a Content-Security-Policy \
-                 cannot carry as a source, which admits letters, digits, `-` \
-                 and `.`; name the Distribution by a host made of those"
-            ),
-        });
-    }
-    Ok(origin)
 }
 
 /// The application allowlist admitted to read the configuration, each member

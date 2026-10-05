@@ -67,7 +67,8 @@ bytes. The configuration route is the one that refuses a query; the callback
 takes the provider's and ignores it.
 
 Any other path, `POST /api/v1/ceremony/github-token` included, is answered
-`404` with no CORS header.
+`404` with no CORS header. Any other method on the configuration or callback
+path, `HEAD` included, is a `405`.
 
 ### `GET /api/v1/ceremony/config`
 

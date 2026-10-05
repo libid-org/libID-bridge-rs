@@ -12,6 +12,7 @@ use crate::common::Distribution;
 use axum::{
     body::Body,
     http::{
+        header,
         Request,
         StatusCode,
     },
@@ -500,6 +501,30 @@ async fn config_refuses_the_preflight_of_an_origin_it_would_refuse() {
     }
 }
 
+/// The configuration route serves `GET` and its preflight: `HEAD` is refused
+/// like any other method, before the handler runs, so an admitted origin is
+/// granted nothing by it.
+#[tokio::test]
+async fn config_admits_only_get_and_its_preflight() {
+    let state = test_state().await;
+    for method in ["HEAD", "POST", "PUT"] {
+        let req = Request::builder()
+            .method(method)
+            .uri(routes::CONFIG_PATH)
+            .header("origin", APP_ORIGIN)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app(state.clone()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED, "{method}");
+        let h = resp.headers();
+        assert_eq!(h[header::ALLOW], "GET, OPTIONS", "{method}");
+        assert!(
+            h.get(header::ACCESS_CONTROL_ALLOW_ORIGIN).is_none(),
+            "{method}"
+        );
+    }
+}
+
 /// This bridge's own origin, sent as an `Origin`, is admitted exactly when
 /// it is listed as an application origin, like any other: the bridge does
 /// not know its own origin.
@@ -706,12 +731,27 @@ async fn the_callback_document_carries_the_exact_response_policy() {
     );
 }
 
-/// The callback document is a navigation target, and only that.
+/// The callback document is a navigation target, and only that: `HEAD` is
+/// refused like any other method, before the handler runs.
 #[tokio::test]
 async fn the_callback_document_admits_only_get() {
-    let req = Request::post("/auth/callback").body(Body::empty()).unwrap();
-    let resp = app(test_state().await).oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    let state = test_state().await;
+    for method in ["HEAD", "POST", "PUT"] {
+        let req = Request::builder()
+            .method(method)
+            .uri(routes::CALLBACK_PATH)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app(state.clone()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED, "{method}");
+        assert_eq!(resp.headers()[header::ALLOW], "GET", "{method}");
+    }
+    // The handler counts every request it answers.
+    let counted = state.metrics.rendered();
+    assert!(
+        !counted.contains("libid_bridge_callback_requests_total{"),
+        "{counted}"
+    );
 }
 
 /// One callback path; nothing else is routed.

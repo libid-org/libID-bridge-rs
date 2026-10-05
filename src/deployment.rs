@@ -25,6 +25,15 @@ use crate::{
     },
 };
 
+/// The longest `client_id` a platform entry carries, in bytes. The Application
+/// forwards it unchanged into CCDP's `ProveIdentity`, whose wire limits refuse
+/// a longer one, so every ceremony would fail on it.
+pub const MAX_CLIENT_ID_BYTES: usize = 512;
+
+/// The longest `client_credential` a platform entry carries, in bytes, under
+/// the same `ProveIdentity` wire limits.
+pub const MAX_CLIENT_CREDENTIAL_BYTES: usize = 512;
+
 /// The checked inputs of one deployment.
 pub struct Deployment {
     /// The CCDP Distribution this deployment selects.
@@ -122,18 +131,19 @@ pub struct PlatformProfile {
     /// Which platform: the key its entry is published under.
     pub id: PlatformId,
     /// The public OAuth client identifier: nonempty printable ASCII without
-    /// whitespace.
+    /// whitespace, at most [`MAX_CLIENT_ID_BYTES`].
     pub client_id: String,
     /// The OAuth App's client secret, on exactly the platforms whose ceremony
     /// sends one: public application configuration, nonempty printable ASCII
-    /// without whitespace.
+    /// without whitespace, at most [`MAX_CLIENT_CREDENTIAL_BYTES`].
     #[serde(default)]
     pub client_credential: Option<String>,
 }
 
 impl PlatformProfile {
     /// This table checked: a client id of nonempty printable ASCII without
-    /// whitespace, and a credential of the same exactly where the platform's
+    /// whitespace within [`MAX_CLIENT_ID_BYTES`], and a credential of the same
+    /// within [`MAX_CLIENT_CREDENTIAL_BYTES`] exactly where the platform's
     /// ceremony sends one. A refusal names the key as the file spells it,
     /// never the value.
     pub fn checked(self) -> Result<PlatformProfile> {
@@ -151,6 +161,11 @@ impl PlatformProfile {
                 "{id}'s client_id is not printable ASCII without whitespace"
             )));
         }
+        if self.client_id.len() > MAX_CLIENT_ID_BYTES {
+            return Err(refuse(format!(
+                "{id}'s client_id is longer than {MAX_CLIENT_ID_BYTES} bytes"
+            )));
+        }
         // A credential belongs to exactly the ceremonies that send one.
         match (id.sends_a_credential(), self.client_credential.as_deref()) {
             (false, Some(_)) => Err(refuse(format!(
@@ -166,6 +181,12 @@ impl PlatformProfile {
                 Err(refuse(format!(
                     "{id}'s client_credential is not printable ASCII without \
                      whitespace"
+                )))
+            }
+            (_, Some(credential)) if credential.len() > MAX_CLIENT_CREDENTIAL_BYTES => {
+                Err(refuse(format!(
+                    "{id}'s client_credential is longer than \
+                     {MAX_CLIENT_CREDENTIAL_BYTES} bytes"
                 )))
             }
             _ => Ok(self),

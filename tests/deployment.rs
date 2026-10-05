@@ -180,6 +180,31 @@ mod deployment {
         }
     }
 
+    /// A client id and a credential as long as CCDP's `ProveIdentity` carries
+    /// are accepted, and a byte longer is refused, naming the key.
+    #[test]
+    fn a_client_is_bounded_by_what_prove_identity_carries() {
+        let at_bound = json!([{
+            "id": "github",
+            "client_id": "a".repeat(MAX_CLIENT_ID_BYTES),
+            "client_credential": "c".repeat(MAX_CLIENT_CREDENTIAL_BYTES),
+        }])
+        .to_string();
+        let accepted = checked(&at_bound).unwrap();
+        assert_eq!(accepted[0].client_id.len(), MAX_CLIENT_ID_BYTES);
+
+        for (key, over) in [
+            ("client_id", x_with("a".repeat(MAX_CLIENT_ID_BYTES + 1))),
+            (
+                "client_credential",
+                github_with("c".repeat(MAX_CLIENT_CREDENTIAL_BYTES + 1)),
+            ),
+        ] {
+            let text = checked(&over).unwrap_err().to_string();
+            assert!(text.contains(key) && text.contains("longer than"), "{text}");
+        }
+    }
+
     /// A refusal names the key as the file spells it, never the value.
     #[test]
     fn a_refused_key_is_named_and_not_quoted() {

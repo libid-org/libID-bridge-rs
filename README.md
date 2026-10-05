@@ -84,9 +84,10 @@ Any other path, `POST /api/v1/ceremony/github-token` included, is answered
 A platform is present exactly when the configuration file enables it. Its
 entry is the one OAuth client every version of its ceremony runs: `clientId`
 and, on exactly the platforms whose ceremony sends one — GitHub —
-`clientCredential`. Both are nonempty printable ASCII without whitespace,
-checked at startup. The record carries no redirect URI, no allowlist, no
-notary setting and no user token.
+`clientCredential`. Both are nonempty printable ASCII without whitespace and
+at most 512 bytes, as CCDP's `ProveIdentity` carries them, checked at startup.
+The record carries no redirect URI, no allowlist, no notary setting and no
+user token.
 
 The record names no version. The Distribution publishes the platform
 ceremony versions it bundles at `{ccdpOrigin}/ccdp/versions.json`, and the

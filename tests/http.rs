@@ -12,6 +12,7 @@ use crate::common::Distribution;
 use axum::{
     body::Body,
     http::{
+        header,
         Request,
         StatusCode,
     },
@@ -500,6 +501,30 @@ async fn config_refuses_the_preflight_of_an_origin_it_would_refuse() {
     }
 }
 
+/// The configuration route serves `GET` and its preflight: `HEAD` is refused
+/// like any other method, before the handler runs, so an admitted origin is
+/// granted nothing by it.
+#[tokio::test]
+async fn config_admits_only_get_and_its_preflight() {
+    let state = test_state().await;
+    for method in ["HEAD", "POST", "PUT"] {
+        let req = Request::builder()
+            .method(method)
+            .uri(routes::CONFIG_PATH)
+            .header("origin", APP_ORIGIN)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app(state.clone()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED, "{method}");
+        let h = resp.headers();
+        assert_eq!(h[header::ALLOW], "GET, OPTIONS", "{method}");
+        assert!(
+            h.get(header::ACCESS_CONTROL_ALLOW_ORIGIN).is_none(),
+            "{method}"
+        );
+    }
+}
+
 /// This bridge's own origin, sent as an `Origin`, is admitted exactly when
 /// it is listed as an application origin, like any other: the bridge does
 /// not know its own origin.
@@ -532,6 +557,106 @@ async fn config_refuses_a_query_but_reads_the_origin_first() {
             .status(),
         StatusCode::FORBIDDEN
     );
+}
+
+/// A request body is refused like a query, after the origin is decided,
+/// whether its length is declared or it is chunked; an admitted caller can
+/// read the refusal.
+#[tokio::test]
+async fn config_refuses_a_request_body_but_reads_the_origin_first() {
+    let state = test_state().await;
+    for (name, value) in [("content-length", "2"), ("transfer-encoding", "chunked")] {
+        for (origin, status, allowed) in [
+            (APP_ORIGIN, StatusCode::BAD_REQUEST, Some(APP_ORIGIN)),
+            ("https://evil.example", StatusCode::FORBIDDEN, None),
+        ] {
+            let req = Request::get(routes::CONFIG_PATH)
+                .header("origin", origin)
+                .header(name, value)
+                .body(Body::from("{}"))
+                .unwrap();
+            let resp = app(state.clone()).oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), status, "{name} from {origin}");
+            let allow = resp.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN);
+            assert_eq!(
+                allow.map(|v| v.to_str().unwrap()),
+                allowed,
+                "{name} from {origin}"
+            );
+        }
+    }
+}
+
+/// A `Content-Length` of zero announces no body, so it is no reason to refuse.
+#[tokio::test]
+async fn a_declared_empty_body_is_no_body() {
+    let state = test_state().await;
+    for path in [routes::CONFIG_PATH, routes::CALLBACK_PATH] {
+        let req = Request::get(path)
+            .header("origin", APP_ORIGIN)
+            .header("content-length", "0")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app(state.clone()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{path}");
+    }
+}
+
+/// A body is refused for being there, whatever header framed it: one that
+/// arrives with neither a length nor an encoding is refused too.
+#[tokio::test]
+async fn an_unframed_request_body_is_refused() {
+    let state = test_state().await;
+    for path in [routes::CONFIG_PATH, routes::CALLBACK_PATH] {
+        let req = Request::get(path)
+            .header("origin", APP_ORIGIN)
+            .body(Body::from("{}"))
+            .unwrap();
+        let resp = app(state.clone()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{path}");
+    }
+}
+
+/// Over HTTP/1, a body framed by a length or by chunked encoding, an empty
+/// chunked one included, reaches both routes as a body; a zero length does
+/// not.
+#[tokio::test]
+async fn http1_framing_decides_whether_a_body_is_carried() {
+    use tokio::io::{
+        AsyncReadExt,
+        AsyncWriteExt,
+    };
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = app(test_state().await);
+    tokio::spawn(async move { axum::serve(listener, router).await });
+
+    for path in [routes::CONFIG_PATH, routes::CALLBACK_PATH] {
+        for (framing, status) in [
+            ("content-length: 2\r\n\r\n{}", "400"),
+            (
+                "transfer-encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n",
+                "400",
+            ),
+            ("transfer-encoding: chunked\r\n\r\n0\r\n\r\n", "400"),
+            ("content-length: 0\r\n\r\n", "200"),
+        ] {
+            let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+            let request = format!(
+                "GET {path} HTTP/1.1\r\nhost: bridge\r\norigin: {APP_ORIGIN}\r\n\
+                 connection: close\r\n{framing}"
+            );
+            socket.write_all(request.as_bytes()).await.unwrap();
+            let mut answer = Vec::new();
+            socket.read_to_end(&mut answer).await.unwrap();
+            let answer = String::from_utf8_lossy(&answer);
+            assert!(
+                answer.starts_with(&format!("HTTP/1.1 {status} ")),
+                "{path} {framing:?}: {answer}"
+            );
+        }
+    }
 }
 
 /// A path this bridge does not serve is a `404` with no CORS header, whatever
@@ -705,12 +830,48 @@ async fn the_callback_document_carries_the_exact_response_policy() {
     );
 }
 
-/// The callback document is a navigation target, and only that.
+/// The callback document is a navigation target, and only that: `HEAD` is
+/// refused like any other method, before the handler runs.
 #[tokio::test]
 async fn the_callback_document_admits_only_get() {
-    let req = Request::post("/auth/callback").body(Body::empty()).unwrap();
-    let resp = app(test_state().await).oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    let state = test_state().await;
+    for method in ["HEAD", "POST", "PUT"] {
+        let req = Request::builder()
+            .method(method)
+            .uri(routes::CALLBACK_PATH)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app(state.clone()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED, "{method}");
+        assert_eq!(resp.headers()[header::ALLOW], "GET", "{method}");
+    }
+    // The handler counts every request it answers.
+    let counted = state.metrics.rendered();
+    assert!(
+        !counted.contains("libid_bridge_callback_requests_total{"),
+        "{counted}"
+    );
+}
+
+/// A callback request carrying a body is refused before the document is
+/// looked at, whether its length is declared or it is chunked.
+#[tokio::test]
+async fn the_callback_refuses_a_request_body() {
+    let state = test_state().await;
+    for (name, value) in [("content-length", "2"), ("transfer-encoding", "chunked")] {
+        let req = Request::get("/auth/callback?code=abc&state=v1.9e1f")
+            .header(name, value)
+            .body(Body::from("{}"))
+            .unwrap();
+        let resp = app(state.clone()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{name}");
+    }
+    // The handler counts every document and every unavailable answer.
+    let counted = state.metrics.rendered();
+    assert!(
+        !counted.contains("libid_bridge_callback_requests_total{"),
+        "{counted}"
+    );
 }
 
 /// One callback path; nothing else is routed.

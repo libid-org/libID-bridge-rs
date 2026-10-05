@@ -12,7 +12,9 @@
 //! the one origin allowed, and answers on `OPTIONS` the preflight a
 //! caller sending its own header needs. The callback carries no CORS: it is a
 //! top-level navigation. No other path is served, and no route performs a
-//! token exchange or opens a notary connection.
+//! token exchange or opens a notary connection. Any other method on either
+//! ceremony route, `HEAD` included, is a `405` naming the methods it serves,
+//! and a request carrying a body is a `400`.
 
 pub mod callback;
 pub mod config;
@@ -20,6 +22,10 @@ pub mod config;
 use std::sync::Arc;
 
 use axum::{
+    body::{
+        Body,
+        HttpBody as _,
+    },
     http::{
         header,
         HeaderValue,
@@ -29,7 +35,10 @@ use axum::{
         IntoResponse,
         Response,
     },
-    routing::get,
+    routing::{
+        get,
+        MethodRouter,
+    },
     Router,
 };
 
@@ -57,6 +66,13 @@ impl<'a> Origins<'a> {
             (None, _) => Origins::Absent,
         }
     }
+}
+
+/// Whether a request carries a body: whether its body stream is still open
+/// after the head, as any `Transfer-Encoding` or a `Content-Length` above zero
+/// leaves it over HTTP/1. Neither ceremony route takes one.
+pub fn carries_body(body: &Body) -> bool {
+    !body.is_end_stream()
 }
 
 /// `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, put on
@@ -100,6 +116,19 @@ async fn unrouted() -> Response {
     (StatusCode::NOT_FOUND, "").into_response()
 }
 
+/// `route`, answering every method it does not name with a `405` whose
+/// `Allow` is `allow`. axum's `get` answers `HEAD` by running the `GET`
+/// handler, so `HEAD` is refused explicitly.
+fn refusing_other_methods(
+    route: MethodRouter<Arc<AppState>>,
+    allow: &'static str,
+) -> MethodRouter<Arc<AppState>> {
+    let refuse = move || async move {
+        (StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, allow)]).into_response()
+    };
+    route.head(refuse).fallback(refuse)
+}
+
 /// The liveness probe.
 pub const HEALTH_PATH: &str = "/health";
 /// What this deployment counts.
@@ -114,8 +143,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route(HEALTH_PATH, get(health))
         .route(METRICS_PATH, get(metrics))
-        .route(CONFIG_PATH, get(config::config).options(config::preflight))
-        .route(CALLBACK_PATH, get(callback::callback))
+        .route(
+            CONFIG_PATH,
+            refusing_other_methods(
+                get(config::config).options(config::preflight),
+                "GET, OPTIONS",
+            ),
+        )
+        .route(
+            CALLBACK_PATH,
+            refusing_other_methods(get(callback::callback), "GET"),
+        )
         .fallback(unrouted)
         .layer(axum::middleware::map_response(standing_headers))
         .with_state(state)

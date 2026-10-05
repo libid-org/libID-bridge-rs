@@ -42,7 +42,9 @@ impl Deployment {
     /// applied to the resolved configuration; the first rule broken is the
     /// error.
     pub fn checked(settings: &Settings) -> Result<Deployment> {
-        let ccdp_origin = ccdp_origin(&settings.ccdp_origin)?;
+        // Held to its spelling, as an exact allowlist member is, so the file
+        // states the origin published and inserted byte for byte.
+        let ccdp_origin = Origin::listed("CCDP_ORIGIN", &settings.ccdp_origin)?;
         // The resolved CCDP origin joins the admitted set once; an overridden
         // `CCDP_ORIGIN` does not keep `https://lib.id` admitted unless it is
         // listed. Membership is the literal spelling: the Callback asserts
@@ -196,11 +198,6 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>>
 /// are made of.
 fn printable_without_whitespace(value: &str) -> bool {
     value.bytes().all(|b| (0x21..=0x7E).contains(&b))
-}
-
-/// The CCDP Distribution this deployment selects, in canonical form.
-fn ccdp_origin(spelling: &str) -> Result<Origin> {
-    Origin::parse("CCDP_ORIGIN", spelling)
 }
 
 /// The application allowlist admitted to read the configuration, each member

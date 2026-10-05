@@ -165,6 +165,25 @@ mod root {
         }
     }
 
+    /// The CCDP origin is read as written, as an exact member is: a spelling
+    /// that is not canonical stops the process, naming the one to write,
+    /// rather than being folded into it.
+    #[tokio::test]
+    async fn a_noncanonical_ccdp_origin_is_refused_rather_than_folded() {
+        for spelling in [
+            "https://Dist.example",
+            "https://dist.example/",
+            "https://dist.example:443",
+        ] {
+            let err = Bridge::start(&common::config(&["--ccdp-origin", spelling]))
+                .err()
+                .unwrap_or_else(|| panic!("{spelling} is not canonical"));
+            let text = err.to_string();
+            assert!(text.contains("CCDP_ORIGIN"), "{text}");
+            assert!(text.contains("write it as https://dist.example"), "{text}");
+        }
+    }
+
     /// A member the operator did not mean to write is refused rather than
     /// skipped.
     #[tokio::test]

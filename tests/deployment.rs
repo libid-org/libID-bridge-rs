@@ -810,3 +810,126 @@ mod config {
         }
     }
 }
+
+mod telegram {
+    use libid_bridge_rs::{
+        config::Settings,
+        deployment::{
+            Deployment,
+            TelegramClient,
+        },
+    };
+
+    use crate::common::{
+        ScratchFile,
+        TELEGRAM_SECRET,
+    };
+
+    /// A file enabling telegram, with `table` as its `[telegram]` table.
+    fn file(table: &str) -> String {
+        format!(
+            "allowed_app_origins = [\"https://app.example\"]\n\
+             [[platforms]]\nid = \"telegram\"\nclient_id = \"8123456789\"\n{table}"
+        )
+    }
+
+    fn table(secret_file: &std::path::Path, rest: &str) -> String {
+        format!(
+            "[telegram]\nclient_secret_file = {:?}\n\
+             redirect_uri = \"https://bridge.example/auth/callback\"\n{rest}",
+            secret_file.display().to_string()
+        )
+    }
+
+    /// The Telegram client a file describes, checked as startup checks it.
+    fn started(toml: &str) -> Result<Option<TelegramClient>, String> {
+        let file = ScratchFile::holding(toml);
+        let settings = Settings::read(file.path()).map_err(|e| e.to_string())?;
+        Deployment::checked(&settings)
+            .map(|d| d.telegram)
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn a_telegram_table_reads_its_secret_from_a_file_and_defaults_the_endpoint() {
+        let secret = ScratchFile::holding(&format!("{TELEGRAM_SECRET}\r\n"));
+        let client = started(&file(&table(secret.path(), "")))
+            .unwrap()
+            .expect("telegram is enabled");
+        assert_eq!(client.client_secret.expose(), TELEGRAM_SECRET);
+        assert_eq!(client.client_id, "8123456789");
+        assert_eq!(
+            client.token_url.as_str(),
+            "https://oauth.telegram.org/token"
+        );
+        assert_eq!(client.redirect_uri, "https://bridge.example/auth/callback");
+    }
+
+    #[test]
+    fn telegram_without_its_secret_stops_startup_naming_the_setting() {
+        let missing = std::env::temp_dir().join("libid-no-such-secret");
+        let empty = ScratchFile::holding("\n");
+        let spaced = ScratchFile::holding("two words\n");
+        let doubled = ScratchFile::holding(&format!("{TELEGRAM_SECRET}\n\n"));
+        for toml in [
+            file(""),
+            file("[telegram]\nredirect_uri = \"https://bridge.example/auth/callback\"\n"),
+            file(&table(&missing, "")),
+            file(&table(empty.path(), "")),
+            file(&table(spaced.path(), "")),
+            file(&table(doubled.path(), "")),
+        ] {
+            let err = started(&toml).expect_err("no usable secret");
+            assert!(err.contains("client_secret_file"), "{toml}\n{err}");
+            assert!(!err.contains(TELEGRAM_SECRET), "{err}");
+        }
+    }
+
+    #[test]
+    fn the_redirect_uri_and_the_endpoint_are_https() {
+        let secret = ScratchFile::holding(TELEGRAM_SECRET);
+        let path = secret.path();
+        let plain_redirect = format!(
+            "[telegram]\nclient_secret_file = {:?}\n\
+             redirect_uri = \"http://bridge.example/auth/callback\"\n",
+            path.display().to_string()
+        );
+        let err = started(&file(&plain_redirect)).expect_err("plaintext redirect");
+        assert!(err.contains("redirect_uri"), "{err}");
+
+        let err = started(&file(&table(
+            path,
+            "token_url = \"http://oauth.telegram.org/token\"\n",
+        )))
+        .expect_err("plaintext endpoint off loopback");
+        assert!(err.contains("token_url"), "{err}");
+
+        started(&file(&table(
+            path,
+            "token_url = \"http://127.0.0.1:9/token\"\n",
+        )))
+        .expect("a loopback endpoint");
+    }
+
+    #[test]
+    fn a_secret_belongs_to_telegram_alone() {
+        let secret = ScratchFile::holding(TELEGRAM_SECRET);
+        // A platform table has no such key.
+        let err = started(&format!(
+            "allowed_app_origins = [\"https://app.example\"]\n\
+             [[platforms]]\nid = \"x\"\nclient_id = \"a\"\nclient_secret_file = {:?}\n",
+            secret.path().display().to_string()
+        ))
+        .expect_err("a secret on an x table");
+        assert!(err.contains("`client_secret_file`"), "{err}");
+
+        // A [telegram] table without telegram enabled.
+        let err = started(&format!(
+            "allowed_app_origins = [\"https://app.example\"]\n\
+             [[platforms]]\nid = \"x\"\nclient_id = \"a\"\n{}",
+            table(secret.path(), "")
+        ))
+        .expect_err("a telegram table with no telegram platform");
+        assert!(err.contains("[telegram]"), "{err}");
+    }
+}

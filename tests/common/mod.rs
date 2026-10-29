@@ -367,3 +367,139 @@ pub async fn state(args: &[&str]) -> Arc<AppState> {
         .expect("the fixture Distribution answers the artifact");
     bridge.state
 }
+
+/// What the fake Telegram token endpoint answers with.
+#[derive(Clone)]
+pub enum TokenReply {
+    /// A status, a body and, for a redirect, a `Location`.
+    Answer {
+        /// The status line.
+        status: StatusCode,
+        /// The body, sent as `application/json`.
+        body: String,
+    },
+    /// Nothing: the request is read and never answered.
+    Silent,
+}
+
+impl TokenReply {
+    /// `status` with `body`.
+    pub fn with(status: u16, body: &str) -> TokenReply {
+        TokenReply::Answer {
+            status: StatusCode::from_u16(status).unwrap(),
+            body: body.to_owned(),
+        }
+    }
+}
+
+/// One request the fake token endpoint saw.
+#[derive(Clone)]
+pub struct SeenSwap {
+    /// The method.
+    pub method: hyper::Method,
+    /// The headers.
+    pub headers: HeaderMap,
+    /// The body.
+    pub body: bytes::Bytes,
+}
+
+/// A Telegram token endpoint, on loopback and in plaintext, served on
+/// [`runtime`] at `/token`.
+pub struct FakeTelegram {
+    url: String,
+    seen: Arc<Mutex<Vec<SeenSwap>>>,
+    reply: Arc<Mutex<TokenReply>>,
+}
+
+impl FakeTelegram {
+    /// A token endpoint answering every request with `reply`.
+    pub fn serving(reply: TokenReply) -> FakeTelegram {
+        let seen: Arc<Mutex<Vec<SeenSwap>>> = Arc::default();
+        let reply = Arc::new(Mutex::new(reply));
+        let router = Router::new()
+            .route("/token", axum::routing::any(token))
+            .with_state((seen.clone(), reply.clone()));
+        let (bound, address) = std::sync::mpsc::channel();
+        runtime().spawn(async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let _ = bound.send(listener.local_addr().unwrap());
+            let _ = axum::serve(listener, router).await;
+        });
+        let url = format!("http://{}/token", address.recv().unwrap());
+        FakeTelegram { url, seen, reply }
+    }
+
+    /// Its token URL, as a `[telegram]` table's `token_url`.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Answer every request from now on with this.
+    pub fn now_serves(&self, reply: TokenReply) {
+        *self.reply.lock().unwrap() = reply;
+    }
+
+    /// Every request seen so far, in order.
+    pub fn requests(&self) -> Vec<SeenSwap> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+/// What the fake token endpoint records and answers from.
+type TokenState = (Arc<Mutex<Vec<SeenSwap>>>, Arc<Mutex<TokenReply>>);
+
+async fn token(
+    State((seen, reply)): State<TokenState>,
+    method: hyper::Method,
+    headers: HeaderMap,
+    body: bytes::Bytes,
+) -> axum::response::Response {
+    seen.lock().unwrap().push(SeenSwap {
+        method,
+        headers,
+        body,
+    });
+    let reply = reply.lock().unwrap().clone();
+    match reply {
+        TokenReply::Answer { status, body } => {
+            let mut response = axum::response::Response::builder()
+                .status(status)
+                .header(header::CONTENT_TYPE, "application/json");
+            if status.is_redirection() {
+                response =
+                    response.header(header::LOCATION, "https://elsewhere.example/");
+            }
+            response.body(axum::body::Body::from(body)).unwrap()
+        }
+        TokenReply::Silent => std::future::pending().await,
+    }
+}
+
+/// The client id every fixture deployment enables Telegram with.
+pub const TELEGRAM_CLIENT_ID: &str = "8123456789";
+
+/// The private client secret every fixture deployment swaps Telegram codes
+/// with: a marker no response, debug rendering or log line may carry.
+pub const TELEGRAM_SECRET: &str = "SECRET-MARKER-7f3a";
+
+/// The redirect URI every fixture deployment swaps Telegram codes for.
+pub const TELEGRAM_REDIRECT_URI: &str = "https://bridge.example/auth/callback";
+
+/// A deployment from [`config`] enabling GitHub and Telegram, its token URL
+/// `token_url`, with the secret in a file that lives as long as the result.
+pub fn telegram_config(token_url: &str) -> (config::Settings, ScratchFile) {
+    let secret = ScratchFile::holding(&format!("{TELEGRAM_SECRET}\n"));
+    let mut settings = config(&[
+        "--platforms",
+        &format!(
+            r#"[{{"id":"github","client_id":"{CLIENT_ID}","client_credential":"{CLIENT_CREDENTIAL}"}},
+                {{"id":"telegram","client_id":"{TELEGRAM_CLIENT_ID}"}}]"#
+        ),
+    ]);
+    settings.telegram = Some(libid_bridge_rs::deployment::TelegramSettings {
+        client_secret_file: secret.path().to_owned(),
+        redirect_uri: TELEGRAM_REDIRECT_URI.to_owned(),
+        token_url: token_url.to_owned(),
+    });
+    (settings, secret)
+}

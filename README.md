@@ -6,10 +6,13 @@ A platform ceremony runs in the browser: it opens the provider, consumes the
 redirect against its own live state, exchanges the code where its ceremony
 takes a token, notarizes what it needs, and builds the proof. This service
 publishes the configuration an application starts from and serves the one
-callback document the providers redirect back to. It performs no token
-exchange and opens no notary connection. GitHub's exchange, which GitHub
-answers only with the App's `client_secret`, runs in the browser too; the
-bridge publishes that value as public application configuration.
+callback document the providers redirect back to. It opens no notary
+connection. GitHub's exchange, which GitHub answers only with the App's
+`client_secret`, runs in the browser too; the bridge publishes that value as
+public application configuration. Telegram's token endpoint answers no CORS,
+so where Telegram is enabled the bridge swaps the browser's code there with
+Telegram's private client secret and returns the answer untouched: the one
+token exchange it performs and the one secret it holds.
 
 It keeps no ceremony state, no session, no challenge and no result. A timeout,
 a duplicate request, a restart or a lost response leave no record here, and
@@ -33,12 +36,17 @@ gas, keeps no database, and talks to no chain.
 3. Everything after that runs in the browser on the Distribution's code: the
    token exchange, the notarized sessions, the proof. GitHub's token request
    carries the published credential as `client_secret` and is revealed whole.
-   This service sees none of it and verifies nothing.
+   Telegram's code is the exception: the browser posts it, with its PKCE
+   verifier, to `POST /api/v1/ceremony/telegram/token`, and this service swaps
+   it with the private client secret and returns Telegram's answer untouched.
+   Beyond that it sees none of it and verifies nothing.
 
 ## Trust model
 
 **The notary is the only trust root.** This service signs nothing and holds
-no key and no secret: the single signature in a proof is the notary's.
+no key: the single signature in a proof is the notary's. Its one secret is
+Telegram's client secret, which identifies the client to Telegram and proves
+nothing about a user.
 
 GitHub's `client_secret` is published on purpose. GitHub requires it in every
 token request, PKCE or not, so a browser client has to carry it; libID treats
@@ -60,6 +68,7 @@ out; origin checks and a closed input surface cannot constrain its owner.
 | `GET` | `/metrics` | What this deployment counts, in the Prometheus text exposition format. Not one of the contract's routes. |
 | `GET`, `OPTIONS` | `/api/v1/ceremony/config` | The public ceremony configuration: `{ ccdpOrigin, platforms }`. Readable from an admitted origin, or by a same-origin `GET` without `Origin` on `Sec-Fetch-Site: same-origin`. `403` for any other origin, `400` for a query or a request body. `OPTIONS` answers the preflight a caller sending its own header needs, by the same admission rule: `GET`, the headers asked for, no credentials. |
 | `GET` | `/auth/callback` | The registered OAuth callback document: the CCDP Distribution's artifact with this deployment's data inserted, identical for every request. |
+| `POST`, `OPTIONS` | `/api/v1/ceremony/telegram/token` | Served only where Telegram is enabled. Takes `{"code", "codeVerifier"}` as `application/json` (at most 2048 bytes; code 1 to 512 printable ASCII; verifier per RFC 7636) from an admitted origin, posts it to Telegram's token endpoint with `redirect_uri`, `client_id` and `client_secret` (`client_secret_post`), and answers with Telegram's status and body. `403` for another origin, `400` for a query or a malformed body, `502` when Telegram does not answer within 10 s, redirects, or answers more than 8 KiB. |
 
 `/health` is not one of the contract's two routes. The published image's
 `HEALTHCHECK` targets it; it reads nothing from the request and answers two
@@ -211,7 +220,7 @@ client_credential = "…"
 An unknown key is refused at startup, `host` and `port` among them: where the
 process listens is set with `HOST`/`PORT` or `--host`/`--port`. The platforms
 are set only in the file, one `[[platforms]]` table per enabled platform: its
-`id` (`github`, `google` or `x`), its public `client_id` and, for `github`,
+`id` (`github`, `google`, `telegram` or `x`), its public `client_id` and, for `github`,
 the App's client secret as `client_credential`, which the bridge publishes.
 That is the platform's one OAuth registration, and every version of its
 ceremony the Distribution bundles runs it; the versions themselves are not
@@ -225,6 +234,7 @@ credential.
 | `allowed_app_origins` | — | *(required)* | The application allowlist. A member is an exact origin, an origin pattern or `*`, as described below. A repeated spelling is refused; a pattern and an origin it covers are two members. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once and by its literal spelling. It is the one admission rule: the configuration route admits exactly one `Origin` that a member admits, and echoes that origin itself; the callback document is told the same set. A same-origin read carries no `Origin` and is admitted on `Sec-Fetch-Site: same-origin` alone. |
 | `ccdp_origin` | — | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/callback.html`, `/ccdp/versions.json` and everything the browser runs after the callback, HTTPS, or HTTP on `localhost` or `127.0.0.1`. Written already canonical, as an exact origin is: any other spelling is refused, naming the canonical one. Published in the configuration and inserted into the callback document. Omitting it selects the canonical libID Distribution. |
 | `platforms` | — | *(required)* | The enabled platforms, as `[[platforms]]` tables: `id`, `client_id` and, for `github`, its `client_credential`. |
+| `telegram` | — | *(none)* | Required exactly when `telegram` is enabled: `client_secret_file` (a file holding the private client secret, one trailing newline ignored), `redirect_uri` (HTTPS, the callback registered with Telegram) and `token_url` (default `https://oauth.telegram.org/token`; HTTPS, or HTTP on `localhost` or `127.0.0.1`). |
 | — | `LIBID_CONFIG`, `--config` | *(none)* | Path to the configuration file. |
 
 ### Allowlist members
@@ -274,6 +284,9 @@ GitHub's entry carries the App's client secret as the public
 identity evidence is a signed ID Token the browser reads out of the redirect
 fragment: neither entry carries a credential, and nothing here takes part in
 either ceremony beyond the configuration and the callback document.
+Telegram's entry carries only its client id. Its secret stays in the file
+`client_secret_file` names, and the bridge sends it to Telegram in each code
+swap; the browser never sees it.
 
 ## Running with Docker
 

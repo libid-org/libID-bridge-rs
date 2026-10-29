@@ -239,3 +239,50 @@ fn a_run_with_no_configuration_file_names_it() {
     assert!(stderr.contains("LIBID_CONFIG"), "{stderr}");
     assert!(!stderr.contains("[[platforms]]"), "{stderr}");
 }
+
+/// A Telegram swap, answered or not, leaves the private secret in neither
+/// output stream of the binary.
+#[test]
+fn the_telegram_secret_reaches_no_log_line() {
+    let fake = crate::common::FakeTelegram::serving(crate::common::TokenReply::with(
+        200,
+        r#"{"access_token":"at","id_token":"eyJ.eyJ.sig"}"#,
+    ));
+    let secret = ScratchFile::holding(&format!("{}\n", crate::common::TELEGRAM_SECRET));
+    let config = config_file(&format!(
+        "[[platforms]]\nid = \"telegram\"\nclient_id = \"8123456789\"\n\
+         [telegram]\nclient_secret_file = {:?}\n\
+         redirect_uri = \"https://bridge.example/auth/callback\"\n\
+         token_url = {:?}\n",
+        secret.path().display().to_string(),
+        fake.url(),
+    ));
+    let mut bridge = Started::on(config.path());
+    let swap = (
+        "/api/v1/ceremony/telegram/token",
+        r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"iMSTNh6gQkRnBGlY1c0MUOsD7MCO4G8C7ph1_gIZs5I"}"#,
+    );
+    let headers = [
+        ("origin", "https://app.example"),
+        ("content-type", "application/json"),
+    ];
+
+    let (status, body) = bridge.request("POST", swap.0, &headers, swap.1);
+    assert_eq!(status, 200, "{body}");
+    // An answer this bridge does not pass on is logged.
+    fake.now_serves(crate::common::TokenReply::with(302, ""));
+    let (status, body) = bridge.request("POST", swap.0, &headers, swap.1);
+    assert_eq!(status, 502, "{body}");
+    assert_eq!(fake.requests().len(), 2);
+
+    let mut errors = bridge.child.stderr.take().unwrap();
+    let (exit, stdout) = bridge.interrupted();
+    let mut stderr = String::new();
+    errors.read_to_string(&mut stderr).unwrap();
+    assert!(exit.success(), "{exit}");
+    assert!(stdout.contains("Telegram's token endpoint"), "{stdout}");
+    for stream in [&stdout, &stderr] {
+        assert!(!stream.contains(crate::common::TELEGRAM_SECRET), "{stream}");
+        assert!(!stream.contains("6b7f2c1d9e4a8035"), "{stream}");
+    }
+}

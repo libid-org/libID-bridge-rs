@@ -75,3 +75,22 @@ client_credential = "0123456789abcdef0123456789abcdef01234567"
 # [[platforms]]
 # id = "x"
 # client_id = "XXXXXXXXXXXXXXXXXXXXXXXXXX"
+
+# Telegram runs a confidential OIDC client. Its token endpoint answers no
+# CORS, so the bridge swaps the browser's code at POST
+# /api/v1/ceremony/telegram/token with the client secret and returns
+# Telegram's answer untouched. The client id is published like any other; the
+# secret is not, and is never written in this file: client_secret_file names a
+# file holding it (one trailing newline is ignored), read once at startup.
+# redirect_uri is the callback registered with Telegram, the same one the
+# authorization request names. token_url defaults to Telegram's endpoint. A
+# [telegram] table is required exactly when a telegram platform is enabled.
+#
+# [[platforms]]
+# id = "telegram"
+# client_id = "8123456789"
+#
+# [telegram]
+# client_secret_file = "/run/secrets/telegram-client-secret"
+# redirect_uri = "https://bridge.example/auth/callback"
+# token_url = "https://oauth.telegram.org/token"

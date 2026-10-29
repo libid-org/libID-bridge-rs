@@ -4,6 +4,8 @@
 //! - `GET  /metrics`
 //! - `GET`, `OPTIONS` `/api/v1/ceremony/config`
 //! - `GET  /auth/callback`
+//! - `POST`, `OPTIONS` `/api/v1/ceremony/telegram/token`, where Telegram is
+//!   enabled
 //!
 //! Everything the browser runs is served by the CCDP Distribution at the
 //! configured `ccdpOrigin`. The configuration route admits exactly one
@@ -11,13 +13,16 @@
 //! `allowedAppOrigins ∪ {ccdpOrigin}` admits, echoes that origin itself as
 //! the one origin allowed, and answers on `OPTIONS` the preflight a
 //! caller sending its own header needs. The callback carries no CORS: it is a
-//! top-level navigation. No other path is served, and no route performs a
-//! token exchange or opens a notary connection. Any other method on either
-//! ceremony route, `HEAD` included, is a `405` naming the methods it serves,
-//! and a request carrying a body is a `400`.
+//! top-level navigation. The Telegram route admits by the same rule and swaps
+//! a code at Telegram's token endpoint, the one exchange this service
+//! performs. No other path is served, and no route opens a notary
+//! connection. Any other method on a ceremony route, `HEAD` included, is a
+//! `405` naming the methods it serves, and a body on the configuration or
+//! callback route is a `400`.
 
 pub mod callback;
 pub mod config;
+pub mod telegram;
 
 use std::sync::Arc;
 
@@ -39,6 +44,7 @@ use axum::{
     },
     routing::{
         get,
+        post,
         MethodRouter,
     },
     Json,
@@ -257,10 +263,13 @@ pub const METRICS_PATH: &str = "/metrics";
 pub const CALLBACK_PATH: &str = "/auth/callback";
 /// The public ceremony configuration.
 pub const CONFIG_PATH: &str = "/api/v1/ceremony/config";
+/// Telegram's code swap.
+pub const TELEGRAM_TOKEN_PATH: &str = "/api/v1/ceremony/telegram/token";
 
-/// The route table: the same routes for every deployment.
+/// The route table: the same routes for every deployment, and Telegram's code
+/// swap where Telegram is enabled.
 pub fn build_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route(HEALTH_PATH, get(health))
         .route(METRICS_PATH, get(metrics))
         .route(
@@ -273,7 +282,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             CALLBACK_PATH,
             refusing_other_methods(get(callback::callback), "GET"),
-        )
+        );
+    if state.telegram.is_some() {
+        router = router.route(
+            TELEGRAM_TOKEN_PATH,
+            refusing_other_methods(
+                post(telegram::token).options(telegram::preflight),
+                "POST, OPTIONS",
+            ),
+        );
+    }
+    router
         .fallback(unrouted)
         .layer(axum::middleware::map_response(standing_headers))
         .with_state(state)

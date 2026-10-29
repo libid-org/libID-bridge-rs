@@ -15,8 +15,8 @@
 //! caller sending its own header needs. The callback carries no CORS: it is a
 //! top-level navigation. The Telegram routes admit by the same rule: one
 //! swaps a code at Telegram's token endpoint, the one exchange this service
-//! performs, and one passes Telegram's key list through. No other path is served, and no route opens a notary
-//! connection. Any other method on a ceremony route, `HEAD` included, is a
+//! performs, and one passes Telegram's key list through. No other path is
+//! served, and no route opens a notary connection. Any other method on a ceremony route, `HEAD` included, is a
 //! `405` naming the methods it serves, and a body on the configuration or
 //! callback route is a `400`.
 
@@ -88,6 +88,20 @@ pub fn carries_body(body: &Body) -> bool {
     !body.is_end_stream()
 }
 
+/// Why a `GET` on a gated route is malformed, if it is: a query, then a body.
+pub(crate) fn bodiless_get_refusal(
+    query: Option<&str>,
+    body: &Body,
+) -> Option<&'static str> {
+    if query.is_some_and(|q| !q.is_empty()) {
+        Some("this route takes no query")
+    } else if carries_body(body) {
+        Some("this route takes no request body")
+    } else {
+        None
+    }
+}
+
 /// What `Vary` names, on every response a gated route writes: `Origin` and
 /// `Sec-Fetch-Site` decide the body, on refusals too.
 pub(crate) const VARY_ON: &str = "origin, sec-fetch-site";
@@ -112,6 +126,16 @@ pub(crate) enum Admission {
     /// No `Origin`: a same-origin browser request carrying none, on
     /// `Sec-Fetch-Site: same-origin`. It needs no CORS header.
     SameOrigin,
+}
+
+impl Admission {
+    /// The allow-origin a response to this admission carries, if any.
+    pub(crate) fn allow_origin(self) -> Option<HeaderValue> {
+        match self {
+            Admission::Listed(origin) => Some(origin),
+            Admission::SameOrigin => None,
+        }
+    }
 }
 
 /// How this request is admitted to a gated route, or `None`.

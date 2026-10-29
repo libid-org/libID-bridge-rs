@@ -26,8 +26,8 @@ use axum::{
 
 use super::{
     admission,
+    bodiless_get_refusal,
     refuse,
-    Admission,
     VARY_ON,
 };
 use crate::state::AppState;
@@ -65,18 +65,8 @@ pub async fn config(
         return refuse(StatusCode::FORBIDDEN, UNADMITTED, None);
     };
 
-    let malformed = if query.is_some_and(|q| !q.is_empty()) {
-        Some("this route takes no query")
-    } else if crate::routes::carries_body(&body) {
-        Some("this route takes no request body")
-    } else {
-        None
-    };
-    if let Some(message) = malformed {
-        let admitted = match &admission {
-            Admission::Listed(origin) => Some(origin.clone()),
-            Admission::SameOrigin => None,
-        };
+    let admitted = admission.allow_origin();
+    if let Some(message) = bodiless_get_refusal(query.as_deref(), &body) {
         return refuse(StatusCode::BAD_REQUEST, message, admitted);
     }
 
@@ -90,7 +80,7 @@ pub async fn config(
     );
     // The exact origin that asked, never `*`; no credentials. A same-origin
     // read gets no allow-origin.
-    if let Admission::Listed(origin) = admission {
+    if let Some(origin) = admitted {
         out.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
     }
 

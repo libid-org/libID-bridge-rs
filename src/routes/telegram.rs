@@ -32,8 +32,8 @@ use serde::Deserialize;
 
 use super::{
     admission,
+    bodiless_get_refusal,
     refuse,
-    Admission,
     VARY_ON,
 };
 use crate::{
@@ -67,6 +67,27 @@ fn printable(value: &str, max: usize) -> bool {
     (1..=max).contains(&value.len()) && value.bytes().all(|b| (0x21..=0x7E).contains(&b))
 }
 
+/// Whether `headers` carry exactly one `Content-Type`, and it is JSON.
+fn is_json(headers: &HeaderMap) -> bool {
+    let mut media = headers.get_all(header::CONTENT_TYPE).iter();
+    match (media.next(), media.next()) {
+        (Some(one), None) => one.to_str().is_ok_and(|m| {
+            m.split(';')
+                .next()
+                .is_some_and(|t| t.trim().eq_ignore_ascii_case("application/json"))
+        }),
+        _ => false,
+    }
+}
+
+/// Whether `value` is an RFC 7636 code verifier.
+fn is_pkce_verifier(value: &str) -> bool {
+    (43..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b))
+}
+
 impl Swap {
     /// The body of a request carrying no query, read and checked: JSON, within
     /// [`MAX_REQUEST_BYTES`], a code of 1 to [`MAX_CODE_BYTES`] and a redirect
@@ -80,16 +101,7 @@ impl Swap {
         if query.is_some_and(|q| !q.is_empty()) {
             return Err("this route takes no query".into());
         }
-        let mut media = headers.get_all(header::CONTENT_TYPE).iter();
-        let json = match (media.next(), media.next()) {
-            (Some(one), None) => one.to_str().is_ok_and(|m| {
-                m.split(';')
-                    .next()
-                    .is_some_and(|t| t.trim().eq_ignore_ascii_case("application/json"))
-            }),
-            _ => false,
-        };
-        if !json {
+        if !is_json(headers) {
             return Err("the request body must be Content-Type: application/json".into());
         }
         let bytes = axum::body::to_bytes(body, MAX_REQUEST_BYTES)
@@ -115,12 +127,7 @@ impl Swap {
                  ASCII"
             ));
         }
-        let verifier_ok = (43..=128).contains(&swap.code_verifier.len())
-            && swap
-                .code_verifier
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b));
-        if !verifier_ok {
+        if !is_pkce_verifier(&swap.code_verifier) {
             return Err(
                 "codeVerifier must be 43 to 128 characters of [A-Za-z0-9-._~]".into(),
             );
@@ -158,10 +165,7 @@ pub async fn token(
     let Some(admission) = admission(&state, &headers) else {
         return refuse(StatusCode::FORBIDDEN, UNADMITTED, None);
     };
-    let admitted = match admission {
-        Admission::Listed(origin) => Some(origin),
-        Admission::SameOrigin => None,
-    };
+    let admitted = admission.allow_origin();
 
     let swap = match Swap::read(query, &headers, body).await {
         Ok(swap) => swap,
@@ -235,24 +239,10 @@ pub async fn keys(
     let Some(admission) = admission(&state, &headers) else {
         return refuse(StatusCode::FORBIDDEN, UNADMITTED, None);
     };
-    let admitted = match admission {
-        Admission::Listed(origin) => Some(origin),
-        Admission::SameOrigin => None,
-    };
+    let admitted = admission.allow_origin();
 
-    if query.is_some_and(|q| !q.is_empty()) {
-        return refuse(
-            StatusCode::BAD_REQUEST,
-            "this route takes no query",
-            admitted,
-        );
-    }
-    if super::carries_body(&body) {
-        return refuse(
-            StatusCode::BAD_REQUEST,
-            "this route takes no request body",
-            admitted,
-        );
+    if let Some(message) = bodiless_get_refusal(query.as_deref(), &body) {
+        return refuse(StatusCode::BAD_REQUEST, message, admitted);
     }
 
     let keys = match list.keys().await {

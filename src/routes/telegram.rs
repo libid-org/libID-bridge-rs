@@ -41,8 +41,9 @@ use crate::{
 
 /// How long one upstream call may take, dialing included.
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-/// How long a fetched key list is served from cache.
-const KEYS_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+/// How long a fetched key list is served from cache: the keeper's cadence,
+/// since a new key is unusable on chain until the keeper rotates it in.
+const KEYS_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 const UNADMITTED: &str = "this route is callable only from an admitted origin";
 
 type Client = hyper_util::client::legacy::Client<

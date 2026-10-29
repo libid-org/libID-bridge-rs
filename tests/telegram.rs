@@ -347,7 +347,7 @@ async fn the_key_list_passes_through_and_is_cached_for_ten_minutes() {
     // No I/O runs while the clock is paused: these reads are the cache.
     tokio::time::pause();
     assert_eq!(get().await.2, GZIPPED);
-    tokio::time::advance(std::time::Duration::from_secs(599)).await;
+    tokio::time::advance(std::time::Duration::from_secs(3599)).await;
     assert_eq!(get().await.2, GZIPPED);
     tokio::time::advance(std::time::Duration::from_secs(1)).await;
     tokio::time::resume();

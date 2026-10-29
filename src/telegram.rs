@@ -148,7 +148,8 @@ async fn bounded(body: Incoming, limit: usize) -> Result<Bytes, ExchangeError> {
 
 /// Telegram's token endpoint, and the client this deployment swaps codes for.
 pub struct TokenExchange {
-    telegram: TelegramClient,
+    client_id: String,
+    url: url::Url,
     uri: Uri,
     /// `Basic base64(client_id:client_secret)`, marked sensitive.
     authorization: HeaderValue,
@@ -172,7 +173,8 @@ impl TokenExchange {
             .expect("base64 is a valid header value");
         authorization.set_sensitive(true);
         Ok(TokenExchange {
-            telegram,
+            client_id: telegram.client_id,
+            url: telegram.token_url,
             uri,
             authorization,
             timeout,
@@ -183,7 +185,7 @@ impl TokenExchange {
 
     /// The token endpoint, for a log line.
     pub fn url(&self) -> &str {
-        self.telegram.token_url.as_str()
+        self.url.as_str()
     }
 
     /// Swap `code`, `code_verifier` and `redirect_uri` for Telegram's answer,
@@ -211,7 +213,7 @@ impl TokenExchange {
             .append_pair("code", code)
             .append_pair("redirect_uri", redirect_uri)
             .append_pair("code_verifier", code_verifier)
-            .append_pair("client_id", &self.telegram.client_id)
+            .append_pair("client_id", &self.client_id)
             .finish();
         let request = hyper::Request::post(self.uri.clone())
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")

@@ -9,11 +9,10 @@
 //! The callback document is the CCDP Distribution's artifact with this
 //! deployment's data inserted into its one slot; everything the browser runs
 //! after the callback is served by that Distribution. Where Telegram is
-//! enabled, this service swaps the browser's code at Telegram's token endpoint
-//! with Telegram's private client secret, the one secret it holds, and returns
-//! the answer untouched, and passes Telegram's key list through. It performs
-//! no other token exchange, opens no notary connection, verifies no proof,
-//! holds no key of its own, keeps no ceremony state, and talks to no chain.
+//! enabled, it swaps the browser's code with Telegram's client secret, the one
+//! secret it holds, and passes Telegram's key list through. It performs no
+//! other token exchange, opens no notary connection, verifies no proof, holds
+//! no key of its own, keeps no ceremony state, and talks to no chain.
 //!
 //! The Distribution is a separate deployment and this one starts without it.
 //! The callback route says it has no document until a retrieval produces one,
@@ -27,10 +26,8 @@ pub mod deployment;
 pub mod error;
 pub mod metrics;
 pub mod origin;
-pub mod outbound;
 pub mod routes;
 pub mod state;
-pub mod telegram;
 
 use std::sync::Arc;
 
@@ -55,21 +52,7 @@ impl Bridge {
     /// refresher, so a Distribution that is unreachable delays the callback
     /// document and stops nothing.
     pub fn start(settings: &config::Settings) -> Result<Bridge> {
-        Bridge::start_with(settings, telegram::EXCHANGE_TIMEOUT)
-    }
-
-    /// The same, with each Telegram swap and key fetch bounded by
-    /// `exchange_timeout`.
-    pub fn start_with(
-        settings: &config::Settings,
-        exchange_timeout: std::time::Duration,
-    ) -> Result<Bridge> {
         let deployment = deployment::Deployment::checked(settings)?;
-        let telegram = deployment
-            .telegram
-            .clone()
-            .map(|client| telegram::Telegram::new(client, exchange_timeout))
-            .transpose()?;
         let upstream = artifact::upstream::Upstream::new(&deployment.ccdp_origin)?;
         let (sender, callback) = tokio::sync::watch::channel(None);
         let (failed, failure) = tokio::sync::watch::channel(None);
@@ -80,7 +63,10 @@ impl Bridge {
             ceremony_config: deployment.ceremony_config(),
             failure,
             metrics: metrics.clone(),
-            telegram,
+            telegram: deployment
+                .telegram
+                .clone()
+                .map(routes::telegram::Telegram::new),
         });
         let refresher = artifact::upstream::Refresher::new(
             upstream,

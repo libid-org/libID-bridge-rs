@@ -33,5 +33,5 @@ pub struct AppState {
     /// What this deployment counts.
     pub metrics: Arc<crate::metrics::Metrics>,
     /// Telegram's code swap and key list, exactly where Telegram is enabled.
-    pub telegram: Option<crate::telegram::Telegram>,
+    pub telegram: Option<crate::routes::telegram::Telegram>,
 }

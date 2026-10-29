@@ -20,6 +20,10 @@ use hyper::{
     StatusCode,
     Uri,
 };
+use hyper_util::{
+    client::legacy::connect::HttpConnector,
+    rt::TokioExecutor,
+};
 use tokio::sync::watch;
 
 use super::{
@@ -38,6 +42,10 @@ use crate::{
 
 /// The artifact's path under the CCDP origin.
 pub const ARTIFACT_PATH: &str = "/ccdp/callback.html";
+
+/// How long opening the transport may take: resolution, the connection, and
+/// the TLS handshake over it.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How long the request and its answer may take once the transport is open.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -61,6 +69,32 @@ impl Schedule {
         interval: Duration::from_secs(300),
         floor: Duration::from_secs(1),
     };
+}
+
+/// The client one deployment retrieves with: one pooled connection over TLS
+/// whose anchors are compiled in from `webpki-roots`. No system trust store
+/// is read.
+type Client = hyper_util::client::legacy::Client<
+    hyper_rustls::HttpsConnector<HttpConnector>,
+    Empty<Bytes>,
+>;
+
+/// The `User-Agent` of every outbound request.
+pub(crate) const USER_AGENT: &str = concat!("libid-bridge/", env!("CARGO_PKG_VERSION"));
+
+/// The connector every outbound request dials with: compiled-in roots, and
+/// plaintext `http` for a loopback URL the caller has checked.
+pub(crate) fn connector() -> hyper_rustls::HttpsConnector<HttpConnector> {
+    // The connector dials by URL, so `enforce_http` must be off for the
+    // https wrapper to see an `https` one.
+    let mut http = HttpConnector::new();
+    http.set_connect_timeout(Some(CONNECT_TIMEOUT));
+    http.enforce_http(false);
+    hyper_rustls::HttpsConnectorBuilder::new()
+        .with_webpki_roots()
+        .https_or_http()
+        .enable_http1()
+        .wrap_connector(http)
 }
 
 /// Why a retrieval did not produce a document. Every variant is a refusal,
@@ -102,9 +136,21 @@ impl FetchError {
         FetchError::Unreachable(why.to_string())
     }
 
-    /// The same, from an error whose own message names only its layer.
+    /// The same, from an error whose own message names only its layer: the
+    /// chain is walked so the reason reaching an operator is the one the
+    /// socket gave.
     fn from_source(error: impl std::error::Error) -> FetchError {
-        FetchError::Unreachable(crate::outbound::reason(&error))
+        let mut why = error.to_string();
+        let mut source = error.source();
+        while let Some(next) = source {
+            let text = next.to_string();
+            if !why.contains(&text) {
+                why.push_str(": ");
+                why.push_str(&text);
+            }
+            source = next.source();
+        }
+        FetchError::Unreachable(why)
     }
 
     /// The short name this failure is counted under.
@@ -149,7 +195,7 @@ pub struct Upstream {
     /// The artifact's absolute URL, built once.
     uri: Uri,
     /// The connections this deployment retrieves over.
-    client: crate::outbound::GetClient,
+    client: Client,
 }
 
 impl Upstream {
@@ -164,12 +210,11 @@ impl Upstream {
                     "CCDP_ORIGIN {origin} names a host no HTTP request can carry: {e}"
                 ),
             })?;
-        // A loopback deployment names its Distribution by `http`, which the
-        // connector retrieves without a certificate.
         Ok(Upstream {
             uri,
             origin: origin.clone(),
-            client: crate::outbound::get_client(),
+            client: hyper_util::client::legacy::Client::builder(TokioExecutor::new())
+                .build(connector()),
         })
     }
 
@@ -249,7 +294,7 @@ impl Upstream {
             .uri(self.uri.clone())
             .header(header::ACCEPT, "text/html")
             .header(header::ACCEPT_ENCODING, "identity")
-            .header(header::USER_AGENT, crate::outbound::USER_AGENT);
+            .header(header::USER_AGENT, USER_AGENT);
         if let Some(etag) = etag {
             request = request.header(header::IF_NONE_MATCH, etag);
         }

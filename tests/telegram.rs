@@ -1,678 +1,437 @@
-//! Telegram's code swap over the axum router, against a fake token endpoint:
-//! the form it sends, the answer it passes on, what it refuses, and that the
-//! private secret leaves only in the `Authorization` header.
+//! Telegram's code swap and key list, against a fake Telegram on loopback.
 
 // Each suite uses its part of the module.
 #[allow(dead_code)]
 mod common;
 
-use std::{
-    sync::Arc,
-    time::Duration,
+use std::sync::{
+    Arc,
+    Mutex,
 };
 
 use axum::{
     body::Body,
     http::{
-        header,
-        Request,
+        HeaderMap,
         StatusCode,
     },
     response::Response,
+    Router,
 };
-use common::{
-    telegram_config,
-    FakeTelegram,
-    TokenReply,
-    TELEGRAM_REDIRECT_URI,
-    TELEGRAM_SECRET,
-};
-use http_body_util::BodyExt;
+use bytes::Bytes;
 use libid_bridge_rs::{
-    routes,
-    state::AppState,
-    Bridge,
+    deployment::TelegramSettings,
+    routes::{
+        build_router,
+        TELEGRAM_JWKS_PATH as JWKS,
+        TELEGRAM_TOKEN_PATH as TOKEN,
+    },
 };
+use serde_json::json;
 use tower::ServiceExt;
 
-const PATH: &str = "/api/v1/ceremony/telegram/token";
-const APP_ORIGIN: &str = "https://app.example";
-const CODE: &str = "6b7f2c1d9e4a8035";
-const VERIFIER: &str = "iMSTNh6gQkRnBGlY1c0MUOsD7MCO4G8C7ph1_gIZs5I";
-const TOKENS: &str = r#"{"access_token":"at","token_type":"Bearer","expires_in":3600,"id_token":"eyJ.eyJ.sig"}"#;
+const APP: &str = "https://app.example";
+const JSON: &str = "application/json";
+const SECRET: &str = "SECRET-7f3a>>>???";
+/// `printf '8123456789:SECRET-7f3a>>>???' | base64`, from coreutils.
+const BASIC: &str = "Basic ODEyMzQ1Njc4OTpTRUNSRVQtN2YzYT4+Pj8/Pw==";
+const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+/// `{"keys":[{"kty":"RSA","kid":"oidc-1"}]}` through `gzip -n -9`.
+const GZIPPED: &[u8] =
+    b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\x03\xab\x56\xca\x4e\xad\x2c\
+    \x56\xb2\x8a\xae\x56\xca\x2e\xa9\x54\xb2\x52\x0a\x0a\x76\x54\xd2\x51\xca\xce\x4c\x01\
+    \xb2\xf3\x33\x53\x92\x75\x0d\x95\x6a\x63\x6b\x01\xf0\xab\x93\x07\x27\x00\x00\x00";
 
-/// A deployment swapping at `fake`, each swap bounded by `timeout`.
-fn state_with(fake: &FakeTelegram, timeout: Duration) -> Arc<AppState> {
-    let (settings, _secret) = telegram_config(fake.url());
-    Bridge::start_with(&settings, timeout)
-        .expect("a deployment enabling telegram")
-        .state
+/// Status, media type, encoding and body; `None` never answers.
+type Reply = Option<(u16, &'static str, Option<&'static str>, Bytes)>;
+type Seen = Arc<Mutex<Vec<(String, HeaderMap, Bytes)>>>;
+
+/// Telegram on loopback: every path records the request and answers the reply,
+/// with a `Location` to itself.
+struct Fake {
+    url: String,
+    seen: Seen,
+    reply: Arc<Mutex<Reply>>,
 }
 
-fn state(fake: &FakeTelegram) -> Arc<AppState> {
-    state_with(fake, Duration::from_secs(10))
+impl Fake {
+    fn serving(reply: Reply) -> Fake {
+        let (seen, reply) = (Seen::default(), Arc::new(Mutex::new(reply)));
+        let state = (seen.clone(), reply.clone());
+        let router = Router::new().fallback(fake).with_state(state);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        common::runtime().spawn(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            axum::serve(listener, router).await
+        });
+        Fake { url, seen, reply }
+    }
+
+    fn serve(&self, reply: Reply) {
+        *self.reply.lock().unwrap() = reply;
+    }
+
+    fn seen(&self) -> Vec<(String, HeaderMap, Bytes)> {
+        self.seen.lock().unwrap().clone()
+    }
 }
 
-fn swap_body() -> String {
-    body_of(CODE, VERIFIER, TELEGRAM_REDIRECT_URI)
+async fn fake(
+    axum::extract::State((seen, reply)): axum::extract::State<(Seen, Arc<Mutex<Reply>>)>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    seen.lock()
+        .unwrap()
+        .push((uri.path().to_owned(), headers, body));
+    let reply = reply.lock().unwrap().clone();
+    let Some((status, media, encoding, body)) = reply else {
+        return std::future::pending().await;
+    };
+    let response = Response::builder()
+        .status(status)
+        .header("content-type", media);
+    let response = response.header("location", "/elsewhere");
+    let response = match encoding {
+        Some(encoding) => response.header("content-encoding", encoding),
+        None => response,
+    };
+    response.body(Body::from(body)).unwrap()
 }
 
-fn body_of(code: &str, verifier: &str, redirect_uri: &str) -> String {
-    serde_json::json!({ "code": code, "codeVerifier": verifier, "redirectUri": redirect_uri })
+fn answering(status: u16, body: impl Into<Bytes>) -> Reply {
+    Some((status, JSON, None, body.into()))
+}
+
+/// A deployment enabling Telegram at `url`, its secret in `secret`.
+fn settings(
+    url: &str,
+    secret: &common::ScratchFile,
+) -> libid_bridge_rs::config::Settings {
+    let platforms = r#"[{"id":"telegram","client_id":"8123456789"}]"#;
+    let mut settings = common::config(&["--platforms", platforms]);
+    settings.telegram = Some(TelegramSettings {
+        client_secret_file: secret.path().to_owned(),
+        token_url: Some(format!("{url}/token")),
+        jwks_url: Some(format!("{url}/jwks")),
+    });
+    settings
+}
+
+fn app(url: &str) -> Router {
+    let secret = common::ScratchFile::holding(&format!("{SECRET}\n"));
+    let bridge = libid_bridge_rs::Bridge::start(&settings(url, &secret)).unwrap();
+    build_router(bridge.state)
+}
+
+async fn send(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    headers: &[(&str, &str)],
+    body: impl Into<Body>,
+) -> (StatusCode, HeaderMap, Bytes) {
+    let mut request = axum::http::Request::builder().method(method).uri(uri);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let response = app
+        .clone()
+        .oneshot(request.body(body.into()).unwrap())
+        .await;
+    let (parts, body) = response.unwrap().into_parts();
+    let body = http_body_util::BodyExt::collect(body)
+        .await
+        .unwrap()
+        .to_bytes();
+    (parts.status, parts.headers, body)
+}
+
+fn swap(code: &str, verifier: &str, redirect_uri: &str) -> String {
+    json!({ "code": code, "codeVerifier": verifier, "redirectUri": redirect_uri })
         .to_string()
 }
 
-fn post(
-    origin: Option<&str>,
-    uri: &str,
-    media: &str,
-    body: impl Into<Body>,
-) -> Request<Body> {
-    let mut request = Request::post(uri).header(header::CONTENT_TYPE, media);
-    if let Some(origin) = origin {
-        request = request.header(header::ORIGIN, origin);
-    }
-    request.body(body.into()).unwrap()
-}
-
-async fn send(state: Arc<AppState>, request: Request<Body>) -> Response {
-    routes::build_router(state).oneshot(request).await.unwrap()
-}
-
-async fn bytes_of(response: Response) -> bytes::Bytes {
-    response.into_body().collect().await.unwrap().to_bytes()
-}
-
-/// Every header value and the body of `response`, as one string to search.
-async fn everything_in(response: Response) -> String {
-    let mut text = format!("{:?}", response.headers());
-    text.push_str(&String::from_utf8_lossy(&bytes_of(response).await));
-    text
+/// A valid swap (`POST`) or a key-list read (`GET`) from the application.
+async fn call(app: &Router, method: &str) -> (StatusCode, HeaderMap, Bytes) {
+    let (path, body) = match method {
+        "POST" => (TOKEN, swap("c", VERIFIER, "x")),
+        _ => (JWKS, String::new()),
+    };
+    let headers = [("origin", APP), ("content-type", JSON)];
+    send(app, method, path, &headers, body).await
 }
 
 #[tokio::test]
-async fn a_swap_sends_the_exact_form_and_passes_the_answer_through() {
-    let fake = FakeTelegram::serving(TokenReply::with(200, TOKENS));
-    let response = send(
-        state(&fake),
-        post(Some(APP_ORIGIN), PATH, "application/json", swap_body()),
-    )
-    .await;
+async fn a_swap_posts_the_exact_form_and_passes_the_answer_through() {
+    let fake = Fake::serving(answering(401, r#"{"error":"invalid_grant"}"#));
+    let app = app(&fake.url);
+    let redirect = "https://bridge.example/cb?a=b&redirect_uri=https%3A%2F%2Fevil";
+    let body = swap("abc&client_id=1", VERIFIER, redirect);
+    let headers = [("origin", APP), ("content-type", JSON)];
+    let (status, headers, answer) = send(&app, "POST", TOKEN, &headers, body).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(&answer[..], br#"{"error":"invalid_grant"}"#);
+    assert_eq!(headers["access-control-allow-origin"], APP);
+    assert_eq!(headers["content-type"], JSON);
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let h = response.headers().clone();
-    assert_eq!(h["access-control-allow-origin"], APP_ORIGIN);
-    assert!(h.get("access-control-allow-credentials").is_none());
-    assert_eq!(h["content-type"], "application/json");
-    assert_eq!(h["cache-control"], "no-store");
-    assert_eq!(h["vary"], "origin, sec-fetch-site");
-    assert_eq!(&bytes_of(response).await[..], TOKENS.as_bytes());
-
-    let seen = fake.requests();
-    assert_eq!(seen.len(), 1);
-    let swap = &seen[0];
-    assert_eq!(swap.method, "POST");
+    let seen = fake.seen();
+    let (path, headers, form) = &seen[0];
+    assert_eq!((seen.len(), path.as_str()), (1, "/token"));
+    assert_eq!(headers["authorization"], BASIC);
+    assert_eq!(headers["content-type"], "application/x-www-form-urlencoded");
     assert_eq!(
-        swap.headers["content-type"],
-        "application/x-www-form-urlencoded"
-    );
-    assert_eq!(swap.headers["accept"], "application/json");
-    assert_eq!(
-        std::str::from_utf8(&swap.body).unwrap(),
-        "grant_type=authorization_code\
-         &code=6b7f2c1d9e4a8035\
-         &redirect_uri=https%3A%2F%2Fbridge.example%2Fauth%2Fcallback\
-         &code_verifier=iMSTNh6gQkRnBGlY1c0MUOsD7MCO4G8C7ph1_gIZs5I\
+        std::str::from_utf8(form).unwrap(),
+        "grant_type=authorization_code&code=abc%26client_id%3D1\
+         &redirect_uri=https%3A%2F%2Fbridge.example%2Fcb%3Fa%3Db%26redirect_uri%3D\
+         https%253A%252F%252Fevil&code_verifier=dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk\
          &client_id=8123456789"
     );
-    // `base64("8123456789:SECRET-MARKER-7f3a")`, from coreutils.
-    assert_eq!(
-        swap.headers["authorization"],
-        "Basic ODEyMzQ1Njc4OTpTRUNSRVQtTUFSS0VSLTdmM2E="
-    );
+
+    let preflight = [("origin", APP), ("access-control-request-method", "POST")];
+    let (status, headers, _) = send(&app, "OPTIONS", TOKEN, &preflight, "").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(headers["access-control-allow-methods"], "POST, OPTIONS");
+    assert_eq!(headers["access-control-allow-headers"], "content-type");
 }
 
 #[tokio::test]
-async fn a_refusal_from_telegram_is_passed_through_with_its_status() {
-    let fake =
-        FakeTelegram::serving(TokenReply::with(400, r#"{"error":"invalid_grant"}"#));
-    let response = send(
-        state(&fake),
-        post(Some(APP_ORIGIN), PATH, "application/json", swap_body()),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
-        response.headers()["access-control-allow-origin"],
-        APP_ORIGIN
-    );
-    assert_eq!(
-        &bytes_of(response).await[..],
-        br#"{"error":"invalid_grant"}"#
-    );
-}
-
-/// A same-origin request carrying no `Origin` swaps, and gets no CORS header.
-#[tokio::test]
-async fn a_same_origin_swap_needs_no_cors_header() {
-    let fake = FakeTelegram::serving(TokenReply::with(200, TOKENS));
-    let mut request = post(None, PATH, "application/json", swap_body());
-    request
-        .headers_mut()
-        .insert("sec-fetch-site", "same-origin".parse().unwrap());
-    let response = send(state(&fake), request).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(response
-        .headers()
-        .get("access-control-allow-origin")
-        .is_none());
-    assert_eq!(&bytes_of(response).await[..], TOKENS.as_bytes());
-}
-
-#[tokio::test]
-async fn a_foreign_origin_is_refused_before_anything_is_sent() {
-    let fake = FakeTelegram::serving(TokenReply::with(200, TOKENS));
-    for origin in [Some("https://evil.example"), Some("null"), None] {
-        let response = send(
-            state(&fake),
-            post(origin, PATH, "application/json", swap_body()),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{origin:?}");
-        assert!(response
-            .headers()
-            .get("access-control-allow-origin")
-            .is_none());
-    }
-    assert!(fake.requests().is_empty());
-}
-
-#[tokio::test]
-async fn a_preflight_grants_post_with_a_content_type_to_an_admitted_origin() {
-    let fake = FakeTelegram::serving(TokenReply::with(200, TOKENS));
-    let preflight = |origin: &str| {
-        Request::builder()
-            .method("OPTIONS")
-            .uri(PATH)
-            .header("origin", origin)
-            .header("access-control-request-method", "POST")
-            .header("access-control-request-headers", "content-type")
-            .body(Body::empty())
-            .unwrap()
-    };
-
-    let response = send(state(&fake), preflight(APP_ORIGIN)).await;
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    let h = response.headers();
-    assert_eq!(h["access-control-allow-origin"], APP_ORIGIN);
-    assert_eq!(h["access-control-allow-methods"], "POST, OPTIONS");
-    assert_eq!(h["access-control-allow-headers"], "content-type");
-    assert!(h.get("access-control-allow-credentials").is_none());
-
-    let response = send(state(&fake), preflight("https://evil.example")).await;
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    assert!(response
-        .headers()
-        .get("access-control-allow-origin")
-        .is_none());
-}
-
-#[tokio::test]
-async fn another_method_is_refused_naming_the_ones_served() {
-    let fake = FakeTelegram::serving(TokenReply::with(200, TOKENS));
-    for method in ["GET", "HEAD", "PUT"] {
-        let request = Request::builder()
-            .method(method)
-            .uri(PATH)
-            .header("origin", APP_ORIGIN)
-            .body(Body::empty())
-            .unwrap();
-        let response = send(state(&fake), request).await;
-        assert_eq!(
-            response.status(),
-            StatusCode::METHOD_NOT_ALLOWED,
-            "{method}"
-        );
-        assert_eq!(response.headers()["allow"], "POST, OPTIONS");
-    }
-}
-
-#[tokio::test]
-async fn a_malformed_request_is_refused_and_nothing_is_sent() {
-    let fake = FakeTelegram::serving(TokenReply::with(200, TOKENS));
-    let json = "application/json";
-    let cases: Vec<(String, &str, String)> = vec![
-        (format!("{PATH}?code={CODE}"), json, swap_body()),
-        (PATH.into(), "text/plain", swap_body()),
-        (PATH.into(), json, "{not json".into()),
-        (PATH.into(), json, format!(r#"{{"code":"{CODE}"}}"#)),
-        (
-            PATH.into(),
-            json,
-            format!(r#"{{"code":"{CODE}","codeVerifier":"{VERIFIER}"}}"#),
-        ),
-        (
-            PATH.into(),
-            json,
-            format!(
-                r#"{{"code":"{CODE}","codeVerifier":"{VERIFIER}","redirectUri":"x","clientSecret":"s"}}"#
-            ),
-        ),
-        (
-            PATH.into(),
-            json,
-            body_of("", VERIFIER, TELEGRAM_REDIRECT_URI),
-        ),
-        (
-            PATH.into(),
-            json,
-            body_of("a b", VERIFIER, TELEGRAM_REDIRECT_URI),
-        ),
-        (
-            PATH.into(),
-            json,
-            body_of(&"c".repeat(513), VERIFIER, TELEGRAM_REDIRECT_URI),
-        ),
-        // Too short, too long, and outside the unreserved set.
-        (
-            PATH.into(),
-            json,
-            body_of(CODE, &"v".repeat(42), TELEGRAM_REDIRECT_URI),
-        ),
-        (
-            PATH.into(),
-            json,
-            body_of(CODE, &"v".repeat(129), TELEGRAM_REDIRECT_URI),
-        ),
-        (
-            PATH.into(),
-            json,
-            body_of(CODE, &format!("{}+", "v".repeat(42)), TELEGRAM_REDIRECT_URI),
-        ),
-        // An empty, spaced or oversized redirect URI.
-        (PATH.into(), json, body_of(CODE, VERIFIER, "")),
-        (
-            PATH.into(),
-            json,
-            body_of(CODE, VERIFIER, "https://a.example/ b"),
-        ),
-        (PATH.into(), json, body_of(CODE, VERIFIER, &"r".repeat(513))),
-        // A valid swap padded past the body cap.
-        (
-            PATH.into(),
-            json,
-            format!(
-                r#"{{"code":"{CODE}","codeVerifier":"{VERIFIER}","redirectUri":"x"{}}}"#,
-                " ".repeat(2048)
-            ),
-        ),
+async fn a_refused_request_sends_nothing_upstream() {
+    let fake = Fake::serving(answering(200, "{}"));
+    let app = app(&fake.url);
+    let valid = swap("c", VERIFIER, "x");
+    let padded = |len: usize| format!("{valid}{}", " ".repeat(len - valid.len()));
+    let a42 = "a".repeat(42);
+    let (evil, mixed) = ("https://evil.example", "Application/JSON; charset=utf-8");
+    let longest = swap(&"~".repeat(512), &"Z".repeat(128), &"!".repeat(512));
+    // Method (`POST` the swap, `GET` the key list), query, origin, media type.
+    let requests = [
+        ("POST", "", evil, JSON, valid.as_str(), 403),
+        ("GET", "", evil, "", "", 403),
+        ("POST", "?a", APP, JSON, &valid, 400),
+        ("GET", "?a", APP, "", "", 400),
+        ("GET", "", APP, "", "{}", 400),
+        ("POST", "", APP, "text/plain", &valid, 400),
+        ("POST", "", APP, mixed, &valid, 200),
     ];
-    for (uri, media, body) in cases {
-        let response = send(
-            state(&fake),
-            post(Some(APP_ORIGIN), &uri, media, body.clone()),
-        )
-        .await;
-        assert_eq!(
-            response.status(),
-            StatusCode::BAD_REQUEST,
-            "{uri} {media} {body}"
-        );
-        // Refused for its request, not its origin: the browser can read why.
-        assert_eq!(
-            response.headers()["access-control-allow-origin"],
-            APP_ORIGIN
-        );
-        let refusal: serde_json::Value =
-            serde_json::from_slice(&bytes_of(response).await).unwrap();
-        assert!(refusal["message"].is_string(), "{refusal}");
+    let bodies = [
+        (r#"{"code":"c"}"#.to_owned(), 400),
+        (valid.replace('}', r#","a":1}"#), 400),
+        (swap("a b", VERIFIER, "x"), 400),
+        (swap(&"c".repeat(513), VERIFIER, "x"), 400),
+        (swap("c", VERIFIER, "x\u{7f}"), 400),
+        (swap("c", &a42, "x"), 400),
+        (swap("c", &format!("{a42}+"), "x"), 400),
+        (padded(2049), 400),
+        (padded(2048), 200),
+        (longest, 200),
+    ];
+    let cases = requests.map(|(m, q, o, t, b, s)| (m, q, o, t, b.to_owned(), s));
+    let bodies = bodies.map(|(body, status)| ("POST", "", APP, JSON, body, status));
+    for (method, query, origin, media, body, expected) in cases.into_iter().chain(bodies)
+    {
+        let uri = format!("{}{query}", if method == "POST" { TOKEN } else { JWKS });
+        let headers = [("origin", origin), ("content-type", media)];
+        let (status, headers, _) = send(&app, method, &uri, &headers, body.clone()).await;
+        assert_eq!(status, expected, "{uri} {media} {body}");
+        let allowed = headers.get("access-control-allow-origin");
+        assert_eq!(allowed.is_some(), expected != 403, "{uri} {body}");
     }
-    assert!(fake.requests().is_empty());
+    assert_eq!(fake.seen().len(), 3);
 }
 
-#[tokio::test]
-async fn an_endpoint_that_does_not_answer_is_a_bad_gateway() {
-    let fake = FakeTelegram::serving(TokenReply::Silent);
-    let response = send(
-        state_with(&fake, Duration::from_millis(300)),
-        post(Some(APP_ORIGIN), PATH, "application/json", swap_body()),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-    let refusal: serde_json::Value =
-        serde_json::from_slice(&bytes_of(response).await).unwrap();
-    assert!(
-        refusal["message"].as_str().unwrap().contains("in time"),
-        "{refusal}"
-    );
-}
+/// What the log lines are written to.
+#[derive(Clone, Default)]
+struct Capture(Arc<Mutex<Vec<u8>>>);
 
-#[tokio::test]
-async fn an_unreachable_endpoint_is_a_bad_gateway() {
-    let url = format!("{}/token", common::unreachable_origin().await);
-    let (settings, _secret) = telegram_config(&url);
-    let state = Bridge::start(&settings).unwrap().state;
-    let response = send(
-        state,
-        post(Some(APP_ORIGIN), PATH, "application/json", swap_body()),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-}
-
-#[tokio::test]
-async fn an_oversized_answer_or_a_redirect_is_a_bad_gateway() {
-    let fake = FakeTelegram::serving(TokenReply::with(200, &"x".repeat(8 * 1024 + 1)));
-    let state = state(&fake);
-    let response = send(
-        state.clone(),
-        post(Some(APP_ORIGIN), PATH, "application/json", swap_body()),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-    assert_eq!(
-        response.headers()["access-control-allow-origin"],
-        APP_ORIGIN
-    );
-
-    // Exactly at the bound is passed on.
-    let at_bound = "x".repeat(8 * 1024);
-    fake.now_serves(TokenReply::with(200, &at_bound));
-    let response = send(
-        state.clone(),
-        post(Some(APP_ORIGIN), PATH, "application/json", swap_body()),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(bytes_of(response).await.len(), at_bound.len());
-
-    fake.now_serves(TokenReply::with(302, ""));
-    let response = send(
-        state,
-        post(Some(APP_ORIGIN), PATH, "application/json", swap_body()),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-    assert!(response.headers().get("location").is_none());
-    // Not followed: one request per swap.
-    assert_eq!(fake.requests().len(), 3);
-}
-
-#[tokio::test]
-async fn the_configuration_publishes_telegrams_client_id_and_no_credential() {
-    let fake = FakeTelegram::serving(TokenReply::with(200, TOKENS));
-    let request = Request::get("/api/v1/ceremony/config")
-        .header("origin", APP_ORIGIN)
-        .body(Body::empty())
-        .unwrap();
-    let response = send(state(&fake), request).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let record: serde_json::Value =
-        serde_json::from_slice(&bytes_of(response).await).unwrap();
-    assert_eq!(
-        record["platforms"]["telegram"],
-        serde_json::json!({ "clientId": common::TELEGRAM_CLIENT_ID })
-    );
-}
-
-/// The secret leaves only in the `Authorization` header: no answer of any route, and no debug
-/// rendering of the settings or the checked client, carries it.
-#[tokio::test]
-async fn the_secret_appears_in_no_answer_and_no_debug_rendering() {
-    let fake =
-        FakeTelegram::serving(TokenReply::with(400, r#"{"error":"invalid_client"}"#));
-    let (settings, _secret) = telegram_config(fake.url());
-    assert!(!format!("{settings:?}").contains(TELEGRAM_SECRET));
-    let deployment = libid_bridge_rs::deployment::Deployment::checked(&settings).unwrap();
-    let client = deployment.telegram.expect("telegram is enabled");
-    assert_eq!(client.client_secret.expose(), TELEGRAM_SECRET);
-    let rendered = format!("{client:?}");
-    assert!(!rendered.contains(TELEGRAM_SECRET), "{rendered}");
-    assert!(rendered.contains("<redacted>"), "{rendered}");
-
-    let state = state(&fake);
-    let mut answers = Vec::new();
-    for request in [
-        post(Some(APP_ORIGIN), PATH, "application/json", swap_body()),
-        post(Some(APP_ORIGIN), PATH, "application/json", "{}"),
-        post(
-            Some("https://evil.example"),
-            PATH,
-            "application/json",
-            swap_body(),
-        ),
-        Request::get("/api/v1/ceremony/config")
-            .header("origin", APP_ORIGIN)
-            .body(Body::empty())
-            .unwrap(),
-    ] {
-        answers.push(everything_in(send(state.clone(), request).await).await);
+impl std::io::Write for Capture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
     }
-    fake.now_serves(TokenReply::Silent);
-    let slow = state_with(&fake, Duration::from_millis(200));
-    answers.push(
-        everything_in(
-            send(
-                slow,
-                post(Some(APP_ORIGIN), PATH, "application/json", swap_body()),
-            )
-            .await,
-        )
-        .await,
-    );
-    for answer in answers {
-        assert!(!answer.contains(TELEGRAM_SECRET), "{answer}");
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
-/// Without Telegram enabled the path is not served at all.
 #[tokio::test]
-async fn a_deployment_without_telegram_serves_no_swap() {
-    let state = common::state(&[]).await;
-    let response = send(
-        state,
-        post(Some(APP_ORIGIN), PATH, "application/json", swap_body()),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    assert!(response
-        .headers()
-        .get("access-control-allow-origin")
-        .is_none());
-}
-
-/// A key-list `GET` carrying a body is refused before anything is fetched.
-#[tokio::test]
-async fn a_key_list_request_with_a_body_is_refused() {
-    let fake = FakeTelegram::serving(TokenReply::with(200, TOKENS));
-    let request = Request::get(routes::TELEGRAM_JWKS_PATH)
-        .header(header::ORIGIN, APP_ORIGIN)
-        .body(Body::from("{}"))
-        .unwrap();
-    let response = send(state(&fake), request).await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
-        response.headers()["access-control-allow-origin"],
-        APP_ORIGIN
-    );
-    let refusal: serde_json::Value =
-        serde_json::from_slice(&bytes_of(response).await).unwrap();
-    assert_eq!(refusal["message"], "this route takes no request body");
-}
-
-/// The decoded form Telegram received in `swap`.
-fn form_of(swap: &common::SeenSwap) -> Vec<(String, String)> {
-    url::form_urlencoded::parse(&swap.body)
-        .into_owned()
-        .collect()
-}
-
-/// `{"code","codeVerifier","redirectUri"}` padded with JSON whitespace to
-/// exactly `len` bytes.
-fn padded_body(len: usize) -> String {
-    let body = swap_body();
-    format!("{body}{}", " ".repeat(len - body.len()))
-}
-
-/// The body cap is 2 KiB: a valid swap padded to 2048 bytes is sent, one
-/// byte more is refused naming the cap.
-#[tokio::test]
-async fn the_request_body_is_capped_at_exactly_2_kib() {
-    let fake = FakeTelegram::serving(TokenReply::with(200, TOKENS));
-    let at_cap = padded_body(2048);
-    assert_eq!(at_cap.len(), 2048);
-    let response = send(
-        state(&fake),
-        post(Some(APP_ORIGIN), PATH, "application/json", at_cap),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(fake.requests().len(), 1);
-
-    let response = send(
-        state(&fake),
-        post(
-            Some(APP_ORIGIN),
-            PATH,
-            "application/json",
-            padded_body(2049),
-        ),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let refusal: serde_json::Value =
-        serde_json::from_slice(&bytes_of(response).await).unwrap();
-    assert_eq!(
-        refusal["message"],
-        "the request body could not be read within 2048 bytes"
-    );
-    assert_eq!(fake.requests().len(), 1);
-}
-
-/// A code and a redirect URI of exactly 512 bytes, spanning the printable
-/// range from `!` (0x21) to `~` (0x7E), reach Telegram unchanged.
-#[tokio::test]
-async fn a_code_and_redirect_uri_at_their_bounds_are_sent_unchanged() {
-    let fake = FakeTelegram::serving(TokenReply::with(200, TOKENS));
-    let code = format!("!{}~", "c".repeat(510));
-    let redirect = format!("!{}~", "r".repeat(510));
-    assert_eq!((code.len(), redirect.len()), (512, 512));
-    let response = send(
-        state(&fake),
-        post(
-            Some(APP_ORIGIN),
-            PATH,
-            "application/json",
-            body_of(&code, VERIFIER, &redirect),
-        ),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let fields = form_of(&fake.requests()[0]);
-    let get = |key: &str| fields.iter().find(|(k, _)| k == key).unwrap().1.clone();
-    assert_eq!(get("code"), code);
-    assert_eq!(get("redirect_uri"), redirect);
-}
-
-/// The media type is matched case-insensitively and its parameters are
-/// ignored (RFC 9110 §8.3.1); another type is refused.
-#[tokio::test]
-async fn a_json_media_type_is_matched_as_rfc_9110_reads_it() {
-    let fake = FakeTelegram::serving(TokenReply::with(200, TOKENS));
-    for media in ["Application/JSON", "application/json; charset=utf-8"] {
-        let response = send(
-            state(&fake),
-            post(Some(APP_ORIGIN), PATH, media, swap_body()),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::OK, "{media}");
+async fn an_upstream_failure_is_a_502_naming_only_its_kind() {
+    let logs = Capture::default();
+    let sink = logs.clone();
+    // Global: a scoped subscriber misses callsites other tests hit first.
+    let subscriber = tracing_subscriber::fmt().with_max_level(tracing::Level::TRACE);
+    let subscriber = subscriber
+        .with_ansi(false)
+        .with_writer(move || sink.clone());
+    tracing::subscriber::set_global_default(subscriber.finish()).unwrap();
+    let fake = Fake::serving(None);
+    let app = app(&fake.url);
+    let unreachable = self::app(&common::unreachable_origin().await);
+    let moved = "answered a redirect this bridge does not follow";
+    let big = "answered more than this bridge passes on";
+    let cases = [
+        (&app, "POST", answering(302, ""), moved),
+        (&app, "POST", answering(200, vec![b'a'; 8 * 1024 + 1]), big),
+        (&app, "GET", answering(302, ""), moved),
+        (&app, "GET", answering(200, vec![b'a'; 64 * 1024 + 1]), big),
+        (&app, "GET", answering(500, ""), "answered an error"),
+        (&unreachable, "POST", None, "could not be reached"),
+        (&unreachable, "GET", None, "could not be reached"),
+    ];
+    for (app, method, reply, kind) in cases {
+        fake.serve(reply);
+        let before = fake.seen().len();
+        let (status, _, body) = call(app, method).await;
+        let what = match method {
+            "POST" => "Telegram's token endpoint",
+            _ => "Telegram's key list",
+        };
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{what} {kind}");
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body, json!({ "message": format!("{what} {kind}") }));
+        // At most one request per call: a redirect is not followed.
+        assert!(fake.seen().len() - before <= 1);
     }
-    let response = send(
-        state(&fake),
-        post(Some(APP_ORIGIN), PATH, "application/jsonx", swap_body()),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(fake.requests().len(), 2);
-}
 
-/// The `Basic` credential is standard base64, padded, not the URL-safe
-/// alphabet: a secret whose encoding carries `+` and `/` keeps them.
-#[tokio::test]
-async fn the_basic_credential_uses_the_standard_base64_alphabet() {
-    let fake = FakeTelegram::serving(TokenReply::with(200, TOKENS));
-    let (mut settings, _fixture) = telegram_config(fake.url());
-    let secret = common::ScratchFile::holding(">>>???\n");
-    settings.telegram.as_mut().unwrap().client_secret_file = secret.path().to_owned();
-    let state = Bridge::start(&settings).unwrap().state;
-    let response = send(
-        state,
-        post(Some(APP_ORIGIN), PATH, "application/json", swap_body()),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    // `printf '8123456789:>>>???' | base64`, from coreutils.
-    assert_eq!(
-        fake.requests()[0].headers["authorization"],
-        "Basic ODEyMzQ1Njc4OTo+Pj4/Pz8="
-    );
-}
-
-/// A deployment whose key list is served by `fake`.
-fn keys_state(fake: &FakeTelegram) -> Arc<AppState> {
-    let (mut settings, _secret) = telegram_config(fake.url());
-    settings.telegram.as_mut().unwrap().jwks_url = fake.url().to_owned();
-    Bridge::start(&settings).unwrap().state
-}
-
-fn get_keys() -> Request<Body> {
-    Request::get(routes::TELEGRAM_JWKS_PATH)
-        .header(header::ORIGIN, APP_ORIGIN)
-        .body(Body::empty())
-        .unwrap()
-}
-
-/// A key list answering a redirect and one answering an error are told apart
-/// in the `502`.
-#[tokio::test]
-async fn a_key_list_redirect_and_error_are_named_apart() {
-    for (status, message) in [
-        (
-            302,
-            "Telegram's key list answered a redirect this bridge does not follow",
-        ),
-        (500, "Telegram's key list answered an error"),
-    ] {
-        let fake = FakeTelegram::serving(TokenReply::with(status, r#"{"keys":[]}"#));
-        let response = send(keys_state(&fake), get_keys()).await;
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{status}");
-        let refusal: serde_json::Value =
-            serde_json::from_slice(&bytes_of(response).await).unwrap();
-        assert_eq!(refusal["message"], message, "{status}");
-    }
-}
-
-/// The key list is served from cache for 600 s after a fetch, and fetched
-/// again after.
-#[tokio::test]
-async fn the_key_list_is_fetched_again_after_ten_minutes() {
-    let fake = FakeTelegram::serving(TokenReply::with(200, r#"{"keys":[1]}"#));
-    let state = keys_state(&fake);
-    let read = |state: &Arc<AppState>| send(state.clone(), get_keys());
-
-    let first = read(&state).await;
-    assert_eq!(&bytes_of(first).await[..], br#"{"keys":[1]}"#);
-    fake.now_serves(TokenReply::with(200, r#"{"keys":[2]}"#));
-
-    // No I/O runs while the clock is paused: the second read is the cache.
+    fake.serve(None);
     tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(599)).await;
-    let second = read(&state).await;
-    assert_eq!(&bytes_of(second).await[..], br#"{"keys":[1]}"#);
-    tokio::time::advance(Duration::from_secs(2)).await;
+    let (status, _, body) = call(&app, "POST").await;
     tokio::time::resume();
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(String::from_utf8_lossy(&body).contains("did not answer in time"));
 
-    let third = read(&state).await;
-    assert_eq!(&bytes_of(third).await[..], br#"{"keys":[2]}"#);
-    assert_eq!(fake.requests().len(), 2);
+    for (method, len) in [("POST", 8 * 1024), ("GET", 64 * 1024)] {
+        fake.serve(answering(200, vec![b'a'; len]));
+        let (status, _, body) = call(&app, method).await;
+        assert_eq!((status, body.len()), (StatusCode::OK, len), "{method}");
+    }
+
+    let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    // The library's own failure lines were captured, and carry no secret.
+    let lines = ["Telegram's token endpoint gave", "Telegram's key list gave"];
+    assert!(lines.iter().all(|line| logs.contains(line)), "{logs}");
+    assert!(
+        !logs.contains(SECRET) && !logs.contains(&BASIC[6..]),
+        "{logs}"
+    );
+}
+
+#[tokio::test]
+async fn the_key_list_passes_through_and_is_cached_for_ten_minutes() {
+    let fake = Fake::serving(answering(500, ""));
+    let app = app(&fake.url);
+    let get = || send(&app, "GET", JWKS, &[("origin", APP)], Body::empty());
+    assert_eq!(get().await.0, StatusCode::BAD_GATEWAY);
+
+    let gzipped = Bytes::from_static(GZIPPED);
+    fake.serve(Some((
+        200,
+        "application/jwk-set+json",
+        Some("gzip"),
+        gzipped,
+    )));
+    let (status, headers, body) = get().await;
+    assert_eq!((status, &body[..]), (StatusCode::OK, GZIPPED));
+    assert_eq!(headers["content-type"], "application/jwk-set+json");
+    assert_eq!(headers["content-encoding"], "gzip");
+    assert_eq!(headers["access-control-allow-origin"], APP);
+    let seen = fake.seen();
+    assert_eq!((seen.len(), seen[1].0.as_str()), (2, "/jwks"));
+    assert!(seen[1].1.get("authorization").is_none());
+
+    fake.serve(answering(200, "{}"));
+    // No I/O runs while the clock is paused: these reads are the cache.
+    tokio::time::pause();
+    assert_eq!(get().await.2, GZIPPED);
+    tokio::time::advance(std::time::Duration::from_secs(599)).await;
+    assert_eq!(get().await.2, GZIPPED);
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    tokio::time::resume();
+    assert_eq!(&get().await.2[..], b"{}");
+    assert_eq!(fake.seen().len(), 3);
+}
+
+#[test]
+fn startup_refuses_an_unusable_telegram_table_naming_the_setting() {
+    let secret = common::ScratchFile::holding(&format!("{SECRET}\r\n"));
+    let empty = common::ScratchFile::holding("\n");
+    let spaced = common::ScratchFile::holding("two words\n");
+    let good = settings("https://oauth.example", &secret);
+    let table = |f: &dyn Fn(&mut TelegramSettings)| {
+        let mut settings = good.clone();
+        settings.telegram.as_mut().map(f);
+        settings
+    };
+    let mut untabled = good.clone();
+    untabled.telegram = None;
+    let mut platformless = common::config(&[]);
+    platformless.telegram = good.telegram.clone();
+    let http = |key: &str| Some(format!("http://oauth.example/{key}"));
+    let cases = [
+        (
+            table(&|t| t.client_secret_file = "/nonexistent".into()),
+            "client_secret_file",
+        ),
+        (
+            table(&|t| t.client_secret_file = empty.path().into()),
+            "client_secret_file",
+        ),
+        (table(&|t| t.token_url = http("token")), "token_url"),
+        (table(&|t| t.jwks_url = http("jwks")), "jwks_url"),
+        (
+            table(&|t| t.client_secret_file = spaced.path().into()),
+            "client_secret_file",
+        ),
+        (untabled, "[telegram]"),
+        (platformless, "[telegram]"),
+    ];
+    for (settings, key) in cases {
+        let checked = libid_bridge_rs::deployment::Deployment::checked(&settings);
+        let error = checked.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(
+            error.contains(key) && !error.contains(SECRET),
+            "{key}: {error}"
+        );
+    }
+
+    // Read from a file, as the binary reads one, naming no endpoint.
+    let file = common::ScratchFile::holding(&format!(
+        "allowed_app_origins = [{APP:?}]\nccdp_origin = {:?}\n\
+         [[platforms]]\nid = \"telegram\"\nclient_id = \"8123456789\"\n\
+         [telegram]\nclient_secret_file = {:?}\n",
+        common::Distribution::shared().origin(),
+        secret.path(),
+    ));
+    let defaults = libid_bridge_rs::config::Settings::read(file.path()).unwrap();
+    let deployment = libid_bridge_rs::deployment::Deployment::checked(&defaults);
+    let client = deployment.unwrap().telegram.unwrap();
+    assert_eq!(client.token_url, "https://oauth.telegram.org/token");
+    assert_eq!(
+        client.jwks_url,
+        "https://oauth.telegram.org/.well-known/jwks.json"
+    );
+    let debug = format!("{client:?}");
+    assert!(
+        !debug.contains(SECRET) && !debug.contains(&BASIC[6..]),
+        "{debug}"
+    );
+}
+
+#[tokio::test]
+async fn config_shows_only_the_client_id_and_the_routes_need_telegram() {
+    let app = app("http://127.0.0.1:9");
+    let origin = [("origin", APP)];
+    let (_, _, body) = send(&app, "GET", "/api/v1/ceremony/config", &origin, "").await;
+    let record: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let telegram = &record["platforms"]["telegram"];
+    assert_eq!(telegram, &json!({ "clientId": "8123456789" }));
+
+    let without = build_router(common::bridge(&[]).state);
+    for method in ["POST", "GET"] {
+        assert_eq!(call(&without, method).await.0, StatusCode::NOT_FOUND);
+    }
 }

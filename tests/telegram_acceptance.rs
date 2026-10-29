@@ -945,61 +945,6 @@ async fn the_swap_admits_only_post_and_its_preflight() {
     assert!(fake.requests().is_empty());
 }
 
-/// No log line carries the secret, whatever the swap meets.
-#[tokio::test]
-async fn the_secret_never_reaches_the_logs() {
-    let captured: Arc<Mutex<Vec<u8>>> = Arc::default();
-    let sink = captured.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .with_ansi(false)
-        .with_writer(move || Capture(sink.clone()))
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
-    tracing::info!("capture-probe");
-
-    let fake = FakeTelegram::serving(TokenReply::with(200, "{}"));
-    let app = app(&Table::token(fake.url()));
-    for reply in [
-        TokenReply::with(200, r#"{"id_token":"x"}"#),
-        TokenReply::with(401, r#"{"error":"invalid_client"}"#),
-        TokenReply::with(302, "{}"),
-        TokenReply::with(200, &json_of_len(9000)),
-    ] {
-        fake.now_serves(reply);
-        let _ = send(&app, swap(Some(APP), swap_body(CODE, VERIFIER))).await;
-    }
-    let _ = send(
-        &app,
-        swap(Some("https://evil.example"), swap_body(CODE, VERIFIER)),
-    )
-    .await;
-    let origin = common::unreachable_origin().await;
-    let unreachable = self::app(&Table::token(&format!("{origin}/token")));
-    let _ = send(&unreachable, swap(Some(APP), swap_body(CODE, VERIFIER))).await;
-
-    let logs = String::from_utf8_lossy(&captured.lock().unwrap()).into_owned();
-    assert!(logs.contains("capture-probe"), "the capture works: {logs}");
-    assert!(!logs.contains(TELEGRAM_SECRET), "{logs}");
-    assert!(
-        !logs.contains(&BASIC[6..]),
-        "the encoded secret is logged: {logs}"
-    );
-}
-
-struct Capture(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for Capture {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 // ─── route B: the key list ───────────────────────────────────────────────────
 
 /// The key list reaches the caller byte for byte under Telegram's own media

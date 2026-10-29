@@ -8,12 +8,8 @@ use std::{
     sync::Arc,
 };
 
-use base64::Engine as _;
 use bytes::Bytes;
-use hyper::{
-    header::HeaderValue,
-    Uri,
-};
+use hyper::Uri;
 use serde::Deserialize;
 use serde_json::{
     json,
@@ -32,6 +28,7 @@ use crate::{
         Admitted,
         Origin,
     },
+    telegram::TelegramClient,
 };
 
 /// The longest `client_id` a platform entry carries, in bytes. The Application
@@ -81,9 +78,7 @@ impl Deployment {
         let platforms = platforms(settings.platforms.clone())?;
         let enabled = platforms.iter().find(|p| p.id == PlatformId::Telegram);
         let telegram = match (enabled, &settings.telegram) {
-            (Some(profile), Some(table)) => {
-                Some(TelegramClient::checked(&profile.client_id, table)?)
-            }
+            (Some(profile), Some(table)) => Some(table.checked(&profile.client_id)?),
             (None, None) => None,
             _ => {
                 return Err(Error::Config {
@@ -254,26 +249,14 @@ pub struct TelegramSettings {
     pub jwks_url: Option<String>,
 }
 
-/// Telegram's client, checked. `Debug` shows no secret.
-#[derive(Clone, Debug)]
-pub struct TelegramClient {
-    /// The public client id.
-    pub client_id: String,
-    /// `Basic base64(client_id:secret)`, marked sensitive.
-    pub authorization: HeaderValue,
-    /// The token endpoint.
-    pub token_url: Uri,
-    /// The key list.
-    pub jwks_url: Uri,
-}
-
-impl TelegramClient {
-    fn checked(client_id: &str, table: &TelegramSettings) -> Result<TelegramClient> {
+impl TelegramSettings {
+    /// Telegram's client `client_id`, its secret read and its URLs checked.
+    fn checked(&self, client_id: &str) -> Result<TelegramClient> {
         let refuse = |detail: String| Error::Config {
             detail: format!("telegram: {detail}"),
         };
-        let path = table.client_secret_file.display();
-        let text = std::fs::read_to_string(&table.client_secret_file).map_err(|e| {
+        let path = self.client_secret_file.display();
+        let text = std::fs::read_to_string(&self.client_secret_file).map_err(|e| {
             refuse(format!("client_secret_file {path} cannot be read: {e}"))
         })?;
         let secret = text.strip_suffix("\r\n").or(text.strip_suffix('\n'));
@@ -289,11 +272,6 @@ impl TelegramClient {
                 "the telegram platform's client_id must be digits".into(),
             ));
         }
-        let basic = base64::engine::general_purpose::STANDARD
-            .encode(format!("{client_id}:{secret}"));
-        let mut authorization = HeaderValue::from_str(&format!("Basic {basic}"))
-            .expect("base64 is a header value");
-        authorization.set_sensitive(true);
         let endpoint = |key: &str, value: Option<&str>, default: &str| {
             let value = value.unwrap_or(default);
             let url = url::Url::parse(value)
@@ -306,20 +284,20 @@ impl TelegramClient {
                     ))
                 })
         };
-        Ok(TelegramClient {
-            client_id: client_id.to_owned(),
-            authorization,
-            token_url: endpoint(
+        Ok(TelegramClient::new(
+            client_id,
+            secret,
+            endpoint(
                 "token_url",
-                table.token_url.as_deref(),
+                self.token_url.as_deref(),
                 "https://oauth.telegram.org/token",
             )?,
-            jwks_url: endpoint(
+            endpoint(
                 "jwks_url",
-                table.jwks_url.as_deref(),
+                self.jwks_url.as_deref(),
                 "https://oauth.telegram.org/.well-known/jwks.json",
             )?,
-        })
+        ))
     }
 }
 

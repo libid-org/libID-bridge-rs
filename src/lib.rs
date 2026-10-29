@@ -29,6 +29,7 @@ pub mod origin;
 mod outbound;
 pub mod routes;
 pub mod state;
+pub mod telegram;
 
 use std::sync::Arc;
 
@@ -64,10 +65,7 @@ impl Bridge {
             ceremony_config: deployment.ceremony_config(),
             failure,
             metrics: metrics.clone(),
-            telegram: deployment
-                .telegram
-                .clone()
-                .map(routes::telegram::Telegram::new),
+            telegram: deployment.telegram.clone().map(telegram::Telegram::new),
         });
         let refresher = artifact::upstream::Refresher::new(
             upstream,

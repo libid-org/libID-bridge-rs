@@ -4,10 +4,7 @@
 //! arrived. Neither a request nor an answer is logged, a swap's error code
 //! aside.
 
-use std::sync::{
-    Arc,
-    Mutex,
-};
+use std::sync::Arc;
 
 use axum::{
     body::Body,
@@ -24,10 +21,6 @@ use axum::{
     response::Response,
 };
 use bytes::Bytes;
-use http_body_util::{
-    BodyExt,
-    Full,
-};
 
 use super::config::{
     admission,
@@ -36,114 +29,15 @@ use super::config::{
     VARY_ON,
 };
 use crate::{
-    outbound::USER_AGENT,
     state::AppState,
+    telegram::{
+        copied,
+        is_json,
+        Failure,
+    },
 };
 
-/// How long one upstream call may take, dialing included.
-const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-/// How long a fetched key list is served from cache: the keeper's cadence,
-/// since a new key is unusable on chain until the keeper rotates it in.
-const KEYS_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 const UNADMITTED: &str = "this route is callable only from an admitted origin";
-
-type Client = hyper_util::client::legacy::Client<crate::outbound::Connector, Full<Bytes>>;
-
-/// Why an upstream call gave nothing to pass on: what the caller is told,
-/// and the detail the log gets.
-type Failure = (&'static str, String);
-
-const UNREACHABLE: &str = "could not be reached";
-
-/// Telegram's client, the connections to it, and the cached key list.
-pub struct Telegram {
-    client: crate::deployment::TelegramClient,
-    http: Client,
-    keys: Mutex<Option<(tokio::time::Instant, HeaderMap, Bytes)>>,
-}
-
-impl Telegram {
-    /// The routes' upstream for `client`.
-    pub fn new(client: crate::deployment::TelegramClient) -> Telegram {
-        Telegram {
-            client,
-            http: hyper_util::client::legacy::Client::builder(
-                hyper_util::rt::TokioExecutor::new(),
-            )
-            .build(crate::outbound::connector()),
-            keys: Mutex::default(),
-        }
-    }
-
-    /// One request within [`TIMEOUT`]: a redirect refused, the body bounded.
-    async fn call(
-        &self,
-        request: hyper::Request<Full<Bytes>>,
-        limit: usize,
-    ) -> Result<(StatusCode, HeaderMap, Bytes), Failure> {
-        let call = async {
-            let response = self
-                .http
-                .request(request)
-                .await
-                .map_err(|e| (UNREACHABLE, format!("{e:?}")))?;
-            if response.status().is_redirection() {
-                let detail = response.status().to_string();
-                return Err(("answered a redirect this bridge does not follow", detail));
-            }
-            let (parts, body) = response.into_parts();
-            let body = http_body_util::Limited::new(body, limit)
-                .collect()
-                .await
-                .map_err(|e| match e.is::<http_body_util::LengthLimitError>() {
-                    true => ("answered more than this bridge passes on", e.to_string()),
-                    false => (UNREACHABLE, e.to_string()),
-                })?;
-            Ok((parts.status, parts.headers, body.to_bytes()))
-        };
-        tokio::time::timeout(TIMEOUT, call)
-            .await
-            .map_err(|_| ("did not answer in time", String::new()))?
-    }
-
-    /// The key list's media type, encoding and bytes: cached while fresh, else
-    /// fetched, and cached only when a nonempty JSON `200`. The lock is never
-    /// held across a fetch, and an older fetch never replaces a newer one.
-    async fn keys(&self) -> Result<(HeaderMap, Bytes), Failure> {
-        let cached = self.keys.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some((_, headers, body)) =
-            cached.filter(|(at, ..)| at.elapsed() < KEYS_TTL)
-        {
-            return Ok((headers, body));
-        }
-        let request = hyper::Request::get(self.client.jwks_url.clone())
-            .header(header::USER_AGENT, USER_AGENT)
-            .body(Full::default())
-            .expect("a URI checked at startup");
-        let started = tokio::time::Instant::now();
-        let (status, upstream, body) = self.call(request, 64 * 1024).await?;
-        if status != StatusCode::OK {
-            return Err(("answered an error", status.to_string()));
-        }
-        let headers =
-            copied(&upstream, &[header::CONTENT_TYPE, header::CONTENT_ENCODING]);
-        if is_json(&headers) && !body.is_empty() {
-            let mut slot = self.keys.lock().unwrap_or_else(|e| e.into_inner());
-            if slot.as_ref().is_none_or(|(at, ..)| *at < started) {
-                *slot = Some((started, headers.clone(), body.clone()));
-            }
-        }
-        Ok((headers, body))
-    }
-}
-
-/// The `names` headers of `upstream`, where present.
-fn copied(upstream: &HeaderMap, names: &[header::HeaderName]) -> HeaderMap {
-    let present = names
-        .iter()
-        .filter_map(|n| Some((n.clone(), upstream.get(n)?.clone())));
-    present.collect()
-}
 
 /// An error Telegram answers a swap with; any other field is ignored.
 #[derive(serde::Deserialize)]
@@ -171,18 +65,6 @@ fn is_verifier(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b))
-}
-
-/// Whether `headers` carry exactly one `Content-Type`, and it is JSON.
-fn is_json(headers: &HeaderMap) -> bool {
-    let mut media = headers.get_all(header::CONTENT_TYPE).iter();
-    match (media.next(), media.next()) {
-        (Some(one), None) => one.to_str().is_ok_and(|m| {
-            let essence = m.split(';').next().unwrap_or_default();
-            essence.trim().eq_ignore_ascii_case("application/json")
-        }),
-        _ => false,
-    }
 }
 
 /// The swap a request carries, or why it is refused, quoting none of it.
@@ -281,22 +163,8 @@ pub async fn token(
         Ok(swap) => swap,
         Err(message) => return refuse(StatusCode::BAD_REQUEST, message, origin),
     };
-    let client = &telegram.client;
-    let form = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("grant_type", "authorization_code")
-        .append_pair("code", &swap.code)
-        .append_pair("redirect_uri", &swap.redirect_uri)
-        .append_pair("code_verifier", &swap.code_verifier)
-        .append_pair("client_id", &client.client_id)
-        .finish();
-    let request = hyper::Request::post(client.token_url.clone())
-        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-        .header(header::ACCEPT, "application/json")
-        .header(header::USER_AGENT, USER_AGENT)
-        .header(header::AUTHORIZATION, client.authorization.clone())
-        .body(Full::from(form))
-        .expect("a URI checked at startup");
-    match telegram.call(request, 8 * 1024).await {
+    let swapped = telegram.swap(&swap.code, &swap.redirect_uri, &swap.code_verifier);
+    match swapped.await {
         Ok((status, upstream, body)) => {
             let outcome = match serde_json::from_slice::<Refusal>(&body) {
                 Ok(Refusal { error: code }) => {
@@ -313,7 +181,12 @@ pub async fn token(
         }
         Err(e) => {
             state.metrics.telegram("token", "unreachable");
-            bad_gateway("Telegram's token endpoint", &client.token_url, e, origin)
+            bad_gateway(
+                "Telegram's token endpoint",
+                &telegram.client.token_url,
+                e,
+                origin,
+            )
         }
     }
 }

@@ -13,23 +13,44 @@ mod common;
 
 use std::{
     collections::BTreeSet,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc,
+        Mutex,
+    },
     time::Duration,
 };
 
 use axum::{
     body::Body,
-    http::{header, HeaderMap, Method, Request, StatusCode, Uri},
+    http::{
+        header,
+        HeaderMap,
+        Method,
+        Request,
+        StatusCode,
+        Uri,
+    },
     Router,
 };
 use bytes::Bytes;
 use http_body_util::BodyExt;
-use libid_bridge_rs::{config, routes, Bridge};
+use libid_bridge_rs::{
+    config,
+    routes,
+    Bridge,
+};
 use tower::ServiceExt;
 
 use crate::common::{
-    Distribution, FakeTelegram, ScratchFile, TokenReply, CLIENT_CREDENTIAL, CLIENT_ID,
-    TELEGRAM_CLIENT_ID, TELEGRAM_REDIRECT_URI, TELEGRAM_SECRET,
+    Distribution,
+    FakeTelegram,
+    ScratchFile,
+    TokenReply,
+    CLIENT_CREDENTIAL,
+    CLIENT_ID,
+    TELEGRAM_CLIENT_ID,
+    TELEGRAM_REDIRECT_URI,
+    TELEGRAM_SECRET,
 };
 
 const TOKEN_PATH: &str = "/api/v1/ceremony/telegram/token";

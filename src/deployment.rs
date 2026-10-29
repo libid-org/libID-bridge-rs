@@ -1,7 +1,7 @@
 //! What a deployment is, checked once at startup: the Distribution it
 //! selects, the origins it admits, the platforms it enables with the OAuth
 //! client each runs, and the public ceremony configuration composed from
-//! them. Nothing here is retrieved or bound.
+//! them. Nothing here is bound; only Telegram's client secret is read.
 
 use std::{
     path::PathBuf,
@@ -246,7 +246,7 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>>
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TelegramSettings {
-    /// Nonempty printable ASCII without whitespace, one trailing newline aside.
+    /// Nonempty `[A-Za-z0-9_-]`, one trailing newline aside.
     pub client_secret_file: PathBuf,
     /// HTTPS, or HTTP on loopback; Telegram's when unset.
     pub token_url: Option<String>,
@@ -278,11 +278,16 @@ impl TelegramClient {
         })?;
         let secret = text.strip_suffix("\r\n").or(text.strip_suffix('\n'));
         let secret = secret.unwrap_or(&text);
-        if secret.is_empty() || !printable_without_whitespace(secret) {
-            return Err(refuse(format!(
-                "client_secret_file {path} must hold nonempty printable ASCII \
-                 without whitespace"
-            )));
+        // Both form-encode to themselves, so Basic carries RFC 6749's form.
+        let plain = |b: u8| b.is_ascii_alphanumeric() || b"-_".contains(&b);
+        if secret.is_empty() || !secret.bytes().all(plain) {
+            let rule = "must hold nonempty [A-Za-z0-9_-]";
+            return Err(refuse(format!("client_secret_file {path} {rule}")));
+        }
+        if !client_id.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(refuse(
+                "the telegram platform's client_id must be digits".into(),
+            ));
         }
         let basic = base64::engine::general_purpose::STANDARD
             .encode(format!("{client_id}:{secret}"));

@@ -32,9 +32,9 @@ use tower::ServiceExt;
 
 const APP: &str = "https://app.example";
 const JSON: &str = "application/json";
-const SECRET: &str = "SECRET-7f3a>>>???";
-/// `printf '8123456789:SECRET-7f3a>>>???' | base64`, from coreutils.
-const BASIC: &str = "Basic ODEyMzQ1Njc4OTpTRUNSRVQtN2YzYT4+Pj8/Pw==";
+const SECRET: &str = "SECRET-7f3a_Qz9";
+/// `printf '8123456789:SECRET-7f3a_Qz9' | base64`, from coreutils.
+const BASIC: &str = "Basic ODEyMzQ1Njc4OTpTRUNSRVQtN2YzYV9Rejk=";
 const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 /// `{"keys":[{"kty":"RSA","kid":"oidc-1"}]}` through `gzip -n -9`.
 const GZIPPED: &[u8] =
@@ -165,6 +165,14 @@ async fn call(app: &Router, method: &str) -> (StatusCode, HeaderMap, Bytes) {
     send(app, method, path, &headers, body).await
 }
 
+/// Whether `/metrics` counts `n` Telegram calls on `route` ending in `outcome`.
+async fn counted(app: &Router, route: &str, outcome: &str, n: u32) -> bool {
+    let (_, _, text) = send(app, "GET", "/metrics", &[], "").await;
+    let line =
+        format!("telegram_calls_total{{route=\"{route}\",outcome=\"{outcome}\"}} {n}\n");
+    String::from_utf8_lossy(&text).contains(&line)
+}
+
 #[tokio::test]
 async fn a_swap_posts_the_exact_form_and_passes_the_answer_through() {
     let fake = Fake::serving(answering(401, r#"{"error":"invalid_grant"}"#));
@@ -196,6 +204,14 @@ async fn a_swap_posts_the_exact_form_and_passes_the_answer_through() {
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(headers["access-control-allow-methods"], "POST, OPTIONS");
     assert_eq!(headers["access-control-allow-headers"], "content-type");
+
+    let gzipped = Bytes::from_static(GZIPPED);
+    fake.serve(Some((200, JSON, Some("gzip"), gzipped)));
+    let (status, headers, answer) = call(&app, "POST").await;
+    assert_eq!((status, &answer[..]), (StatusCode::OK, GZIPPED));
+    assert_eq!(headers["content-encoding"], "gzip");
+    assert!(counted(&app, "token", "upstream_error", 1).await);
+    assert!(counted(&app, "token", "ok", 1).await);
 }
 
 #[tokio::test]
@@ -310,6 +326,10 @@ async fn an_upstream_failure_is_a_502_naming_only_its_kind() {
         assert_eq!((status, body.len()), (StatusCode::OK, len), "{method}");
     }
 
+    assert!(counted(&app, "token", "unreachable", 3).await);
+    assert!(counted(&app, "keys", "unreachable", 3).await);
+    assert!(counted(&app, "keys", "ok", 1).await);
+
     let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
     // The library's own failure lines were captured, and carry no secret.
     let lines = ["Telegram's token endpoint gave", "Telegram's key list gave"];
@@ -321,27 +341,36 @@ async fn an_upstream_failure_is_a_502_naming_only_its_kind() {
 }
 
 #[tokio::test]
-async fn the_key_list_passes_through_and_is_cached_for_ten_minutes() {
+async fn the_key_list_passes_through_and_is_cached_for_an_hour() {
     let fake = Fake::serving(answering(500, ""));
     let app = app(&fake.url);
     let get = || send(&app, "GET", JWKS, &[("origin", APP)], Body::empty());
     assert_eq!(get().await.0, StatusCode::BAD_GATEWAY);
 
-    let gzipped = Bytes::from_static(GZIPPED);
+    // Passed through, and not cached: each is fetched again.
+    for (media, body) in [("text/html", "<p>"), (JSON, "")] {
+        fake.serve(Some((200, media, None, Bytes::from(body))));
+        for _ in 0..2 {
+            let (status, _, got) = get().await;
+            assert_eq!((status, &got[..]), (StatusCode::OK, body.as_bytes()));
+        }
+    }
+
+    let media = "application/json; charset=utf-8";
     fake.serve(Some((
         200,
-        "application/jwk-set+json",
+        media,
         Some("gzip"),
-        gzipped,
+        Bytes::from_static(GZIPPED),
     )));
     let (status, headers, body) = get().await;
     assert_eq!((status, &body[..]), (StatusCode::OK, GZIPPED));
-    assert_eq!(headers["content-type"], "application/jwk-set+json");
+    assert_eq!(headers["content-type"], media);
     assert_eq!(headers["content-encoding"], "gzip");
     assert_eq!(headers["access-control-allow-origin"], APP);
     let seen = fake.seen();
-    assert_eq!((seen.len(), seen[1].0.as_str()), (2, "/jwks"));
-    assert!(seen[1].1.get("authorization").is_none());
+    assert_eq!((seen.len(), seen[5].0.as_str()), (6, "/jwks"));
+    assert!(seen[5].1.get("authorization").is_none());
 
     fake.serve(answering(200, "{}"));
     // No I/O runs while the clock is paused: these reads are the cache.
@@ -352,7 +381,7 @@ async fn the_key_list_passes_through_and_is_cached_for_ten_minutes() {
     tokio::time::advance(std::time::Duration::from_secs(1)).await;
     tokio::time::resume();
     assert_eq!(&get().await.2[..], b"{}");
-    assert_eq!(fake.seen().len(), 3);
+    assert_eq!(fake.seen().len(), 7);
 }
 
 #[test]
@@ -360,12 +389,15 @@ fn startup_refuses_an_unusable_telegram_table_naming_the_setting() {
     let secret = common::ScratchFile::holding(&format!("{SECRET}\r\n"));
     let empty = common::ScratchFile::holding("\n");
     let spaced = common::ScratchFile::holding("two words\n");
+    let plus = common::ScratchFile::holding("a+b\n");
     let good = settings("https://oauth.example", &secret);
     let table = |f: &dyn Fn(&mut TelegramSettings)| {
         let mut settings = good.clone();
         settings.telegram.as_mut().map(f);
         settings
     };
+    let mut lettered = good.clone();
+    lettered.platforms[0].client_id = "8123x".into();
     let mut untabled = good.clone();
     untabled.telegram = None;
     let mut platformless = common::config(&[]);
@@ -386,6 +418,11 @@ fn startup_refuses_an_unusable_telegram_table_naming_the_setting() {
             table(&|t| t.client_secret_file = spaced.path().into()),
             "client_secret_file",
         ),
+        (
+            table(&|t| t.client_secret_file = plus.path().into()),
+            "client_secret_file",
+        ),
+        (lettered, "client_id"),
         (untabled, "[telegram]"),
         (platformless, "[telegram]"),
     ];

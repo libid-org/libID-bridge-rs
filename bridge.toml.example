@@ -83,7 +83,8 @@ client_credential = "0123456789abcdef0123456789abcdef01234567"
 # through. The browser sends the redirect URI with each swap. The client id is
 # published like any other; the secret is not, and is never written in this
 # file: client_secret_file names a file holding it (one trailing newline is
-# ignored), read once at startup. token_url and jwks_url default to
+# ignored; a relative path resolves against the process working directory),
+# read once at startup. token_url and jwks_url default to
 # Telegram's endpoints. A [telegram] table is required exactly when a telegram
 # platform is enabled.
 #

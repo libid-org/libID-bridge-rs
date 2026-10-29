@@ -17,7 +17,7 @@
 //! route does. No other path is served, and no route but Telegram's swap
 //! performs a token exchange or opens a notary connection. Any other method
 //! on a ceremony route, `HEAD` included, is a `405` naming the methods it serves,
-//! and a request carrying a body is a `400`.
+//! and a request carrying a body is a `400`, Telegram's swap aside.
 
 pub mod callback;
 pub mod config;
@@ -75,7 +75,7 @@ impl<'a> Origins<'a> {
 
 /// Whether a request carries a body: whether its body stream is still open
 /// after the head, as any `Transfer-Encoding` or a `Content-Length` above zero
-/// leaves it over HTTP/1. Neither ceremony route takes one.
+/// leaves it over HTTP/1. Only Telegram's swap takes one.
 pub fn carries_body(body: &Body) -> bool {
     !body.is_end_stream()
 }
@@ -147,7 +147,8 @@ pub const TELEGRAM_TOKEN_PATH: &str = "/api/v1/ceremony/telegram/token";
 /// Telegram's key list.
 pub const TELEGRAM_JWKS_PATH: &str = "/api/v1/ceremony/telegram/jwks";
 
-/// The route table: the same routes for every deployment.
+/// The route table: the same for every deployment, Telegram's routes only
+/// where Telegram is enabled.
 pub fn build_router(state: Arc<AppState>) -> Router {
     let router = Router::new()
         .route(HEALTH_PATH, get(health))

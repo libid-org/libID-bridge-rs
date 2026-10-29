@@ -105,7 +105,7 @@ pub async fn preflight(
     let Some(Admission::Listed(origin)) = admission(&state, &headers) else {
         return refuse(
             StatusCode::FORBIDDEN,
-            "this configuration is readable only from an admitted origin",
+            "this route is callable only from an admitted origin",
             None,
         );
     };

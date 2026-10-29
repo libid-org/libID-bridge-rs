@@ -1,6 +1,6 @@
 //! What this deployment counts: how the callback artifact's retrievals went,
-//! whether a document is available to serve, and what the callback route
-//! answered.
+//! whether a document is available to serve, what the callback route
+//! answered, and how calls to Telegram ended.
 //!
 //! The Distribution is a separate deployment, so the numbers that matter are
 //! how long this bridge has been serving a document it could not replace and
@@ -40,6 +40,15 @@ pub struct Callback {
     outcome: &'static str,
 }
 
+/// How one call to Telegram ended.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct Telegram {
+    /// `token` or `keys`.
+    route: &'static str,
+    /// `ok`, `upstream_error` (a swap answered `{"error"}`) or `unreachable`.
+    outcome: &'static str,
+}
+
 /// The numbers this deployment publishes, and the registry that renders them.
 pub struct Metrics {
     /// The registry every metric below is registered with.
@@ -50,6 +59,8 @@ pub struct Metrics {
     failures: Family<Failure, Counter>,
     /// One per callback request, by what it was answered with.
     callbacks: Family<Callback, Counter>,
+    /// One per call to Telegram, by route and how it ended.
+    telegram: Family<Telegram, Counter>,
     /// `1` while a document is available to serve, `0` before the first one
     /// arrives.
     available: Gauge,
@@ -71,6 +82,7 @@ impl Metrics {
         let retrievals = Family::<Retrieval, Counter>::default();
         let failures = Family::<Failure, Counter>::default();
         let callbacks = Family::<Callback, Counter>::default();
+        let telegram = Family::<Telegram, Counter>::default();
         let available = Gauge::default();
         let published_at = Gauge::default();
 
@@ -90,6 +102,11 @@ impl Metrics {
             callbacks.clone(),
         );
         registry.register(
+            "telegram_calls",
+            "Calls to Telegram, by route and how each ended",
+            telegram.clone(),
+        );
+        registry.register(
             "callback_document_available",
             "Whether a callback document is available to serve",
             available.clone(),
@@ -105,6 +122,7 @@ impl Metrics {
             retrievals,
             failures,
             callbacks,
+            telegram,
             available,
             published_at,
         }
@@ -143,6 +161,13 @@ impl Metrics {
             .get_or_create(&Callback {
                 outcome: "unavailable",
             })
+            .inc();
+    }
+
+    /// A Telegram route's call ended with `outcome`.
+    pub fn telegram(&self, route: &'static str, outcome: &'static str) {
+        self.telegram
+            .get_or_create(&Telegram { route, outcome })
             .inc();
     }
 

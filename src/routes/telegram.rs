@@ -1,7 +1,8 @@
 //! Telegram's code swap and key list. Telegram answers no CORS, so the browser
 //! calls these: the swap is sent with the private client secret, the key list
 //! fetched without credentials, and Telegram's answers pass through as they
-//! arrived. Neither a request nor an answer is logged.
+//! arrived. Neither a request nor an answer is logged, a swap's error code
+//! aside.
 
 use std::sync::{
     Arc,
@@ -109,7 +110,8 @@ impl Telegram {
     }
 
     /// The key list's media type, encoding and bytes: cached while fresh, else
-    /// fetched. The lock is never held across a fetch.
+    /// fetched, and cached only when a nonempty JSON `200`. The lock is never
+    /// held across a fetch, and an older fetch never replaces a newer one.
     async fn keys(&self) -> Result<(HeaderMap, Bytes), Failure> {
         let cached = self.keys.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if let Some((_, headers, body)) =
@@ -121,20 +123,35 @@ impl Telegram {
             .header(header::USER_AGENT, USER_AGENT)
             .body(Full::default())
             .expect("a URI checked at startup");
+        let started = tokio::time::Instant::now();
         let (status, upstream, body) = self.call(request, 64 * 1024).await?;
         if status != StatusCode::OK {
             return Err(("answered an error", status.to_string()));
         }
-        let mut headers = HeaderMap::new();
-        for name in [header::CONTENT_TYPE, header::CONTENT_ENCODING] {
-            if let Some(value) = upstream.get(&name) {
-                headers.insert(name, value.clone());
+        let headers =
+            copied(&upstream, &[header::CONTENT_TYPE, header::CONTENT_ENCODING]);
+        if is_json(&headers) && !body.is_empty() {
+            let mut slot = self.keys.lock().unwrap_or_else(|e| e.into_inner());
+            if slot.as_ref().is_none_or(|(at, ..)| *at < started) {
+                *slot = Some((started, headers.clone(), body.clone()));
             }
         }
-        *self.keys.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some((tokio::time::Instant::now(), headers.clone(), body.clone()));
         Ok((headers, body))
     }
+}
+
+/// The `names` headers of `upstream`, where present.
+fn copied(upstream: &HeaderMap, names: &[header::HeaderName]) -> HeaderMap {
+    let present = names
+        .iter()
+        .filter_map(|n| Some((n.clone(), upstream.get(n)?.clone())));
+    present.collect()
+}
+
+/// An error Telegram answers a swap with; any other field is ignored.
+#[derive(serde::Deserialize)]
+struct Refusal {
+    error: String,
 }
 
 /// The swap request body.
@@ -283,12 +300,24 @@ pub async fn token(
         .body(Full::from(form))
         .expect("a URI checked at startup");
     match telegram.call(request, 8 * 1024).await {
-        Ok((status, _, body)) => {
+        Ok((status, upstream, body)) => {
+            let outcome = match serde_json::from_slice::<Refusal>(&body) {
+                Ok(Refusal { error: code }) => {
+                    tracing::warn!(error = %code, "Telegram refused the swap");
+                    "upstream_error"
+                }
+                Err(_) => "ok",
+            };
+            state.metrics.telegram("token", outcome);
+            let mut headers = copied(&upstream, &[header::CONTENT_ENCODING]);
             let json = HeaderValue::from_static("application/json");
-            let headers = HeaderMap::from_iter([(header::CONTENT_TYPE, json)]);
+            headers.insert(header::CONTENT_TYPE, json);
             answer(status, headers, origin, body)
         }
-        Err(e) => bad_gateway("Telegram's token endpoint", &client.token_url, e, origin),
+        Err(e) => {
+            state.metrics.telegram("token", "unreachable");
+            bad_gateway("Telegram's token endpoint", &client.token_url, e, origin)
+        }
     }
 }
 
@@ -311,8 +340,12 @@ pub async fn keys(
         return refuse(StatusCode::BAD_REQUEST, message, origin);
     }
     match telegram.keys().await {
-        Ok((headers, body)) => answer(StatusCode::OK, headers, origin, body),
+        Ok((headers, body)) => {
+            state.metrics.telegram("keys", "ok");
+            answer(StatusCode::OK, headers, origin, body)
+        }
         Err(e) => {
+            state.metrics.telegram("keys", "unreachable");
             bad_gateway("Telegram's key list", &telegram.client.jwks_url, e, origin)
         }
     }

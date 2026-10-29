@@ -58,6 +58,16 @@ pub(super) enum Admission {
     SameOrigin,
 }
 
+impl Admission {
+    /// The allow-origin to answer with: the listed origin, or none.
+    pub(super) fn allow_origin(self) -> Option<HeaderValue> {
+        match self {
+            Admission::Listed(origin) => Some(origin),
+            Admission::SameOrigin => None,
+        }
+    }
+}
+
 /// How this request may read the configuration, or `None`.
 ///
 /// One `Origin` must be admitted by a member of the admission set: `null`, a
@@ -98,11 +108,19 @@ pub(super) fn admission(state: &AppState, headers: &HeaderMap) -> Option<Admissi
 /// set. A preflight carries one by definition, so the same-origin case is not
 /// one and is refused like any other. The answer grants `GET`, the headers the
 /// request asked for, and no credentials.
-pub async fn preflight(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+pub async fn preflight(state: State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    grant(&state, &headers, "GET", None)
+}
+
+/// A preflight answer granting `methods` and `allow_headers`, or, where that
+/// is `None`, the headers asked for. Admission is the read's.
+pub(super) fn grant(
+    state: &AppState,
+    headers: &HeaderMap,
+    methods: &'static str,
+    allow_headers: Option<&'static str>,
 ) -> Response {
-    let Some(Admission::Listed(origin)) = admission(&state, &headers) else {
+    let Some(Admission::Listed(origin)) = admission(state, headers) else {
         return refuse(
             StatusCode::FORBIDDEN,
             "this route is callable only from an admitted origin",
@@ -115,17 +133,17 @@ pub async fn preflight(
     out.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
     out.insert(
         header::ACCESS_CONTROL_ALLOW_METHODS,
-        HeaderValue::from_static("GET"),
+        HeaderValue::from_static(methods),
     );
     out.insert(
         header::ACCESS_CONTROL_MAX_AGE,
         HeaderValue::from_static(PREFLIGHT_MAX_AGE),
     );
-    // The record is public and read without credentials, so the headers a
-    // caller wants to send are granted as asked rather than from a list this
-    // service would have to keep.
-    if let Some(asked) = headers.get(header::ACCESS_CONTROL_REQUEST_HEADERS) {
-        out.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, asked.clone());
+    // Unlisted, the headers are granted as asked: no preflight grants
+    // credentials, so there is no list worth keeping.
+    let asked = headers.get(header::ACCESS_CONTROL_REQUEST_HEADERS).cloned();
+    if let Some(granted) = allow_headers.map(HeaderValue::from_static).or(asked) {
+        out.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, granted);
     }
 
     (StatusCode::NO_CONTENT, out).into_response()
@@ -147,19 +165,9 @@ pub async fn config(
         );
     };
 
-    let malformed = if query.is_some_and(|q| !q.is_empty()) {
-        Some("this route takes no query")
-    } else if crate::routes::carries_body(&body) {
-        Some("this route takes no request body")
-    } else {
-        None
-    };
-    if let Some(message) = malformed {
-        let admitted = match &admission {
-            Admission::Listed(origin) => Some(origin.clone()),
-            Admission::SameOrigin => None,
-        };
-        return refuse(StatusCode::BAD_REQUEST, message, admitted);
+    let origin = admission.allow_origin();
+    if let Some(message) = crate::routes::malformed(query, &body) {
+        return refuse(StatusCode::BAD_REQUEST, message, origin);
     }
 
     // `insert`, not append: the `Bytes` body would otherwise add its own
@@ -172,7 +180,7 @@ pub async fn config(
     );
     // The exact origin that asked, never `*`; no credentials. A same-origin
     // read gets no allow-origin.
-    if let Admission::Listed(origin) = admission {
+    if let Some(origin) = origin {
         out.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
     }
 

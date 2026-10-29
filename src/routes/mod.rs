@@ -80,6 +80,17 @@ pub fn carries_body(body: &Body) -> bool {
     !body.is_end_stream()
 }
 
+/// Why a route taking neither a query nor a body refuses this request.
+fn malformed(query: Option<String>, body: &Body) -> Option<&'static str> {
+    if query.is_some_and(|q| !q.is_empty()) {
+        Some("this route takes no query")
+    } else if carries_body(body) {
+        Some("this route takes no request body")
+    } else {
+        None
+    }
+}
+
 /// `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, put on
 /// every response this service writes, a refusal and an unrouted path
 /// included.

@@ -29,6 +29,7 @@ use super::config::{
     VARY_ON,
 };
 use crate::{
+    deployment::printable_without_whitespace,
     state::AppState,
     telegram::{
         copied,
@@ -56,7 +57,7 @@ struct Swap {
 
 /// Whether `value` is 1 to 512 bytes of printable ASCII without spaces.
 fn printable(value: &str) -> bool {
-    (1..=512).contains(&value.len()) && value.bytes().all(|b| (0x21..=0x7E).contains(&b))
+    (1..=512).contains(&value.len()) && printable_without_whitespace(value)
 }
 
 /// Whether `value` is an RFC 7636 code verifier.
@@ -96,14 +97,6 @@ async fn read_swap(
     }
 }
 
-/// The allow-origin of an admitted request, or `None` for an unadmitted one.
-fn admitted(state: &AppState, headers: &HeaderMap) -> Option<Option<HeaderValue>> {
-    admission(state, headers).map(|admitted| match admitted {
-        Admission::Listed(origin) => Some(origin),
-        Admission::SameOrigin => None,
-    })
-}
-
 /// `status`, `headers` and `body`, under the CORS of `/config`.
 fn answer(
     status: StatusCode,
@@ -134,18 +127,12 @@ fn bad_gateway(
     refuse(StatusCode::BAD_GATEWAY, &message, origin)
 }
 
-/// `OPTIONS` on the swap: `/config`'s preflight, granting `POST` with
-/// `Content-Type`.
-pub async fn preflight(state: State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    let mut response = super::config::preflight(state, headers).await;
-    if response.status() == StatusCode::NO_CONTENT {
-        let out = response.headers_mut();
-        let methods = HeaderValue::from_static("POST, OPTIONS");
-        out.insert(header::ACCESS_CONTROL_ALLOW_METHODS, methods);
-        let allowed = HeaderValue::from_static("content-type");
-        out.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, allowed);
-    }
-    response
+/// `OPTIONS` on the swap: granting `POST` with `Content-Type`.
+pub async fn preflight(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    super::config::grant(&state, &headers, "POST, OPTIONS", Some("content-type"))
 }
 
 /// `POST /api/v1/ceremony/telegram/token`.
@@ -156,7 +143,7 @@ pub async fn token(
     body: Body,
 ) -> Response {
     let telegram = state.telegram.as_ref().expect("routed only with Telegram");
-    let Some(origin) = admitted(&state, &headers) else {
+    let Some(origin) = admission(&state, &headers).map(Admission::allow_origin) else {
         return refuse(StatusCode::FORBIDDEN, UNADMITTED, None);
     };
     let swap = match read_swap(query, &headers, body).await {
@@ -199,14 +186,10 @@ pub async fn keys(
     body: Body,
 ) -> Response {
     let telegram = state.telegram.as_ref().expect("routed only with Telegram");
-    let Some(origin) = admitted(&state, &headers) else {
+    let Some(origin) = admission(&state, &headers).map(Admission::allow_origin) else {
         return refuse(StatusCode::FORBIDDEN, UNADMITTED, None);
     };
-    if query.is_some_and(|q| !q.is_empty()) {
-        return refuse(StatusCode::BAD_REQUEST, "this route takes no query", origin);
-    }
-    if super::carries_body(&body) {
-        let message = "this route takes no request body";
+    if let Some(message) = super::malformed(query, &body) {
         return refuse(StatusCode::BAD_REQUEST, message, origin);
     }
     match telegram.keys().await {

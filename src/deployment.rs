@@ -301,10 +301,8 @@ impl TelegramSettings {
     }
 }
 
-/// Whether every byte of `value` is printable ASCII carrying no whitespace,
-/// which is what a public client identifier and a public client credential
-/// are made of.
-fn printable_without_whitespace(value: &str) -> bool {
+/// Whether every byte of `value` is printable ASCII carrying no whitespace.
+pub(crate) fn printable_without_whitespace(value: &str) -> bool {
     value.bytes().all(|b| (0x21..=0x7E).contains(&b))
 }
 

@@ -20,10 +20,7 @@ use hyper::{
     StatusCode,
     Uri,
 };
-use hyper_util::{
-    client::legacy::connect::HttpConnector,
-    rt::TokioExecutor,
-};
+use hyper_util::rt::TokioExecutor;
 use tokio::sync::watch;
 
 use super::{
@@ -38,14 +35,15 @@ use crate::{
         Admitted,
         Origin,
     },
+    outbound::{
+        connector,
+        Connector,
+        USER_AGENT,
+    },
 };
 
 /// The artifact's path under the CCDP origin.
 pub const ARTIFACT_PATH: &str = "/ccdp/callback.html";
-
-/// How long opening the transport may take: resolution, the connection, and
-/// the TLS handshake over it.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How long the request and its answer may take once the transport is open.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -74,28 +72,7 @@ impl Schedule {
 /// The client one deployment retrieves with: one pooled connection over TLS
 /// whose anchors are compiled in from `webpki-roots`. No system trust store
 /// is read.
-type Client = hyper_util::client::legacy::Client<
-    hyper_rustls::HttpsConnector<HttpConnector>,
-    Empty<Bytes>,
->;
-
-/// The `User-Agent` of every outbound request.
-pub(crate) const USER_AGENT: &str = concat!("libid-bridge/", env!("CARGO_PKG_VERSION"));
-
-/// The connector every outbound request dials with: compiled-in roots, and
-/// plaintext `http` for a loopback URL the caller has checked.
-pub(crate) fn connector() -> hyper_rustls::HttpsConnector<HttpConnector> {
-    // The connector dials by URL, so `enforce_http` must be off for the
-    // https wrapper to see an `https` one.
-    let mut http = HttpConnector::new();
-    http.set_connect_timeout(Some(CONNECT_TIMEOUT));
-    http.enforce_http(false);
-    hyper_rustls::HttpsConnectorBuilder::new()
-        .with_webpki_roots()
-        .https_or_http()
-        .enable_http1()
-        .wrap_connector(http)
-}
+type Client = hyper_util::client::legacy::Client<Connector, Empty<Bytes>>;
 
 /// Why a retrieval did not produce a document. Every variant is a refusal,
 /// never a repair.

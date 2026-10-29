@@ -36,7 +36,7 @@ use super::config::{
     VARY_ON,
 };
 use crate::{
-    artifact::upstream::USER_AGENT,
+    outbound::USER_AGENT,
     state::AppState,
 };
 
@@ -47,10 +47,7 @@ const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const KEYS_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 const UNADMITTED: &str = "this route is callable only from an admitted origin";
 
-type Client = hyper_util::client::legacy::Client<
-    hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
-    Full<Bytes>,
->;
+type Client = hyper_util::client::legacy::Client<crate::outbound::Connector, Full<Bytes>>;
 
 /// Why an upstream call gave nothing to pass on: what the caller is told,
 /// and the detail the log gets.
@@ -73,7 +70,7 @@ impl Telegram {
             http: hyper_util::client::legacy::Client::builder(
                 hyper_util::rt::TokioExecutor::new(),
             )
-            .build(crate::artifact::upstream::connector()),
+            .build(crate::outbound::connector()),
             keys: Mutex::default(),
         }
     }

@@ -25,6 +25,7 @@ pub mod deployment;
 pub mod error;
 pub mod metrics;
 pub mod origin;
+pub mod outbound;
 pub mod routes;
 pub mod state;
 

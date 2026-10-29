@@ -20,7 +20,6 @@ use hyper::{
     StatusCode,
     Uri,
 };
-use hyper_util::rt::TokioExecutor;
 use tokio::sync::watch;
 
 use super::{
@@ -63,11 +62,6 @@ impl Schedule {
         floor: Duration::from_secs(1),
     };
 }
-
-/// The client one deployment retrieves with: one pooled connection, dialed
-/// by [`crate::outbound::connector`].
-type Client =
-    hyper_util::client::legacy::Client<crate::outbound::Connector, Empty<Bytes>>;
 
 /// Why a retrieval did not produce a document. Every variant is a refusal,
 /// never a repair.
@@ -155,7 +149,7 @@ pub struct Upstream {
     /// The artifact's absolute URL, built once.
     uri: Uri,
     /// The connections this deployment retrieves over.
-    client: Client,
+    client: crate::outbound::GetClient,
 }
 
 impl Upstream {
@@ -175,8 +169,7 @@ impl Upstream {
         Ok(Upstream {
             uri,
             origin: origin.clone(),
-            client: hyper_util::client::legacy::Client::builder(TokioExecutor::new())
-                .build(crate::outbound::connector()),
+            client: crate::outbound::get_client(),
         })
     }
 

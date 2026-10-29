@@ -5,7 +5,12 @@
 
 use std::time::Duration;
 
-use hyper_util::client::legacy::connect::HttpConnector;
+use bytes::Bytes;
+use http_body_util::Empty;
+use hyper_util::{
+    client::legacy::connect::HttpConnector,
+    rt::TokioExecutor,
+};
 
 /// How long opening the transport may take: resolution, the connection, and
 /// the TLS handshake over it.
@@ -30,6 +35,14 @@ pub fn connector() -> Connector {
         .https_or_http()
         .enable_http1()
         .wrap_connector(http)
+}
+
+/// A client sending bodiless requests: every `GET` this bridge makes.
+pub type GetClient = hyper_util::client::legacy::Client<Connector, Empty<Bytes>>;
+
+/// A fresh [`GetClient`] over [`connector`].
+pub fn get_client() -> GetClient {
+    hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(connector())
 }
 
 /// What went wrong, from an error whose own message names only its layer: the

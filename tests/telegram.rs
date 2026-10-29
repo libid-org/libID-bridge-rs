@@ -499,3 +499,180 @@ async fn a_key_list_request_with_a_body_is_refused() {
         serde_json::from_slice(&bytes_of(response).await).unwrap();
     assert_eq!(refusal["message"], "this route takes no request body");
 }
+
+/// The decoded form Telegram received in `swap`.
+fn form_of(swap: &common::SeenSwap) -> Vec<(String, String)> {
+    url::form_urlencoded::parse(&swap.body)
+        .into_owned()
+        .collect()
+}
+
+/// `{"code","codeVerifier","redirectUri"}` padded with JSON whitespace to
+/// exactly `len` bytes.
+fn padded_body(len: usize) -> String {
+    let body = swap_body();
+    format!("{body}{}", " ".repeat(len - body.len()))
+}
+
+/// The body cap is 2 KiB: a valid swap padded to 2048 bytes is sent, one
+/// byte more is refused naming the cap.
+#[tokio::test]
+async fn the_request_body_is_capped_at_exactly_2_kib() {
+    let fake = FakeTelegram::serving(TokenReply::with(200, TOKENS));
+    let at_cap = padded_body(2048);
+    assert_eq!(at_cap.len(), 2048);
+    let response = send(
+        state(&fake),
+        post(Some(APP_ORIGIN), PATH, "application/json", at_cap),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(fake.requests().len(), 1);
+
+    let response = send(
+        state(&fake),
+        post(
+            Some(APP_ORIGIN),
+            PATH,
+            "application/json",
+            padded_body(2049),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let refusal: serde_json::Value =
+        serde_json::from_slice(&bytes_of(response).await).unwrap();
+    assert_eq!(
+        refusal["message"],
+        "the request body could not be read within 2048 bytes"
+    );
+    assert_eq!(fake.requests().len(), 1);
+}
+
+/// A code and a redirect URI of exactly 512 bytes, spanning the printable
+/// range from `!` (0x21) to `~` (0x7E), reach Telegram unchanged.
+#[tokio::test]
+async fn a_code_and_redirect_uri_at_their_bounds_are_sent_unchanged() {
+    let fake = FakeTelegram::serving(TokenReply::with(200, TOKENS));
+    let code = format!("!{}~", "c".repeat(510));
+    let redirect = format!("!{}~", "r".repeat(510));
+    assert_eq!((code.len(), redirect.len()), (512, 512));
+    let response = send(
+        state(&fake),
+        post(
+            Some(APP_ORIGIN),
+            PATH,
+            "application/json",
+            body_of(&code, VERIFIER, &redirect),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let fields = form_of(&fake.requests()[0]);
+    let get = |key: &str| fields.iter().find(|(k, _)| k == key).unwrap().1.clone();
+    assert_eq!(get("code"), code);
+    assert_eq!(get("redirect_uri"), redirect);
+}
+
+/// The media type is matched case-insensitively and its parameters are
+/// ignored (RFC 9110 §8.3.1); another type is refused.
+#[tokio::test]
+async fn a_json_media_type_is_matched_as_rfc_9110_reads_it() {
+    let fake = FakeTelegram::serving(TokenReply::with(200, TOKENS));
+    for media in ["Application/JSON", "application/json; charset=utf-8"] {
+        let response = send(
+            state(&fake),
+            post(Some(APP_ORIGIN), PATH, media, swap_body()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "{media}");
+    }
+    let response = send(
+        state(&fake),
+        post(Some(APP_ORIGIN), PATH, "application/jsonx", swap_body()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(fake.requests().len(), 2);
+}
+
+/// The `Basic` credential is standard base64, padded, not the URL-safe
+/// alphabet: a secret whose encoding carries `+` and `/` keeps them.
+#[tokio::test]
+async fn the_basic_credential_uses_the_standard_base64_alphabet() {
+    let fake = FakeTelegram::serving(TokenReply::with(200, TOKENS));
+    let (mut settings, _fixture) = telegram_config(fake.url());
+    let secret = common::ScratchFile::holding(">>>???\n");
+    settings.telegram.as_mut().unwrap().client_secret_file = secret.path().to_owned();
+    let state = Bridge::start(&settings).unwrap().state;
+    let response = send(
+        state,
+        post(Some(APP_ORIGIN), PATH, "application/json", swap_body()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    // `printf '8123456789:>>>???' | base64`, from coreutils.
+    assert_eq!(
+        fake.requests()[0].headers["authorization"],
+        "Basic ODEyMzQ1Njc4OTo+Pj4/Pz8="
+    );
+}
+
+/// A deployment whose key list is served by `fake`.
+fn keys_state(fake: &FakeTelegram) -> Arc<AppState> {
+    let (mut settings, _secret) = telegram_config(fake.url());
+    settings.telegram.as_mut().unwrap().jwks_url = fake.url().to_owned();
+    Bridge::start(&settings).unwrap().state
+}
+
+fn get_keys() -> Request<Body> {
+    Request::get(routes::TELEGRAM_JWKS_PATH)
+        .header(header::ORIGIN, APP_ORIGIN)
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// A key list answering a redirect and one answering an error are told apart
+/// in the `502`.
+#[tokio::test]
+async fn a_key_list_redirect_and_error_are_named_apart() {
+    for (status, message) in [
+        (
+            302,
+            "Telegram's key list answered a redirect this bridge does not follow",
+        ),
+        (500, "Telegram's key list answered an error"),
+    ] {
+        let fake = FakeTelegram::serving(TokenReply::with(status, r#"{"keys":[]}"#));
+        let response = send(keys_state(&fake), get_keys()).await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{status}");
+        let refusal: serde_json::Value =
+            serde_json::from_slice(&bytes_of(response).await).unwrap();
+        assert_eq!(refusal["message"], message, "{status}");
+    }
+}
+
+/// The key list is served from cache for 600 s after a fetch, and fetched
+/// again after.
+#[tokio::test]
+async fn the_key_list_is_fetched_again_after_ten_minutes() {
+    let fake = FakeTelegram::serving(TokenReply::with(200, r#"{"keys":[1]}"#));
+    let state = keys_state(&fake);
+    let read = |state: &Arc<AppState>| send(state.clone(), get_keys());
+
+    let first = read(&state).await;
+    assert_eq!(&bytes_of(first).await[..], br#"{"keys":[1]}"#);
+    fake.now_serves(TokenReply::with(200, r#"{"keys":[2]}"#));
+
+    // No I/O runs while the clock is paused: the second read is the cache.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(599)).await;
+    let second = read(&state).await;
+    assert_eq!(&bytes_of(second).await[..], br#"{"keys":[1]}"#);
+    tokio::time::advance(Duration::from_secs(2)).await;
+    tokio::time::resume();
+
+    let third = read(&state).await;
+    assert_eq!(&bytes_of(third).await[..], br#"{"keys":[2]}"#);
+    assert_eq!(fake.requests().len(), 2);
+}

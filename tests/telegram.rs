@@ -480,3 +480,22 @@ async fn a_deployment_without_telegram_serves_no_swap() {
         .get("access-control-allow-origin")
         .is_none());
 }
+
+/// A key-list `GET` carrying a body is refused before anything is fetched.
+#[tokio::test]
+async fn a_key_list_request_with_a_body_is_refused() {
+    let fake = FakeTelegram::serving(TokenReply::with(200, TOKENS));
+    let request = Request::get(routes::TELEGRAM_JWKS_PATH)
+        .header(header::ORIGIN, APP_ORIGIN)
+        .body(Body::from("{}"))
+        .unwrap();
+    let response = send(state(&fake), request).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response.headers()["access-control-allow-origin"],
+        APP_ORIGIN
+    );
+    let refusal: serde_json::Value =
+        serde_json::from_slice(&bytes_of(response).await).unwrap();
+    assert_eq!(refusal["message"], "this route takes no request body");
+}

@@ -11,9 +11,9 @@
 //! after the callback is served by that Distribution. Where Telegram is
 //! enabled, this service swaps the browser's code at Telegram's token endpoint
 //! with Telegram's private client secret, the one secret it holds, and returns
-//! the answer untouched. It performs no other token exchange, opens no notary
-//! connection, verifies no proof, holds no key of its own, keeps no ceremony
-//! state, and talks to no chain.
+//! the answer untouched, and passes Telegram's key list through. It performs
+//! no other token exchange, opens no notary connection, verifies no proof,
+//! holds no key of its own, keeps no ceremony state, and talks to no chain.
 //!
 //! The Distribution is a separate deployment and this one starts without it.
 //! The callback route says it has no document until a retrieval produces one,
@@ -58,7 +58,8 @@ impl Bridge {
         Bridge::start_with(settings, telegram::EXCHANGE_TIMEOUT)
     }
 
-    /// The same, with each Telegram code swap bounded by `exchange_timeout`.
+    /// The same, with each Telegram swap and key fetch bounded by
+    /// `exchange_timeout`.
     pub fn start_with(
         settings: &config::Settings,
         exchange_timeout: std::time::Duration,
@@ -67,7 +68,7 @@ impl Bridge {
         let telegram = deployment
             .telegram
             .clone()
-            .map(|client| telegram::TokenExchange::new(client, exchange_timeout))
+            .map(|client| telegram::Telegram::new(client, exchange_timeout))
             .transpose()?;
         let upstream = artifact::upstream::Upstream::new(&deployment.ccdp_origin)?;
         let (sender, callback) = tokio::sync::watch::channel(None);

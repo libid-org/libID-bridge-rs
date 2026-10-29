@@ -482,7 +482,7 @@ pub const TELEGRAM_CLIENT_ID: &str = "8123456789";
 /// with: a marker no response, debug rendering or log line may carry.
 pub const TELEGRAM_SECRET: &str = "SECRET-MARKER-7f3a";
 
-/// The redirect URI every fixture deployment swaps Telegram codes for.
+/// The redirect URI every fixture swap sends.
 pub const TELEGRAM_REDIRECT_URI: &str = "https://bridge.example/auth/callback";
 
 /// A deployment from [`config`] enabling GitHub and Telegram, its token URL
@@ -498,8 +498,8 @@ pub fn telegram_config(token_url: &str) -> (config::Settings, ScratchFile) {
     ]);
     settings.telegram = Some(libid_bridge_rs::deployment::TelegramSettings {
         client_secret_file: secret.path().to_owned(),
-        redirect_uri: TELEGRAM_REDIRECT_URI.to_owned(),
         token_url: token_url.to_owned(),
+        jwks_url: libid_bridge_rs::deployment::TELEGRAM_JWKS_URL.to_owned(),
     });
     (settings, secret)
 }

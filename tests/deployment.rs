@@ -835,8 +835,7 @@ mod telegram {
 
     fn table(secret_file: &std::path::Path, rest: &str) -> String {
         format!(
-            "[telegram]\nclient_secret_file = {:?}\n\
-             redirect_uri = \"https://bridge.example/auth/callback\"\n{rest}",
+            "[telegram]\nclient_secret_file = {:?}\n{rest}",
             secret_file.display().to_string()
         )
     }
@@ -851,7 +850,7 @@ mod telegram {
     }
 
     #[test]
-    fn a_telegram_table_reads_its_secret_from_a_file_and_defaults_the_endpoint() {
+    fn a_telegram_table_reads_its_secret_from_a_file_and_defaults_the_endpoints() {
         let secret = ScratchFile::holding(&format!("{TELEGRAM_SECRET}\r\n"));
         let client = started(&file(&table(secret.path(), "")))
             .unwrap()
@@ -862,7 +861,10 @@ mod telegram {
             client.token_url.as_str(),
             "https://oauth.telegram.org/token"
         );
-        assert_eq!(client.redirect_uri, "https://bridge.example/auth/callback");
+        assert_eq!(
+            client.jwks_url.as_str(),
+            "https://oauth.telegram.org/.well-known/jwks.json"
+        );
     }
 
     #[test]
@@ -873,7 +875,7 @@ mod telegram {
         let doubled = ScratchFile::holding(&format!("{TELEGRAM_SECRET}\n\n"));
         for toml in [
             file(""),
-            file("[telegram]\nredirect_uri = \"https://bridge.example/auth/callback\"\n"),
+            file("[telegram]\ntoken_url = \"https://oauth.telegram.org/token\"\n"),
             file(&table(&missing, "")),
             file(&table(empty.path(), "")),
             file(&table(spaced.path(), "")),
@@ -886,29 +888,31 @@ mod telegram {
     }
 
     #[test]
-    fn the_redirect_uri_and_the_endpoint_are_https() {
+    fn the_endpoints_are_https_or_loopback() {
         let secret = ScratchFile::holding(TELEGRAM_SECRET);
         let path = secret.path();
-        let plain_redirect = format!(
-            "[telegram]\nclient_secret_file = {:?}\n\
-             redirect_uri = \"http://bridge.example/auth/callback\"\n",
-            path.display().to_string()
-        );
-        let err = started(&file(&plain_redirect)).expect_err("plaintext redirect");
-        assert!(err.contains("redirect_uri"), "{err}");
+        for key in ["token_url", "jwks_url"] {
+            let err = started(&file(&table(
+                path,
+                &format!("{key} = \"http://oauth.telegram.org/x\"\n"),
+            )))
+            .expect_err("plaintext endpoint off loopback");
+            assert!(err.contains(key), "{err}");
 
+            started(&file(&table(
+                path,
+                &format!("{key} = \"http://127.0.0.1:9/x\"\n"),
+            )))
+            .expect("a loopback endpoint");
+        }
+
+        // The client sends the redirect URI; the table has no such key.
         let err = started(&file(&table(
             path,
-            "token_url = \"http://oauth.telegram.org/token\"\n",
+            "redirect_uri = \"https://bridge.example/auth/callback\"\n",
         )))
-        .expect_err("plaintext endpoint off loopback");
-        assert!(err.contains("token_url"), "{err}");
-
-        started(&file(&table(
-            path,
-            "token_url = \"http://127.0.0.1:9/token\"\n",
-        )))
-        .expect("a loopback endpoint");
+        .expect_err("redirect_uri is not a [telegram] key");
+        assert!(err.contains("`redirect_uri`"), "{err}");
     }
 
     #[test]

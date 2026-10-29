@@ -1,6 +1,6 @@
 //! Telegram's code swap over the axum router, against a fake token endpoint:
 //! the form it sends, the answer it passes on, what it refuses, and that the
-//! private secret leaves only in the form.
+//! private secret leaves only in the `Authorization` header.
 
 // Each suite uses its part of the module.
 #[allow(dead_code)]
@@ -24,6 +24,7 @@ use common::{
     telegram_config,
     FakeTelegram,
     TokenReply,
+    TELEGRAM_REDIRECT_URI,
     TELEGRAM_SECRET,
 };
 use http_body_util::BodyExt;
@@ -53,7 +54,12 @@ fn state(fake: &FakeTelegram) -> Arc<AppState> {
 }
 
 fn swap_body() -> String {
-    format!(r#"{{"code":"{CODE}","codeVerifier":"{VERIFIER}"}}"#)
+    body_of(CODE, VERIFIER, TELEGRAM_REDIRECT_URI)
+}
+
+fn body_of(code: &str, verifier: &str, redirect_uri: &str) -> String {
+    serde_json::json!({ "code": code, "codeVerifier": verifier, "redirectUri": redirect_uri })
+        .to_string()
 }
 
 fn post(
@@ -116,9 +122,13 @@ async fn a_swap_sends_the_exact_form_and_passes_the_answer_through() {
         "grant_type=authorization_code\
          &code=6b7f2c1d9e4a8035\
          &redirect_uri=https%3A%2F%2Fbridge.example%2Fauth%2Fcallback\
-         &client_id=8123456789\
-         &client_secret=SECRET-MARKER-7f3a\
-         &code_verifier=iMSTNh6gQkRnBGlY1c0MUOsD7MCO4G8C7ph1_gIZs5I"
+         &code_verifier=iMSTNh6gQkRnBGlY1c0MUOsD7MCO4G8C7ph1_gIZs5I\
+         &client_id=8123456789"
+    );
+    // `base64("8123456789:SECRET-MARKER-7f3a")`, from coreutils.
+    assert_eq!(
+        swap.headers["authorization"],
+        "Basic ODEyMzQ1Njc4OTpTRUNSRVQtTUFSS0VSLTdmM2E="
     );
 }
 
@@ -239,61 +249,60 @@ async fn a_malformed_request_is_refused_and_nothing_is_sent() {
         (
             PATH.into(),
             json,
-            format!(r#"{{"codeVerifier":"{VERIFIER}"}}"#),
+            format!(r#"{{"code":"{CODE}","codeVerifier":"{VERIFIER}"}}"#),
         ),
         (
             PATH.into(),
             json,
             format!(
-                r#"{{"code":"{CODE}","codeVerifier":"{VERIFIER}","redirectUri":"https://evil.example"}}"#
+                r#"{{"code":"{CODE}","codeVerifier":"{VERIFIER}","redirectUri":"x","clientSecret":"s"}}"#
             ),
         ),
         (
             PATH.into(),
             json,
-            format!(r#"{{"code":"","codeVerifier":"{VERIFIER}"}}"#),
+            body_of("", VERIFIER, TELEGRAM_REDIRECT_URI),
         ),
         (
             PATH.into(),
             json,
-            format!(r#"{{"code":"a b","codeVerifier":"{VERIFIER}"}}"#),
+            body_of("a b", VERIFIER, TELEGRAM_REDIRECT_URI),
         ),
         (
             PATH.into(),
             json,
-            format!(
-                r#"{{"code":"{}","codeVerifier":"{VERIFIER}"}}"#,
-                "c".repeat(513)
-            ),
+            body_of(&"c".repeat(513), VERIFIER, TELEGRAM_REDIRECT_URI),
         ),
         // Too short, too long, and outside the unreserved set.
         (
             PATH.into(),
             json,
-            format!(r#"{{"code":"{CODE}","codeVerifier":"{}"}}"#, "v".repeat(42)),
+            body_of(CODE, &"v".repeat(42), TELEGRAM_REDIRECT_URI),
         ),
         (
             PATH.into(),
             json,
-            format!(
-                r#"{{"code":"{CODE}","codeVerifier":"{}"}}"#,
-                "v".repeat(129)
-            ),
+            body_of(CODE, &"v".repeat(129), TELEGRAM_REDIRECT_URI),
         ),
         (
             PATH.into(),
             json,
-            format!(
-                r#"{{"code":"{CODE}","codeVerifier":"{}+"}}"#,
-                "v".repeat(42)
-            ),
+            body_of(CODE, &format!("{}+", "v".repeat(42)), TELEGRAM_REDIRECT_URI),
         ),
+        // An empty, spaced or oversized redirect URI.
+        (PATH.into(), json, body_of(CODE, VERIFIER, "")),
+        (
+            PATH.into(),
+            json,
+            body_of(CODE, VERIFIER, "https://a.example/ b"),
+        ),
+        (PATH.into(), json, body_of(CODE, VERIFIER, &"r".repeat(513))),
         // A valid swap padded past the body cap.
         (
             PATH.into(),
             json,
             format!(
-                r#"{{"code":"{CODE}","codeVerifier":"{VERIFIER}"{}}}"#,
+                r#"{{"code":"{CODE}","codeVerifier":"{VERIFIER}","redirectUri":"x"{}}}"#,
                 " ".repeat(2048)
             ),
         ),
@@ -406,7 +415,7 @@ async fn the_configuration_publishes_telegrams_client_id_and_no_credential() {
     );
 }
 
-/// The secret leaves only in the form: no answer of any route, and no debug
+/// The secret leaves only in the `Authorization` header: no answer of any route, and no debug
 /// rendering of the settings or the checked client, carries it.
 #[tokio::test]
 async fn the_secret_appears_in_no_answer_and_no_debug_rendering() {

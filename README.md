@@ -12,7 +12,8 @@ connection. GitHub's exchange, which GitHub answers only with the App's
 public application configuration. Telegram's token endpoint answers no CORS,
 so where Telegram is enabled the bridge swaps the browser's code there with
 Telegram's private client secret and returns the answer untouched: the one
-token exchange it performs and the one secret it holds.
+token exchange it performs and the one secret it holds. It also passes
+Telegram's key list through, since that endpoint answers no CORS either.
 
 It keeps no ceremony state, no session, no challenge and no result. A timeout,
 a duplicate request, a restart or a lost response leave no record here, and
@@ -37,8 +38,10 @@ gas, keeps no database, and talks to no chain.
    token exchange, the notarized sessions, the proof. GitHub's token request
    carries the published credential as `client_secret` and is revealed whole.
    Telegram's code is the exception: the browser posts it, with its PKCE
-   verifier, to `POST /api/v1/ceremony/telegram/token`, and this service swaps
-   it with the private client secret and returns Telegram's answer untouched.
+   verifier and redirect URI, to `POST /api/v1/ceremony/telegram/token`, and
+   this service swaps it with the private client secret and returns Telegram's
+   answer untouched. The browser reads Telegram's keys from
+   `GET /api/v1/ceremony/telegram/jwks`.
    Beyond that it sees none of it and verifies nothing.
 
 ## Trust model
@@ -68,7 +71,8 @@ out; origin checks and a closed input surface cannot constrain its owner.
 | `GET` | `/metrics` | What this deployment counts, in the Prometheus text exposition format. Not one of the contract's routes. |
 | `GET`, `OPTIONS` | `/api/v1/ceremony/config` | The public ceremony configuration: `{ ccdpOrigin, platforms }`. Readable from an admitted origin, or by a same-origin `GET` without `Origin` on `Sec-Fetch-Site: same-origin`. `403` for any other origin, `400` for a query or a request body. `OPTIONS` answers the preflight a caller sending its own header needs, by the same admission rule: `GET`, the headers asked for, no credentials. |
 | `GET` | `/auth/callback` | The registered OAuth callback document: the CCDP Distribution's artifact with this deployment's data inserted, identical for every request. |
-| `POST`, `OPTIONS` | `/api/v1/ceremony/telegram/token` | Served only where Telegram is enabled. Takes `{"code", "codeVerifier"}` as `application/json` (at most 2048 bytes; code 1 to 512 printable ASCII; verifier per RFC 7636) from an admitted origin, posts it to Telegram's token endpoint with `redirect_uri`, `client_id` and `client_secret` (`client_secret_post`), and answers with Telegram's status and body. `403` for another origin, `400` for a query or a malformed body, `502` when Telegram does not answer within 10 s, redirects, or answers more than 8 KiB. |
+| `POST`, `OPTIONS` | `/api/v1/ceremony/telegram/token` | Served only where Telegram is enabled. Takes `{"code", "codeVerifier", "redirectUri"}` as `application/json` (at most 2048 bytes, no other field; code and redirect URI 1 to 512 printable ASCII without spaces; verifier per RFC 7636) from an admitted origin. Posts `grant_type`, `code`, `redirect_uri` (the `redirectUri` as sent), `code_verifier` and `client_id` to Telegram's token endpoint, authenticated with HTTP Basic (`client_id:client_secret`), and answers with Telegram's status and body. Telegram, not the bridge, checks the redirect URI against its registration. `403` for another origin, `400` for a query or a malformed body, `502` when Telegram does not answer within 10 s, redirects, or answers more than 8 KiB. |
+| `GET`, `OPTIONS` | `/api/v1/ceremony/telegram/jwks` | Served only where Telegram is enabled. Telegram's key list, byte for byte, with Telegram's `Content-Type` and `Content-Encoding`, fetched from `jwks_url` without credentials and cached in memory for 10 minutes after a successful fetch. Admission, CORS, `403` and `400` as for the configuration route. `502` when the fetch fails, takes over 10 s, redirects, or answers more than 64 KiB; a failed fetch is not cached. |
 
 `/health` is not one of the contract's two routes. The published image's
 `HEALTHCHECK` targets it; it reads nothing from the request and answers two
@@ -234,7 +238,7 @@ credential.
 | `allowed_app_origins` | — | *(required)* | The application allowlist. A member is an exact origin, an origin pattern or `*`, as described below. A repeated spelling is refused; a pattern and an origin it covers are two members. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once and by its literal spelling. It is the one admission rule: the configuration route admits exactly one `Origin` that a member admits, and echoes that origin itself; the callback document is told the same set. A same-origin read carries no `Origin` and is admitted on `Sec-Fetch-Site: same-origin` alone. |
 | `ccdp_origin` | — | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/callback.html`, `/ccdp/versions.json` and everything the browser runs after the callback, HTTPS, or HTTP on `localhost` or `127.0.0.1`. Written already canonical, as an exact origin is: any other spelling is refused, naming the canonical one. Published in the configuration and inserted into the callback document. Omitting it selects the canonical libID Distribution. |
 | `platforms` | — | *(required)* | The enabled platforms, as `[[platforms]]` tables: `id`, `client_id` and, for `github`, its `client_credential`. |
-| `telegram` | — | *(none)* | Required exactly when `telegram` is enabled: `client_secret_file` (a file holding the private client secret, one trailing newline ignored), `redirect_uri` (HTTPS, the callback registered with Telegram) and `token_url` (default `https://oauth.telegram.org/token`; HTTPS, or HTTP on `localhost` or `127.0.0.1`). |
+| `telegram` | — | *(none)* | Required exactly when `telegram` is enabled: `client_secret_file` (a file holding the private client secret, one trailing newline ignored), `token_url` (default `https://oauth.telegram.org/token`) and `jwks_url` (default `https://oauth.telegram.org/.well-known/jwks.json`), each HTTPS, or HTTP on `localhost` or `127.0.0.1`. There is no redirect URI setting: the browser sends it with each swap. |
 | — | `LIBID_CONFIG`, `--config` | *(none)* | Path to the configuration file. |
 
 ### Allowlist members

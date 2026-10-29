@@ -34,6 +34,9 @@ use crate::{
 /// Telegram's token endpoint, which a `[telegram]` table naming none selects.
 pub const TELEGRAM_TOKEN_URL: &str = "https://oauth.telegram.org/token";
 
+/// Telegram's key list, which a `[telegram]` table naming none selects.
+pub const TELEGRAM_JWKS_URL: &str = "https://oauth.telegram.org/.well-known/jwks.json";
+
 /// The longest `client_id` a platform entry carries, in bytes. The Application
 /// forwards it unchanged into CCDP's `ProveIdentity`, whose wire limits refuse
 /// a longer one, so every ceremony would fail on it.
@@ -87,7 +90,7 @@ impl Deployment {
             (Some(_), None) => {
                 return Err(Error::Config {
                     detail: "platforms: telegram is enabled and no [telegram] table \
-                             names its client_secret_file and redirect_uri"
+                             names its client_secret_file"
                         .into(),
                 })
             }
@@ -249,14 +252,12 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>>
     profiles.into_iter().map(PlatformProfile::checked).collect()
 }
 
-/// The `[telegram]` table: what Telegram's code swap needs besides the
-/// platform's public client id. Its secret is read from a file, never written
-/// here.
+/// The `[telegram]` table: what Telegram's routes need besides the platform's
+/// public client id. Its secret is read from a file, never written here.
 ///
 /// ```toml
 /// [telegram]
 /// client_secret_file = "/run/secrets/telegram-client-secret"
-/// redirect_uri = "https://bridge.example/auth/callback"
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -264,18 +265,23 @@ pub struct TelegramSettings {
     /// The file holding the client secret: nonempty printable ASCII without
     /// whitespace, one trailing newline aside. Read once, at startup.
     pub client_secret_file: PathBuf,
-    /// The `redirect_uri` sent with every swap: the callback URL registered
-    /// with Telegram and used in the authorization request. HTTPS.
-    pub redirect_uri: String,
     /// Telegram's token endpoint: HTTPS, or HTTP on `localhost` or
     /// `127.0.0.1`.
     #[serde(default = "default_telegram_token_url")]
     pub token_url: String,
+    /// Telegram's key list, under the same rule as `token_url`.
+    #[serde(default = "default_telegram_jwks_url")]
+    pub jwks_url: String,
 }
 
 /// Telegram's token endpoint, for a table that names none.
 fn default_telegram_token_url() -> String {
     TELEGRAM_TOKEN_URL.to_owned()
+}
+
+/// Telegram's key list, for a table that names none.
+fn default_telegram_jwks_url() -> String {
+    TELEGRAM_JWKS_URL.to_owned()
 }
 
 /// A private client secret. It is never serialized, and its `Debug` names
@@ -296,23 +302,23 @@ impl fmt::Debug for ClientSecret {
     }
 }
 
-/// Telegram's client, checked: what the code swap sends.
+/// Telegram's client, checked: what its routes send and fetch from.
 #[derive(Clone, Debug)]
 pub struct TelegramClient {
     /// The public client id, as `[[platforms]]` names it.
     pub client_id: String,
     /// The client secret read from `client_secret_file`.
     pub client_secret: ClientSecret,
-    /// The redirect URI, as written.
-    pub redirect_uri: String,
     /// The token endpoint.
     pub token_url: url::Url,
+    /// The key list.
+    pub jwks_url: url::Url,
 }
 
 impl TelegramClient {
     /// `table` checked for the client `client_id`: the secret file read and
-    /// its contents checked, the redirect URI HTTPS, the token endpoint HTTPS
-    /// or loopback HTTP. A refusal names the key, never the secret.
+    /// its contents checked, both endpoints HTTPS or loopback HTTP. A refusal
+    /// names the key, never the secret.
     fn checked(client_id: &str, table: &TelegramSettings) -> Result<TelegramClient> {
         let refuse = |detail: String| Error::Config {
             detail: format!("telegram: {detail}"),
@@ -335,29 +341,22 @@ impl TelegramClient {
             )));
         }
 
-        let redirect_uri = url::Url::parse(&table.redirect_uri)
-            .map_err(|e| refuse(format!("redirect_uri {}: {e}", table.redirect_uri)))?;
-        if redirect_uri.scheme() != "https" {
-            return Err(refuse(format!(
-                "redirect_uri {} is not https",
-                table.redirect_uri
-            )));
-        }
-
-        let token_url = url::Url::parse(&table.token_url)
-            .map_err(|e| refuse(format!("token_url {}: {e}", table.token_url)))?;
-        if token_url.scheme() != "https" && !is_plaintext_loopback(&token_url) {
-            return Err(refuse(format!(
-                "token_url {} is neither https nor http on localhost or 127.0.0.1",
-                table.token_url
-            )));
-        }
+        let endpoint = |key: &str, value: &str| {
+            let url = url::Url::parse(value)
+                .map_err(|e| refuse(format!("{key} {value}: {e}")))?;
+            if url.scheme() != "https" && !is_plaintext_loopback(&url) {
+                return Err(refuse(format!(
+                    "{key} {value} is neither https nor http on localhost or 127.0.0.1"
+                )));
+            }
+            Ok(url)
+        };
 
         Ok(TelegramClient {
             client_id: client_id.to_owned(),
             client_secret: ClientSecret(secret.to_owned()),
-            redirect_uri: table.redirect_uri.clone(),
-            token_url,
+            token_url: endpoint("token_url", &table.token_url)?,
+            jwks_url: endpoint("jwks_url", &table.jwks_url)?,
         })
     }
 }

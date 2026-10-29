@@ -1,8 +1,13 @@
-//! Telegram's code swap: `POST {"code", "codeVerifier"}` from an admitted
-//! origin, answered with Telegram's token endpoint's status and body as they
-//! arrived. Served only where Telegram is enabled. The redirect URI and the
-//! client secret are this deployment's; the caller sends neither. Neither the
-//! request nor the answer is logged.
+//! Telegram's two routes, served only where Telegram is enabled:
+//!
+//! - the code swap, `POST {"code", "codeVerifier", "redirectUri"}` from an
+//!   admitted origin, answered with Telegram's token endpoint's status and
+//!   body as they arrived. The client secret is this deployment's; the caller
+//!   never sends it.
+//! - the key list, `GET` under the admission and CORS of `/config`, answered
+//!   with Telegram's key-list bytes, media type and encoding as fetched.
+//!
+//! Neither a request nor an answer is logged.
 
 use std::sync::Arc;
 
@@ -36,6 +41,9 @@ use crate::{
     telegram::ExchangeError,
 };
 
+/// The longest redirect URI passed on, in bytes.
+pub const MAX_REDIRECT_URI_BYTES: usize = 512;
+
 /// The largest request body read, in bytes.
 pub const MAX_REQUEST_BYTES: usize = 2 * 1024;
 
@@ -51,12 +59,19 @@ const UNADMITTED: &str = "this route is callable only from an admitted origin";
 struct Swap {
     code: String,
     code_verifier: String,
+    redirect_uri: String,
+}
+
+/// Whether `value` is 1 to `max` bytes of printable ASCII without spaces.
+fn printable(value: &str, max: usize) -> bool {
+    (1..=max).contains(&value.len()) && value.bytes().all(|b| (0x21..=0x7E).contains(&b))
 }
 
 impl Swap {
     /// The body of a request carrying no query, read and checked: JSON, within
-    /// [`MAX_REQUEST_BYTES`], a code of 1 to [`MAX_CODE_BYTES`] printable
-    /// ASCII, and an RFC 7636 verifier. A refusal quotes none of it.
+    /// [`MAX_REQUEST_BYTES`], a code of 1 to [`MAX_CODE_BYTES`] and a redirect
+    /// URI of 1 to [`MAX_REDIRECT_URI_BYTES`] printable ASCII, and an RFC 7636
+    /// verifier. A refusal quotes none of it.
     async fn read(
         query: Option<String>,
         headers: &HeaderMap,
@@ -85,14 +100,19 @@ impl Swap {
                 )
             })?;
         let swap: Swap = serde_json::from_slice(&bytes).map_err(|_| {
-            "the request body must be {\"code\", \"codeVerifier\"}, both strings"
+            "the request body must be {\"code\", \"codeVerifier\", \"redirectUri\"}, \
+             all strings"
                 .to_owned()
         })?;
-        let code_ok = (1..=MAX_CODE_BYTES).contains(&swap.code.len())
-            && swap.code.bytes().all(|b| (0x21..=0x7E).contains(&b));
-        if !code_ok {
+        if !printable(&swap.code, MAX_CODE_BYTES) {
             return Err(format!(
                 "code must be 1 to {MAX_CODE_BYTES} bytes of printable ASCII"
+            ));
+        }
+        if !printable(&swap.redirect_uri, MAX_REDIRECT_URI_BYTES) {
+            return Err(format!(
+                "redirectUri must be 1 to {MAX_REDIRECT_URI_BYTES} bytes of printable \
+                 ASCII"
             ));
         }
         let verifier_ok = (43..=128).contains(&swap.code_verifier.len())
@@ -131,7 +151,7 @@ pub async fn token(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    let Some(exchange) = state.telegram.as_ref() else {
+    let Some(exchange) = state.telegram.as_ref().map(|t| &t.exchange) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     // Admission is decided before anything else is looked at.
@@ -148,23 +168,13 @@ pub async fn token(
         Err(message) => return refuse(StatusCode::BAD_REQUEST, &message, admitted),
     };
 
-    let answer = match exchange.exchange(&swap.code, &swap.code_verifier).await {
+    let answer = match exchange
+        .exchange(&swap.code, &swap.code_verifier, &swap.redirect_uri)
+        .await
+    {
         Ok(answer) => answer,
         Err(e) => {
-            tracing::warn!(
-                url = exchange.url(),
-                detail = %e,
-                kind = e.kind(),
-                "Telegram's token endpoint gave no answer to pass on"
-            );
-            // The operator's detail stays in the log.
-            let message = match e {
-                ExchangeError::Unreachable(_) => {
-                    "Telegram's token endpoint could not be reached".to_owned()
-                }
-                e => format!("Telegram's token endpoint {e}"),
-            };
-            return refuse(StatusCode::BAD_GATEWAY, &message, admitted);
+            return bad_gateway(exchange.url(), "Telegram's token endpoint", &e, admitted)
         }
     };
 
@@ -179,4 +189,89 @@ pub async fn token(
         out.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
     }
     (answer.status, out, answer.body).into_response()
+}
+
+/// A `502` naming the kind of failure; the detail stays in the log.
+fn bad_gateway(
+    url: &str,
+    what: &str,
+    e: &ExchangeError,
+    admitted: Option<HeaderValue>,
+) -> Response {
+    tracing::warn!(
+        url,
+        detail = %e,
+        kind = e.kind(),
+        "{what} gave no answer to pass on"
+    );
+    refuse(
+        StatusCode::BAD_GATEWAY,
+        &format!("{what} {}", e.public()),
+        admitted,
+    )
+}
+
+/// `OPTIONS /api/v1/ceremony/telegram/jwks`: the preflight of `/config`.
+pub async fn keys_preflight(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    // The key list is public and read without credentials, as `/config` is.
+    let asked = headers.get(header::ACCESS_CONTROL_REQUEST_HEADERS).cloned();
+    super::preflight(&state, &headers, UNADMITTED, "GET", asked)
+}
+
+/// `GET /api/v1/ceremony/telegram/jwks`.
+pub async fn keys(
+    State(state): State<Arc<AppState>>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let Some(list) = state.telegram.as_ref().map(|t| &t.keys) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    // Admission is decided before anything else is looked at.
+    let Some(admission) = admission(&state, &headers) else {
+        return refuse(StatusCode::FORBIDDEN, UNADMITTED, None);
+    };
+    let admitted = match admission {
+        Admission::Listed(origin) => Some(origin),
+        Admission::SameOrigin => None,
+    };
+
+    if query.is_some_and(|q| !q.is_empty()) {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "this route takes no query",
+            admitted,
+        );
+    }
+    if super::carries_body(&body) {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "this route takes no request body",
+            admitted,
+        );
+    }
+
+    let keys = match list.keys().await {
+        Ok(keys) => keys,
+        Err(e) => return bad_gateway(list.url(), "Telegram's key list", &e, admitted),
+    };
+
+    // Built bare, so no content type is added that Telegram did not send.
+    let mut response = Response::new(Body::from(keys.body));
+    let out = response.headers_mut();
+    out.insert(header::VARY, HeaderValue::from_static(VARY_ON));
+    if let Some(media) = keys.content_type {
+        out.insert(header::CONTENT_TYPE, media);
+    }
+    if let Some(encoding) = keys.content_encoding {
+        out.insert(header::CONTENT_ENCODING, encoding);
+    }
+    if let Some(origin) = admitted {
+        out.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    }
+    response
 }

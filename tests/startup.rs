@@ -252,7 +252,6 @@ fn the_telegram_secret_reaches_no_log_line() {
     let config = config_file(&format!(
         "[[platforms]]\nid = \"telegram\"\nclient_id = \"8123456789\"\n\
          [telegram]\nclient_secret_file = {:?}\n\
-         redirect_uri = \"https://bridge.example/auth/callback\"\n\
          token_url = {:?}\n",
         secret.path().display().to_string(),
         fake.url(),
@@ -260,7 +259,7 @@ fn the_telegram_secret_reaches_no_log_line() {
     let mut bridge = Started::on(config.path());
     let swap = (
         "/api/v1/ceremony/telegram/token",
-        r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"iMSTNh6gQkRnBGlY1c0MUOsD7MCO4G8C7ph1_gIZs5I"}"#,
+        r#"{"code":"6b7f2c1d9e4a8035","codeVerifier":"iMSTNh6gQkRnBGlY1c0MUOsD7MCO4G8C7ph1_gIZs5I","redirectUri":"https://bridge.example/auth/callback"}"#,
     );
     let headers = [
         ("origin", "https://app.example"),

@@ -210,7 +210,20 @@ async fn a_swap_posts_the_exact_form_and_passes_the_answer_through() {
     let (status, headers, answer) = call(&app, "POST").await;
     assert_eq!((status, &answer[..]), (StatusCode::OK, GZIPPED));
     assert_eq!(headers["content-encoding"], "gzip");
-    assert!(counted(&app, "token", "upstream_error", 1).await);
+
+    // Only a 2xx unencoded JSON answer without `error` counts as `ok`.
+    let replies = [
+        ("text/plain", "id_token=t", "upstream_error"),
+        (JSON, r#"{"error":"invalid_grant"}"#, "upstream_error"),
+        (JSON, r#"{"id_token":"t"}"#, "ok"),
+    ];
+    for (media, body, outcome) in replies {
+        fake.serve(Some((200, media, None, Bytes::from(body))));
+        let (status, headers, answer) = call(&app, "POST").await;
+        assert_eq!((status, &answer[..]), (StatusCode::OK, body.as_bytes()));
+        assert_eq!(headers["content-type"], media, "{outcome}");
+    }
+    assert!(counted(&app, "token", "upstream_error", 4).await);
     assert!(counted(&app, "token", "ok", 1).await);
 }
 
@@ -326,9 +339,20 @@ async fn an_upstream_failure_is_a_502_naming_only_its_kind() {
         assert_eq!((status, body.len()), (StatusCode::OK, len), "{method}");
     }
 
-    assert!(counted(&app, "token", "unreachable", 3).await);
-    assert!(counted(&app, "keys", "unreachable", 3).await);
+    let failed = [
+        ("token", "redirect"),
+        ("token", "too_large"),
+        ("token", "timeout"),
+        ("keys", "redirect"),
+        ("keys", "too_large"),
+        ("keys", "status"),
+    ];
+    for (route, outcome) in failed {
+        assert!(counted(&app, route, outcome, 1).await, "{route} {outcome}");
+    }
     assert!(counted(&app, "keys", "ok", 1).await);
+    assert!(counted(&unreachable, "token", "unreachable", 1).await);
+    assert!(counted(&unreachable, "keys", "unreachable", 1).await);
 
     let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
     // The library's own failure lines were captured, and carry no secret.
@@ -382,6 +406,20 @@ async fn the_key_list_passes_through_and_is_cached_for_an_hour() {
     tokio::time::resume();
     assert_eq!(&get().await.2[..], b"{}");
     assert_eq!(fake.seen().len(), 7);
+
+    // Stale, while refetches fail, for a day: each refetch times out in 10 s.
+    fake.serve(None);
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(3600)).await;
+    let (status, _, body) = get().await;
+    assert_eq!((status, &body[..]), (StatusCode::OK, &b"{}"[..]));
+    tokio::time::advance(std::time::Duration::from_secs(86_370)).await;
+    assert_eq!(&get().await.2[..], b"{}");
+    tokio::time::advance(std::time::Duration::from_secs(10)).await;
+    assert_eq!(get().await.0, StatusCode::BAD_GATEWAY);
+    tokio::time::resume();
+    assert!(counted(&app, "keys", "timeout", 3).await);
+    assert!(counted(&app, "keys", "ok", 6).await);
 }
 
 #[test]
@@ -400,6 +438,8 @@ fn startup_refuses_an_unusable_telegram_table_naming_the_setting() {
     lettered.platforms[0].client_id = "8123x".into();
     let mut untabled = good.clone();
     untabled.telegram = None;
+    let mut lettered_untabled = untabled.clone();
+    lettered_untabled.platforms[0].client_id = "8123x".into();
     let mut platformless = common::config(&[]);
     platformless.telegram = good.telegram.clone();
     let http = |key: &str| Some(format!("http://oauth.example/{key}"));
@@ -423,6 +463,7 @@ fn startup_refuses_an_unusable_telegram_table_naming_the_setting() {
             "client_secret_file",
         ),
         (lettered, "client_id"),
+        (lettered_untabled, "client_id"),
         (untabled, "[telegram]"),
         (platformless, "[telegram]"),
     ];

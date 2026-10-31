@@ -24,14 +24,47 @@ const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// How long a fetched key list is served from cache: the keeper's cadence,
 /// since a new key is unusable on chain until the keeper rotates it in.
 const KEYS_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+/// How much longer a cached key list is served while refetches fail.
+const KEYS_STALE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
 type Client = hyper_util::client::legacy::Client<crate::outbound::Connector, Full<Bytes>>;
 
-/// Why an upstream call gave nothing to pass on: what the caller is told,
-/// and the detail the log gets.
-pub(crate) type Failure = (&'static str, String);
+/// Why an upstream call gave nothing to pass on, and the detail the log gets.
+pub(crate) type Failure = (FailureKind, String);
 
-const UNREACHABLE: &str = "could not be reached";
+/// The kinds of upstream failure.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum FailureKind {
+    Status,
+    Redirect,
+    TooLarge,
+    Unreachable,
+    Timeout,
+}
+
+impl FailureKind {
+    /// Its metric outcome.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            FailureKind::Status => "status",
+            FailureKind::Redirect => "redirect",
+            FailureKind::TooLarge => "too_large",
+            FailureKind::Unreachable => "unreachable",
+            FailureKind::Timeout => "timeout",
+        }
+    }
+
+    /// What the caller is told.
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            FailureKind::Status => "answered an error",
+            FailureKind::Redirect => "answered a redirect this bridge does not follow",
+            FailureKind::TooLarge => "answered more than this bridge passes on",
+            FailureKind::Unreachable => "could not be reached",
+            FailureKind::Timeout => "did not answer in time",
+        }
+    }
+}
 
 /// Telegram's client, checked at startup. `Debug` shows no secret.
 #[derive(Clone, Debug)]
@@ -101,24 +134,24 @@ impl Telegram {
                 .http
                 .request(request)
                 .await
-                .map_err(|e| (UNREACHABLE, format!("{e:?}")))?;
+                .map_err(|e| (FailureKind::Unreachable, format!("{e:?}")))?;
             if response.status().is_redirection() {
                 let detail = response.status().to_string();
-                return Err(("answered a redirect this bridge does not follow", detail));
+                return Err((FailureKind::Redirect, detail));
             }
             let (parts, body) = response.into_parts();
             let body = http_body_util::Limited::new(body, limit)
                 .collect()
                 .await
                 .map_err(|e| match e.is::<http_body_util::LengthLimitError>() {
-                    true => ("answered more than this bridge passes on", e.to_string()),
-                    false => (UNREACHABLE, e.to_string()),
+                    true => (FailureKind::TooLarge, e.to_string()),
+                    false => (FailureKind::Unreachable, e.to_string()),
                 })?;
             Ok((parts.status, parts.headers, body.to_bytes()))
         };
         tokio::time::timeout(TIMEOUT, call)
             .await
-            .map_err(|_| ("did not answer in time", String::new()))?
+            .map_err(|_| (FailureKind::Timeout, String::new()))?
     }
 
     /// Telegram's answer to swapping `code`, sent with the client secret.
@@ -147,15 +180,39 @@ impl Telegram {
     }
 
     /// The key list's media type, encoding and bytes: cached while fresh, else
-    /// fetched, and cached only when a nonempty JSON `200`. The lock is never
-    /// held across a fetch, and an older fetch never replaces a newer one.
-    pub(crate) async fn keys(&self) -> Result<(HeaderMap, Bytes), Failure> {
+    /// fetched, and cached only when a nonempty JSON `200`. A failed fetch
+    /// serves the cached list for [`KEYS_STALE`] past its freshness. Each
+    /// fetch's outcome goes to `fetched`. The lock is never held across a
+    /// fetch, and an older fetch never replaces a newer one.
+    pub(crate) async fn keys(
+        &self,
+        fetched: impl FnOnce(&'static str),
+    ) -> Result<(HeaderMap, Bytes), Failure> {
         let cached = self.keys.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some((_, headers, body)) =
-            cached.filter(|(at, ..)| at.elapsed() < KEYS_TTL)
-        {
-            return Ok((headers, body));
+        if let Some((at, headers, body)) = &cached {
+            if at.elapsed() < KEYS_TTL {
+                return Ok((headers.clone(), body.clone()));
+            }
         }
+        let fetch = self.fetch_keys().await;
+        fetched(
+            fetch
+                .as_ref()
+                .map_or_else(|(kind, _)| kind.label(), |_| "ok"),
+        );
+        match (fetch, cached) {
+            (Err((_, detail)), Some((at, headers, body)))
+                if at.elapsed() < KEYS_TTL + KEYS_STALE =>
+            {
+                tracing::warn!(detail, "serving the cached key list: a refetch failed");
+                Ok((headers, body))
+            }
+            (fetch, _) => fetch,
+        }
+    }
+
+    /// One fetch of the key list, cached as [`Telegram::keys`] says.
+    async fn fetch_keys(&self) -> Result<(HeaderMap, Bytes), Failure> {
         let request = hyper::Request::get(self.client.jwks_url.clone())
             .header(header::USER_AGENT, USER_AGENT)
             .body(Full::default())
@@ -163,7 +220,7 @@ impl Telegram {
         let started = tokio::time::Instant::now();
         let (status, upstream, body) = self.call(request, 64 * 1024).await?;
         if status != StatusCode::OK {
-            return Err(("answered an error", status.to_string()));
+            return Err((FailureKind::Status, status.to_string()));
         }
         let headers =
             copied(&upstream, &[header::CONTENT_TYPE, header::CONTENT_ENCODING]);

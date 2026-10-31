@@ -26,6 +26,7 @@ use super::config::{
     admission,
     refuse,
     Admission,
+    UNADMITTED,
     VARY_ON,
 };
 use crate::{
@@ -38,12 +39,10 @@ use crate::{
     },
 };
 
-const UNADMITTED: &str = "this route is callable only from an admitted origin";
-
-/// An error Telegram answers a swap with; any other field is ignored.
+/// A swap's answer as read for its outcome: its `error` field alone.
 #[derive(serde::Deserialize)]
-struct Refusal {
-    error: String,
+struct Answer {
+    error: Option<serde_json::Value>,
 }
 
 /// The swap request body.
@@ -74,8 +73,8 @@ async fn read_swap(
     headers: &HeaderMap,
     body: Body,
 ) -> Result<Swap, &'static str> {
-    if query.is_some_and(|q| !q.is_empty()) {
-        return Err("this route takes no query");
+    if let Some(message) = super::queried(query) {
+        return Err(message);
     }
     if !is_json(headers) {
         return Err("the request body must be Content-Type: application/json");
@@ -121,10 +120,25 @@ fn bad_gateway(
     failure: Failure,
     origin: Option<HeaderValue>,
 ) -> Response {
-    let (public, detail) = failure;
+    let (kind, detail) = failure;
     tracing::warn!(%url, detail, "{what} gave no answer to pass on");
-    let message = format!("{what} {public}");
+    let message = format!("{what} {}", kind.message());
     refuse(StatusCode::BAD_GATEWAY, &message, origin)
+}
+
+/// `ok` for a `2xx` unencoded JSON answer without `error`, else
+/// `upstream_error`; a refusal's `error` is logged.
+fn swap_outcome(status: StatusCode, headers: &HeaderMap, body: &Bytes) -> &'static str {
+    let readable = is_json(headers) && !headers.contains_key(header::CONTENT_ENCODING);
+    let read = readable.then(|| serde_json::from_slice::<Answer>(body).ok());
+    match read.flatten() {
+        Some(Answer { error: Some(code) }) => {
+            tracing::warn!(error = %code, "Telegram refused the swap");
+            "upstream_error"
+        }
+        Some(Answer { error: None }) if status.is_success() => "ok",
+        _ => "upstream_error",
+    }
 }
 
 /// `OPTIONS` on the swap: granting `POST` with `Content-Type`.
@@ -153,21 +167,15 @@ pub async fn token(
     let swapped = telegram.swap(&swap.code, &swap.redirect_uri, &swap.code_verifier);
     match swapped.await {
         Ok((status, upstream, body)) => {
-            let outcome = match serde_json::from_slice::<Refusal>(&body) {
-                Ok(Refusal { error: code }) => {
-                    tracing::warn!(error = %code, "Telegram refused the swap");
-                    "upstream_error"
-                }
-                Err(_) => "ok",
-            };
-            state.metrics.telegram("token", outcome);
-            let mut headers = copied(&upstream, &[header::CONTENT_ENCODING]);
-            let json = HeaderValue::from_static("application/json");
-            headers.insert(header::CONTENT_TYPE, json);
+            let headers =
+                copied(&upstream, &[header::CONTENT_TYPE, header::CONTENT_ENCODING]);
+            state
+                .metrics
+                .telegram("token", swap_outcome(status, &headers, &body));
             answer(status, headers, origin, body)
         }
         Err(e) => {
-            state.metrics.telegram("token", "unreachable");
+            state.metrics.telegram("token", e.0.label());
             bad_gateway(
                 "Telegram's token endpoint",
                 &telegram.client.token_url,
@@ -192,13 +200,10 @@ pub async fn keys(
     if let Some(message) = super::malformed(query, &body) {
         return refuse(StatusCode::BAD_REQUEST, message, origin);
     }
-    match telegram.keys().await {
-        Ok((headers, body)) => {
-            state.metrics.telegram("keys", "ok");
-            answer(StatusCode::OK, headers, origin, body)
-        }
+    let fetched = |outcome| state.metrics.telegram("keys", outcome);
+    match telegram.keys(fetched).await {
+        Ok((headers, body)) => answer(StatusCode::OK, headers, origin, body),
         Err(e) => {
-            state.metrics.telegram("keys", "unreachable");
             bad_gateway("Telegram's key list", &telegram.client.jwks_url, e, origin)
         }
     }

@@ -167,7 +167,7 @@ impl PlatformProfile {
     /// This table checked: a client id of nonempty printable ASCII without
     /// whitespace within [`MAX_CLIENT_ID_BYTES`], and a credential of the same
     /// within [`MAX_CLIENT_CREDENTIAL_BYTES`] exactly where the platform's
-    /// ceremony sends one. A refusal names the key as the file spells it,
+    /// ceremony sends one; Telegram's client id is digits. A refusal names the key as the file spells it,
     /// never the value.
     pub fn checked(self) -> Result<PlatformProfile> {
         let id = self.id;
@@ -188,6 +188,11 @@ impl PlatformProfile {
             return Err(refuse(format!(
                 "{id}'s client_id is longer than {MAX_CLIENT_ID_BYTES} bytes"
             )));
+        }
+        if id == PlatformId::Telegram
+            && !self.client_id.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err(refuse(format!("{id}'s client_id must be digits")));
         }
         // A credential belongs to exactly the ceremonies that send one.
         match (id.sends_a_credential(), self.client_credential.as_deref()) {
@@ -266,11 +271,6 @@ impl TelegramSettings {
         if secret.is_empty() || !secret.bytes().all(plain) {
             let rule = "must hold nonempty [A-Za-z0-9_-]";
             return Err(refuse(format!("client_secret_file {path} {rule}")));
-        }
-        if !client_id.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(refuse(
-                "the telegram platform's client_id must be digits".into(),
-            ));
         }
         let endpoint = |key: &str, value: Option<&str>, default: &str| {
             let value = value.unwrap_or(default);

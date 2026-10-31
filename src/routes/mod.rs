@@ -14,8 +14,8 @@
 //! the one origin allowed, and answers on `OPTIONS` the preflight a
 //! caller sending its own header needs. The callback carries no CORS: it is a
 //! top-level navigation. The Telegram routes admit as the configuration
-//! route does. No other path is served, and no route but Telegram's swap
-//! performs a token exchange or opens a notary connection. Any other method
+//! route does. No other path is served, no route opens a notary connection,
+//! and no route but Telegram's swap performs a token exchange. Any other method
 //! on a ceremony route, `HEAD` included, is a `405` naming the methods it serves,
 //! and a request carrying a body is a `400`, Telegram's swap aside.
 
@@ -80,15 +80,17 @@ pub fn carries_body(body: &Body) -> bool {
     !body.is_end_stream()
 }
 
+/// Why a route taking no query refuses this request.
+fn queried(query: Option<String>) -> Option<&'static str> {
+    query
+        .is_some_and(|q| !q.is_empty())
+        .then_some("this route takes no query")
+}
+
 /// Why a route taking neither a query nor a body refuses this request.
 fn malformed(query: Option<String>, body: &Body) -> Option<&'static str> {
-    if query.is_some_and(|q| !q.is_empty()) {
-        Some("this route takes no query")
-    } else if carries_body(body) {
-        Some("this route takes no request body")
-    } else {
-        None
-    }
+    queried(query)
+        .or_else(|| carries_body(body).then_some("this route takes no request body"))
 }
 
 /// `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, put on

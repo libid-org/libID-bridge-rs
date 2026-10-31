@@ -40,12 +40,14 @@ pub struct Callback {
     outcome: &'static str,
 }
 
-/// How one call to Telegram ended.
+/// How one request sent to Telegram ended; a cached key list sends none.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct Telegram {
     /// `token` or `keys`.
     route: &'static str,
-    /// `ok`, `upstream_error` (a swap answered `{"error"}`) or `unreachable`.
+    /// `ok`; `upstream_error`, a swap answered other than a `2xx` JSON body
+    /// without `error`; or a failed call's `status`, `redirect`, `too_large`,
+    /// `unreachable` or `timeout`.
     outcome: &'static str,
 }
 
@@ -103,7 +105,7 @@ impl Metrics {
         );
         registry.register(
             "telegram_calls",
-            "Calls to Telegram, by route and how each ended",
+            "Requests sent to Telegram, by route and how each ended",
             telegram.clone(),
         );
         registry.register(

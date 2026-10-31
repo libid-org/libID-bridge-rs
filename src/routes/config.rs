@@ -36,6 +36,9 @@ use crate::{
 /// `Sec-Fetch-Site` decide the body, on refusals too.
 pub(super) const VARY_ON: &str = "origin, sec-fetch-site";
 
+/// The `403` of a route callable only from an admitted origin.
+pub(super) const UNADMITTED: &str = "this route is callable only from an admitted origin";
+
 /// The fetch metadata header saying where a browser request came from,
 /// relative to its target.
 const SEC_FETCH_SITE: HeaderName = HeaderName::from_static("sec-fetch-site");
@@ -121,11 +124,7 @@ pub(super) fn grant(
     allow_headers: Option<&'static str>,
 ) -> Response {
     let Some(Admission::Listed(origin)) = admission(state, headers) else {
-        return refuse(
-            StatusCode::FORBIDDEN,
-            "this route is callable only from an admitted origin",
-            None,
-        );
+        return refuse(StatusCode::FORBIDDEN, UNADMITTED, None);
     };
 
     let mut out = HeaderMap::new();

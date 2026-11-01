@@ -193,9 +193,10 @@ impl Telegram {
     }
 
     /// The key list's media type, encoding and bytes: cached while fresh, else
-    /// fetched, and cached only when a nonempty JSON `200`. A failed fetch
-    /// serves the cached list for [`KEYS_STALE`] past its freshness. Each
-    /// fetch's outcome goes to `fetched`. The lock is never held across a
+    /// fetched, and cached only when a nonempty JSON `200`. A fetch that fails
+    /// or answers anything else serves the cached list for [`KEYS_STALE`] past
+    /// its freshness; without one, such a `200` passes through. Each fetch's
+    /// outcome goes to `fetched`. The lock is never held across a
     /// fetch, and an older fetch never replaces a newer one.
     pub(crate) async fn keys(
         &self,
@@ -208,24 +209,28 @@ impl Telegram {
             }
         }
         let fetch = self.fetch_keys().await;
-        fetched(
-            fetch
-                .as_ref()
-                .map_or_else(|(kind, _)| kind.label(), |_| "ok"),
-        );
-        match (fetch, cached) {
-            (Err((_, detail)), Some((at, headers, body)))
-                if at.elapsed() < KEYS_TTL + KEYS_STALE =>
-            {
+        fetched(match &fetch {
+            Ok((.., true)) => "ok",
+            Ok((.., false)) => "upstream_error",
+            Err((kind, _)) => kind.label(),
+        });
+        let stale = cached.filter(|(at, ..)| at.elapsed() < KEYS_TTL + KEYS_STALE);
+        match (fetch, stale) {
+            (Ok((headers, body, true)), _) | (Ok((headers, body, false)), None) => {
+                Ok((headers, body))
+            }
+            (Err(failure), None) => Err(failure),
+            (fetch, Some((_, headers, body))) => {
+                let detail = fetch.err().map(|(_, detail)| detail).unwrap_or_default();
                 tracing::warn!(detail, "serving the cached key list: a refetch failed");
                 Ok((headers, body))
             }
-            (fetch, _) => fetch,
         }
     }
 
-    /// One fetch of the key list, cached as [`Telegram::keys`] says.
-    async fn fetch_keys(&self) -> Result<(HeaderMap, Bytes), Failure> {
+    /// One fetch of the key list, cached as [`Telegram::keys`] says, and
+    /// whether it was cacheable.
+    async fn fetch_keys(&self) -> Result<(HeaderMap, Bytes, bool), Failure> {
         let request = hyper::Request::get(self.client.jwks_url.clone())
             .header(header::ACCEPT_ENCODING, "identity")
             .header(header::USER_AGENT, USER_AGENT)
@@ -237,13 +242,14 @@ impl Telegram {
             let detail = format!("{}: {status}", self.client.jwks_url);
             return Err((FailureKind::Status, detail));
         }
-        if is_json(&headers) && !body.is_empty() {
+        let cacheable = is_json(&headers) && !body.is_empty();
+        if cacheable {
             let mut slot = self.keys.lock().unwrap_or_else(|e| e.into_inner());
             if slot.as_ref().is_none_or(|(at, ..)| *at < started) {
                 *slot = Some((started, headers.clone(), body.clone()));
             }
         }
-        Ok((headers, body))
+        Ok((headers, body, cacheable))
     }
 }
 

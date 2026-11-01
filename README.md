@@ -188,7 +188,7 @@ from the pod and is not part of the ceremony contract.
 | `libid_bridge_artifact_retrievals_total{outcome}` | Retrievals, by `published`, `unchanged` or `failed` |
 | `libid_bridge_artifact_retrieval_failures_total{kind}` | Failed retrievals, by which refusal |
 | `libid_bridge_callback_requests_total{outcome}` | Callback requests, by `document` or `unavailable` |
-| `libid_bridge_telegram_calls_total{route,outcome}` | Requests sent to Telegram, by `token` or `keys`, and `ok`, `upstream_error` (a swap answered other than a `2xx` JSON body without `error`, or a key list answered a `200` that is not nonempty JSON), `status`, `redirect`, `too_large`, `unreachable` or `timeout`; a key list served from cache sends none |
+| `libid_bridge_telegram_calls_total{route,outcome}` | Requests sent to Telegram, by `token` or `keys`, and `ok`, `upstream_error` (a swap answered other than a `2xx` unencoded JSON body without `error`, or a key list answered a `200` that is not nonempty JSON), `status`, `redirect`, `too_large`, `unreachable` or `timeout`; a key list served from cache sends none |
 | `libid_bridge_callback_document_available` | `1` while a document is available |
 | `libid_bridge_callback_document_published_timestamp_seconds` | When the served document was published |
 

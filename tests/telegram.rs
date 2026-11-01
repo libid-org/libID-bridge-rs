@@ -334,6 +334,11 @@ async fn an_upstream_failure_is_a_502_naming_only_its_kind() {
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert!(String::from_utf8_lossy(&body).contains("did not answer in time"));
 
+    // A refusal's `error` is logged only when it is a short code.
+    let long = "Q".repeat(65);
+    fake.serve(answering(400, json!({ "error": long }).to_string()));
+    assert_eq!(call(&app, "POST").await.0, StatusCode::BAD_REQUEST);
+
     for (method, len) in [("POST", 8 * 1024), ("GET", 64 * 1024)] {
         fake.serve(answering(200, vec![b'a'; len]));
         let (status, _, body) = call(&app, method).await;
@@ -360,7 +365,7 @@ async fn an_upstream_failure_is_a_502_naming_only_its_kind() {
     let lines = ["Telegram's token endpoint gave", "Telegram's key list gave"];
     assert!(lines.iter().all(|line| logs.contains(line)), "{logs}");
     assert!(
-        !logs.contains(SECRET) && !logs.contains(&BASIC[6..]),
+        !logs.contains(SECRET) && !logs.contains(&BASIC[6..]) && !logs.contains(&long),
         "{logs}"
     );
 }

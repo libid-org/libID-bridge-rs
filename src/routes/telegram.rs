@@ -44,6 +44,9 @@ const MAX_SWAP_BYTES: usize = 2048;
 /// The longest `code` or `redirectUri`, in bytes.
 const MAX_FIELD_BYTES: usize = 512;
 
+/// The longest Telegram `error` code logged, in bytes.
+const MAX_LOGGED_ERROR: usize = 64;
+
 /// A swap's answer as read for its outcome: its `error` field alone.
 #[derive(serde::Deserialize)]
 struct Answer {
@@ -132,13 +135,19 @@ fn bad_gateway(what: &str, failure: Failure, origin: Option<HeaderValue>) -> Res
 }
 
 /// `ok` for a `2xx` unencoded JSON answer without `error`, else
-/// `upstream_error`; a refusal's `error` is logged.
+/// `upstream_error`; a refusal's `error` is logged when it is a short code.
 fn swap_outcome(status: StatusCode, headers: &HeaderMap, body: &Bytes) -> &'static str {
     let readable = is_json(headers) && !headers.contains_key(header::CONTENT_ENCODING);
     let read = readable.then(|| serde_json::from_slice::<Answer>(body).ok());
     match read.flatten() {
         Some(Answer { error: Some(code) }) => {
-            tracing::warn!(error = %code, "Telegram refused the swap");
+            let code = code.as_str().filter(|c| {
+                c.len() <= MAX_LOGGED_ERROR && printable_without_whitespace(c)
+            });
+            tracing::warn!(
+                error = code.unwrap_or("unreadable"),
+                "Telegram refused the swap"
+            );
             "upstream_error"
         }
         Some(Answer { error: None }) if status.is_success() => "ok",

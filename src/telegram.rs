@@ -127,12 +127,15 @@ impl Telegram {
         }
     }
 
-    /// One request within [`TIMEOUT`]: a redirect refused, the body bounded.
+    /// One request within [`TIMEOUT`]: a redirect refused, the body bounded,
+    /// the answer's media type and encoding kept, a failure's detail naming
+    /// the URL.
     async fn call(
         &self,
         request: hyper::Request<Full<Bytes>>,
         limit: usize,
     ) -> Result<(StatusCode, HeaderMap, Bytes), Failure> {
+        let url = request.uri().clone();
         let call = async {
             let response = self
                 .http
@@ -151,11 +154,16 @@ impl Telegram {
                     true => (FailureKind::TooLarge, e.to_string()),
                     false => (FailureKind::Unreachable, e.to_string()),
                 })?;
-            Ok((parts.status, parts.headers, body.to_bytes()))
+            let passed = copied(
+                &parts.headers,
+                &[header::CONTENT_TYPE, header::CONTENT_ENCODING],
+            );
+            Ok((parts.status, passed, body.to_bytes()))
         };
-        tokio::time::timeout(TIMEOUT, call)
+        let answer = tokio::time::timeout(TIMEOUT, call)
             .await
-            .map_err(|_| (FailureKind::Timeout, String::new()))?
+            .unwrap_or_else(|_| Err((FailureKind::Timeout, String::new())));
+        answer.map_err(|(kind, detail)| (kind, format!("{url}: {detail}")))
     }
 
     /// Telegram's answer to swapping `code`, sent with the client secret.
@@ -222,12 +230,11 @@ impl Telegram {
             .body(Full::default())
             .expect("a URI checked at startup");
         let started = tokio::time::Instant::now();
-        let (status, upstream, body) = self.call(request, MAX_KEYS_BYTES).await?;
+        let (status, headers, body) = self.call(request, MAX_KEYS_BYTES).await?;
         if status != StatusCode::OK {
-            return Err((FailureKind::Status, status.to_string()));
+            let detail = format!("{}: {status}", self.client.jwks_url);
+            return Err((FailureKind::Status, detail));
         }
-        let headers =
-            copied(&upstream, &[header::CONTENT_TYPE, header::CONTENT_ENCODING]);
         if is_json(&headers) && !body.is_empty() {
             let mut slot = self.keys.lock().unwrap_or_else(|e| e.into_inner());
             if slot.as_ref().is_none_or(|(at, ..)| *at < started) {
@@ -239,7 +246,7 @@ impl Telegram {
 }
 
 /// The `names` headers of `upstream`, where present.
-pub(crate) fn copied(upstream: &HeaderMap, names: &[header::HeaderName]) -> HeaderMap {
+fn copied(upstream: &HeaderMap, names: &[header::HeaderName]) -> HeaderMap {
     let present = names
         .iter()
         .filter_map(|n| Some((n.clone(), upstream.get(n)?.clone())));

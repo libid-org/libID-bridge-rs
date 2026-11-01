@@ -34,7 +34,6 @@ use crate::{
     deployment::printable_without_whitespace,
     state::AppState,
     telegram::{
-        copied,
         is_json,
         Failure,
     },
@@ -125,14 +124,9 @@ fn answer(
 }
 
 /// A `502` naming only the kind of failure; the detail goes to the log.
-fn bad_gateway(
-    what: &str,
-    url: &axum::http::Uri,
-    failure: Failure,
-    origin: Option<HeaderValue>,
-) -> Response {
+fn bad_gateway(what: &str, failure: Failure, origin: Option<HeaderValue>) -> Response {
     let (kind, detail) = failure;
-    tracing::warn!(%url, detail, "{what} gave no answer to pass on");
+    tracing::warn!(detail, "{what} gave no answer to pass on");
     let message = format!("{what} {}", kind.message());
     refuse(StatusCode::BAD_GATEWAY, &message, origin)
 }
@@ -185,9 +179,7 @@ pub async fn token(
     };
     let swapped = telegram.swap(&swap.code, &swap.redirect_uri, &swap.code_verifier);
     match swapped.await {
-        Ok((status, upstream, body)) => {
-            let headers =
-                copied(&upstream, &[header::CONTENT_TYPE, header::CONTENT_ENCODING]);
+        Ok((status, headers, body)) => {
             state
                 .metrics
                 .telegram("token", swap_outcome(status, &headers, &body));
@@ -195,12 +187,7 @@ pub async fn token(
         }
         Err(e) => {
             state.metrics.telegram("token", e.0.label());
-            bad_gateway(
-                "Telegram's token endpoint",
-                &telegram.client.token_url,
-                e,
-                origin,
-            )
+            bad_gateway("Telegram's token endpoint", e, origin)
         }
     }
 }
@@ -222,8 +209,6 @@ pub async fn keys(
     let fetched = |outcome| state.metrics.telegram("keys", outcome);
     match telegram.keys(fetched).await {
         Ok((headers, body)) => answer(StatusCode::OK, headers, origin, body),
-        Err(e) => {
-            bad_gateway("Telegram's key list", &telegram.client.jwks_url, e, origin)
-        }
+        Err(e) => bad_gateway("Telegram's key list", e, origin),
     }
 }

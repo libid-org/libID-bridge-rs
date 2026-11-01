@@ -426,7 +426,7 @@ async fn the_key_list_passes_through_and_is_cached_for_an_hour() {
 }
 
 #[tokio::test]
-async fn a_stale_key_list_outlives_an_answer_that_is_not_one() {
+async fn a_stale_key_list_outlives_a_bad_answer_without_refetching_each_time() {
     let fake = Fake::serving(answering(200, "{}"));
     let app = app(&fake.url);
     let get = || send(&app, "GET", JWKS, &[("origin", APP)], Body::empty());
@@ -440,6 +440,16 @@ async fn a_stale_key_list_outlives_an_answer_that_is_not_one() {
     assert_eq!((status, &body[..]), (StatusCode::OK, &b"{}"[..]));
     assert_eq!(fake.seen().len(), 2);
     assert!(counted(&app, "keys", "upstream_error", 1).await);
+
+    // A failed refetch is not retried for a minute: no request waits on one.
+    fake.serve(None);
+    tokio::time::pause();
+    assert_eq!(&get().await.2[..], b"{}");
+    tokio::time::advance(std::time::Duration::from_secs(60)).await;
+    assert_eq!(&get().await.2[..], b"{}");
+    assert_eq!(&get().await.2[..], b"{}");
+    tokio::time::resume();
+    assert!(counted(&app, "keys", "timeout", 1).await);
 }
 
 #[test]

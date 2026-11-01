@@ -28,6 +28,9 @@ const MAX_KEYS_BYTES: usize = 64 * 1024;
 /// How long a fetched key list is served from cache: the keeper's cadence,
 /// since a new key is unusable on chain until the keeper rotates it in.
 const KEYS_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+/// How long after a failed refetch the cached key list is served without
+/// another.
+const KEYS_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
 /// How much longer a cached key list is served while refetches fail.
 const KEYS_STALE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
@@ -112,6 +115,8 @@ pub struct Telegram {
     pub(crate) client: TelegramClient,
     http: Client,
     keys: Mutex<Option<(tokio::time::Instant, HeaderMap, Bytes)>>,
+    /// No refetch before this, while a cached list is servable.
+    retry_at: Mutex<Option<tokio::time::Instant>>,
 }
 
 impl Telegram {
@@ -124,6 +129,7 @@ impl Telegram {
             )
             .build(crate::outbound::connector()),
             keys: Mutex::default(),
+            retry_at: Mutex::default(),
         }
     }
 
@@ -195,8 +201,8 @@ impl Telegram {
     /// The key list's media type, encoding and bytes: cached while fresh, else
     /// fetched, and cached only when a nonempty JSON `200`. A fetch that fails
     /// or answers anything else serves the cached list for [`KEYS_STALE`] past
-    /// its freshness; without one, such a `200` passes through. Each fetch's
-    /// outcome goes to `fetched`. The lock is never held across a
+    /// its freshness, without refetching for [`KEYS_RETRY`]; without one, such
+    /// a `200` passes through. Each fetch's outcome goes to `fetched`. The lock is never held across a
     /// fetch, and an older fetch never replaces a newer one.
     pub(crate) async fn keys(
         &self,
@@ -208,13 +214,19 @@ impl Telegram {
                 return Ok((headers.clone(), body.clone()));
             }
         }
+        let stale = cached.filter(|(at, ..)| at.elapsed() < KEYS_TTL + KEYS_STALE);
+        let retry_at = *self.retry_at.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, headers, body)) = &stale {
+            if retry_at.is_some_and(|t| tokio::time::Instant::now() < t) {
+                return Ok((headers.clone(), body.clone()));
+            }
+        }
         let fetch = self.fetch_keys().await;
         fetched(match &fetch {
             Ok((.., true)) => "ok",
             Ok((.., false)) => "upstream_error",
             Err((kind, _)) => kind.label(),
         });
-        let stale = cached.filter(|(at, ..)| at.elapsed() < KEYS_TTL + KEYS_STALE);
         match (fetch, stale) {
             (Ok((headers, body, true)), _) | (Ok((headers, body, false)), None) => {
                 Ok((headers, body))
@@ -223,6 +235,8 @@ impl Telegram {
             (fetch, Some((_, headers, body))) => {
                 let detail = fetch.err().map(|(_, detail)| detail).unwrap_or_default();
                 tracing::warn!(detail, "serving the cached key list: a refetch failed");
+                let retry_at = tokio::time::Instant::now() + KEYS_RETRY;
+                *self.retry_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(retry_at);
                 Ok((headers, body))
             }
         }

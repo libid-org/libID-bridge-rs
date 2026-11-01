@@ -80,10 +80,17 @@ impl Deployment {
         let telegram = match (enabled, &settings.telegram) {
             (Some(profile), Some(table)) => Some(table.checked(&profile.client_id)?),
             (None, None) => None,
-            _ => {
+            (Some(_), None) => {
                 return Err(Error::Config {
-                    detail: "telegram: a [telegram] table naming client_secret_file is \
-                             set exactly where [[platforms]] enables telegram"
+                    detail: "telegram: [[platforms]] enables telegram, so add a \
+                             [telegram] table naming client_secret_file"
+                        .into(),
+                })
+            }
+            (None, Some(_)) => {
+                return Err(Error::Config {
+                    detail: "telegram: a [telegram] table is set, so enable telegram \
+                             in [[platforms]] or remove the table"
                         .into(),
                 })
             }

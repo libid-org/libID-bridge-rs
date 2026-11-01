@@ -464,8 +464,8 @@ fn startup_refuses_an_unusable_telegram_table_naming_the_setting() {
         ),
         (lettered, "client_id"),
         (lettered_untabled, "client_id"),
-        (untabled, "[telegram]"),
-        (platformless, "[telegram]"),
+        (untabled, "add a [telegram] table"),
+        (platformless, "enable telegram in [[platforms]]"),
     ];
     for (settings, key) in cases {
         let checked = libid_bridge_rs::deployment::Deployment::checked(&settings);

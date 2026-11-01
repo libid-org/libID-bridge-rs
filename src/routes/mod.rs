@@ -32,6 +32,8 @@ use axum::{
     },
     http::{
         header,
+        HeaderMap,
+        HeaderName,
         HeaderValue,
         StatusCode,
     },
@@ -44,10 +46,15 @@ use axum::{
         post,
         MethodRouter,
     },
+    Json,
     Router,
 };
+use serde_json::json;
 
-use crate::state::AppState;
+use crate::{
+    origin::Observed,
+    state::AppState,
+};
 
 /// How many `Origin` headers a request carried. The configuration route
 /// admits exactly one, and only where a member of the admission set admits
@@ -91,6 +98,127 @@ fn queried(query: Option<String>) -> Option<&'static str> {
 fn malformed(query: Option<String>, body: &Body) -> Option<&'static str> {
     queried(query)
         .or_else(|| carries_body(body).then_some("this route takes no request body"))
+}
+
+/// What `Vary` names on every admitted-origin response: `Origin` and
+/// `Sec-Fetch-Site` decide the body, on refusals too.
+const VARY_ON: &str = "origin, sec-fetch-site";
+
+/// The `403` of a route callable only from an admitted origin.
+const UNADMITTED: &str = "this route is callable only from an admitted origin";
+
+/// The fetch metadata header saying where a browser request came from,
+/// relative to its target.
+const SEC_FETCH_SITE: HeaderName = HeaderName::from_static("sec-fetch-site");
+
+/// What `Vary` names on a preflight: the origin admitted and the headers the
+/// answer grants.
+const PREFLIGHT_VARY_ON: &str = "origin, access-control-request-headers";
+
+/// How long a browser may reuse one preflight answer. The admission set and
+/// the method granted are fixed at startup.
+const PREFLIGHT_MAX_AGE: &str = "600";
+
+/// How a request is admitted to an admitted-origin route.
+enum Admission {
+    /// One `Origin` a member of the admission set admits; echoed as the
+    /// allow-origin, exactly as it was sent.
+    Listed(HeaderValue),
+    /// No `Origin`: a same-origin browser `GET`, which carries none, on
+    /// `Sec-Fetch-Site: same-origin`. It needs no CORS header.
+    SameOrigin,
+}
+
+impl Admission {
+    /// The allow-origin to answer with: the listed origin, or none.
+    fn allow_origin(self) -> Option<HeaderValue> {
+        match self {
+            Admission::Listed(origin) => Some(origin),
+            Admission::SameOrigin => None,
+        }
+    }
+}
+
+/// How this request is admitted, or `None`.
+///
+/// One `Origin` must be admitted by a member of the admission set: `null`, a
+/// malformed value, an unadmitted one and two headers are refused whatever
+/// else the request carries. With no `Origin`, exactly one `Sec-Fetch-Site:
+/// same-origin` admits. `Referer`, the request host and absent fetch
+/// metadata admit nothing.
+fn admission(state: &AppState, headers: &HeaderMap) -> Option<Admission> {
+    match Origins::of(headers) {
+        Origins::One(origin) => {
+            // Canonicality is the precondition of every membership test and
+            // depends on no member, so the header is read once however long
+            // the admission set is.
+            let observed = Observed::stamped(origin.to_str().ok()?)?;
+            state
+                .allowed_origins
+                .iter()
+                .any(|member| member.admits(observed))
+                .then(|| Admission::Listed(origin.clone()))
+        }
+        Origins::Several => None,
+        Origins::Absent => {
+            let mut sites = headers.get_all(SEC_FETCH_SITE).iter();
+            match (sites.next(), sites.next()) {
+                (Some(site), None) if site == "same-origin" => {
+                    Some(Admission::SameOrigin)
+                }
+                _ => None,
+            }
+        }
+    }
+}
+
+/// A preflight answer granting `methods` and `allow_headers`, or, where that
+/// is `None`, the headers asked for. Admission is the read's.
+fn grant(
+    state: &AppState,
+    headers: &HeaderMap,
+    methods: &'static str,
+    allow_headers: Option<&'static str>,
+) -> Response {
+    let Some(Admission::Listed(origin)) = admission(state, headers) else {
+        return refuse(StatusCode::FORBIDDEN, UNADMITTED, None);
+    };
+
+    let mut out = HeaderMap::new();
+    out.insert(header::VARY, HeaderValue::from_static(PREFLIGHT_VARY_ON));
+    out.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    out.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static(methods),
+    );
+    out.insert(
+        header::ACCESS_CONTROL_MAX_AGE,
+        HeaderValue::from_static(PREFLIGHT_MAX_AGE),
+    );
+    // Unlisted, the headers are granted as asked: no preflight grants
+    // credentials, so there is no list worth keeping.
+    let asked = headers.get(header::ACCESS_CONTROL_REQUEST_HEADERS).cloned();
+    if let Some(granted) = allow_headers.map(HeaderValue::from_static).or(asked) {
+        out.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, granted);
+    }
+
+    (StatusCode::NO_CONTENT, out).into_response()
+}
+
+/// A refusal carries no configuration, so a caller cannot read the record out
+/// of an error.
+///
+/// `admitted` is the origin the request was admitted from, where it was: a
+/// caller refused for something other than its origin gets the header that
+/// lets its browser surface the status, and one refused for its origin gets
+/// nothing, so it cannot tell an unlisted origin from a malformed request.
+fn refuse(status: StatusCode, message: &str, admitted: Option<HeaderValue>) -> Response {
+    let mut out = HeaderMap::new();
+    out.insert(header::VARY, HeaderValue::from_static(VARY_ON));
+    if let Some(origin) = admitted {
+        out.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    }
+    (status, out, Json(json!({ "message": message }))).into_response()
 }
 
 /// `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, put on
@@ -189,7 +317,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             .route(
                 TELEGRAM_JWKS_PATH,
                 refusing_other_methods(
-                    get(telegram::keys).options(config::preflight),
+                    get(telegram::keys).options(telegram::keys_preflight),
                     "GET, OPTIONS",
                 ),
             ),

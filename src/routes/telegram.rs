@@ -22,8 +22,9 @@ use axum::{
 };
 use bytes::Bytes;
 
-use super::config::{
+use super::{
     admission,
+    grant,
     refuse,
     Admission,
     UNADMITTED,
@@ -96,7 +97,7 @@ async fn read_swap(
     }
 }
 
-/// `status`, `headers` and `body`, under the CORS of `/config`.
+/// `status`, `headers` and `body`, under the admitted-origin CORS.
 fn answer(
     status: StatusCode,
     mut headers: HeaderMap,
@@ -146,7 +147,15 @@ pub async fn preflight(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Response {
-    super::config::grant(&state, &headers, "POST, OPTIONS", Some("content-type"))
+    grant(&state, &headers, "POST, OPTIONS", Some("content-type"))
+}
+
+/// `OPTIONS` on the key list: granting `GET`.
+pub async fn keys_preflight(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    grant(&state, &headers, "GET", None)
 }
 
 /// `POST /api/v1/ceremony/telegram/token`.

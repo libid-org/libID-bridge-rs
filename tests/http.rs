@@ -1088,3 +1088,22 @@ async fn an_admitted_caller_can_read_why_it_was_refused() {
     assert_eq!(unlisted.status(), StatusCode::FORBIDDEN);
     assert!(!unlisted.headers().contains_key(&allow));
 }
+
+/// A read and its preflight from an unlisted origin are refused alike.
+#[tokio::test]
+async fn config_and_its_preflight_refuse_an_unlisted_origin_alike() {
+    let state = test_state().await;
+    let mut messages = Vec::new();
+    for method in ["GET", "OPTIONS"] {
+        let req = Request::builder()
+            .method(method)
+            .uri(routes::CONFIG_PATH)
+            .header("origin", "https://evil.example")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app(state.clone()).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{method}");
+        messages.push(resp.into_body().collect().await.unwrap().to_bytes());
+    }
+    assert_eq!(messages[0], messages[1]);
+}

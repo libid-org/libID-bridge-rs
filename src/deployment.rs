@@ -1,11 +1,16 @@
 //! What a deployment is, checked once at startup: the Distribution it
 //! selects, the origins it admits, the platforms it enables with the OAuth
 //! client each runs, and the public ceremony configuration composed from
-//! them. Nothing here is retrieved or bound.
+//! them. Nothing here is bound; only Telegram's client secret is read.
 
-use std::sync::Arc;
+use std::{
+    io::Read as _,
+    path::PathBuf,
+    sync::Arc,
+};
 
 use bytes::Bytes;
+use hyper::Uri;
 use serde::Deserialize;
 use serde_json::{
     json,
@@ -20,9 +25,11 @@ use crate::{
         Result,
     },
     origin::{
+        is_plaintext_loopback,
         Admitted,
         Origin,
     },
+    telegram::TelegramClient,
 };
 
 /// The longest `client_id` a platform entry carries, in bytes. The Application
@@ -34,6 +41,9 @@ pub const MAX_CLIENT_ID_BYTES: usize = 512;
 /// the same `ProveIdentity` wire limits.
 pub const MAX_CLIENT_CREDENTIAL_BYTES: usize = 512;
 
+/// The largest Telegram `client_secret_file` read, in bytes.
+const MAX_SECRET_FILE_BYTES: u64 = 1024;
+
 /// The checked inputs of one deployment.
 pub struct Deployment {
     /// The CCDP Distribution this deployment selects.
@@ -44,6 +54,8 @@ pub struct Deployment {
     pub allowed_origins: Arc<[Admitted]>,
     /// The enabled platforms, each with the client its ceremony runs.
     pub platforms: Vec<PlatformProfile>,
+    /// Telegram's private client, exactly where Telegram is enabled.
+    pub telegram: Option<TelegramClient>,
 }
 
 impl Deployment {
@@ -68,10 +80,30 @@ impl Deployment {
             set.into()
         };
         let platforms = platforms(settings.platforms.clone())?;
+        let enabled = platforms.iter().find(|p| p.id == PlatformId::Telegram);
+        let telegram = match (enabled, &settings.telegram) {
+            (Some(profile), Some(table)) => Some(table.checked(&profile.client_id)?),
+            (None, None) => None,
+            (Some(_), None) => {
+                return Err(Error::Config {
+                    detail: "telegram: [[platforms]] enables telegram, so add a \
+                             [telegram] table naming client_secret_file"
+                        .into(),
+                })
+            }
+            (None, Some(_)) => {
+                return Err(Error::Config {
+                    detail: "telegram: a [telegram] table is set, so enable telegram \
+                             in [[platforms]] or remove the table"
+                        .into(),
+                })
+            }
+        };
         Ok(Deployment {
             ccdp_origin,
             allowed_origins,
             platforms,
+            telegram,
         })
     }
 
@@ -99,6 +131,8 @@ pub enum PlatformId {
     X,
     /// Keyed `github`.
     Github,
+    /// Keyed `telegram`.
+    Telegram,
 }
 
 impl PlatformId {
@@ -144,7 +178,7 @@ impl PlatformProfile {
     /// This table checked: a client id of nonempty printable ASCII without
     /// whitespace within [`MAX_CLIENT_ID_BYTES`], and a credential of the same
     /// within [`MAX_CLIENT_CREDENTIAL_BYTES`] exactly where the platform's
-    /// ceremony sends one. A refusal names the key as the file spells it,
+    /// ceremony sends one; Telegram's client id is digits. A refusal names the key as the file spells it,
     /// never the value.
     pub fn checked(self) -> Result<PlatformProfile> {
         let id = self.id;
@@ -165,6 +199,11 @@ impl PlatformProfile {
             return Err(refuse(format!(
                 "{id}'s client_id is longer than {MAX_CLIENT_ID_BYTES} bytes"
             )));
+        }
+        if id == PlatformId::Telegram
+            && !self.client_id.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err(refuse(format!("{id}'s client_id must be digits")));
         }
         // A credential belongs to exactly the ceremonies that send one.
         match (id.sends_a_credential(), self.client_credential.as_deref()) {
@@ -214,10 +253,79 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>>
     profiles.into_iter().map(PlatformProfile::checked).collect()
 }
 
-/// Whether every byte of `value` is printable ASCII carrying no whitespace,
-/// which is what a public client identifier and a public client credential
-/// are made of.
-fn printable_without_whitespace(value: &str) -> bool {
+/// The `[telegram]` table. The secret is read from its file at startup.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TelegramSettings {
+    /// Nonempty `[A-Za-z0-9_-]`, one trailing newline aside.
+    pub client_secret_file: PathBuf,
+    /// HTTPS, or HTTP on loopback; Telegram's when unset.
+    pub token_url: Option<String>,
+    /// As `token_url`.
+    pub jwks_url: Option<String>,
+}
+
+impl TelegramSettings {
+    /// Telegram's client `client_id`, its secret read and its URLs checked.
+    fn checked(&self, client_id: &str) -> Result<TelegramClient> {
+        let refuse = |detail: String| Error::Config {
+            detail: format!("telegram: {detail}"),
+        };
+        let path = self.client_secret_file.display();
+        let unreadable = |e: std::io::Error| {
+            refuse(format!("client_secret_file {path} cannot be read: {e}"))
+        };
+        let mut text = String::new();
+        std::fs::File::open(&self.client_secret_file)
+            .and_then(|f| f.take(MAX_SECRET_FILE_BYTES + 1).read_to_string(&mut text))
+            .map_err(unreadable)?;
+        if text.len() as u64 > MAX_SECRET_FILE_BYTES {
+            let rule = format!("is longer than {MAX_SECRET_FILE_BYTES} bytes");
+            return Err(refuse(format!("client_secret_file {path} {rule}")));
+        }
+        let secret = text.strip_suffix("\r\n").or(text.strip_suffix('\n'));
+        let secret = secret.unwrap_or(&text);
+        // Both form-encode to themselves, so Basic carries RFC 6749's form.
+        let plain = |b: u8| b.is_ascii_alphanumeric() || b"-_".contains(&b);
+        if secret.is_empty() || !secret.bytes().all(plain) {
+            let rule = "must hold nonempty [A-Za-z0-9_-]";
+            return Err(refuse(format!("client_secret_file {path} {rule}")));
+        }
+        let endpoint = |key: &str, value: Option<&str>, default: &str| {
+            let value = value.unwrap_or(default);
+            let url = url::Url::parse(value).ok().filter(|u| {
+                (u.scheme() == "https" || is_plaintext_loopback(u))
+                    && u.username().is_empty()
+                    && u.password().is_none()
+            });
+            // The value is not quoted: it may carry a credential.
+            url.and_then(|u| u.as_str().parse::<Uri>().ok())
+                .ok_or_else(|| {
+                    refuse(format!(
+                        "{key} is not https or http on localhost or 127.0.0.1 \
+                         without userinfo"
+                    ))
+                })
+        };
+        Ok(TelegramClient::new(
+            client_id,
+            secret,
+            endpoint(
+                "token_url",
+                self.token_url.as_deref(),
+                "https://oauth.telegram.org/token",
+            )?,
+            endpoint(
+                "jwks_url",
+                self.jwks_url.as_deref(),
+                "https://oauth.telegram.org/.well-known/jwks.json",
+            )?,
+        ))
+    }
+}
+
+/// Whether every byte of `value` is printable ASCII carrying no whitespace.
+pub(crate) fn printable_without_whitespace(value: &str) -> bool {
     value.bytes().all(|b| (0x21..=0x7E).contains(&b))
 }
 

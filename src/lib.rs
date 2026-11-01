@@ -8,10 +8,11 @@
 //!
 //! The callback document is the CCDP Distribution's artifact with this
 //! deployment's data inserted into its one slot; everything the browser runs
-//! after the callback is served by that Distribution. This service performs
-//! no token exchange, opens no notary connection, verifies no proof, holds no
-//! secret and no key of its own, keeps no ceremony state, and talks to no
-//! chain.
+//! after the callback is served by that Distribution. Where Telegram is
+//! enabled, it swaps the browser's code with Telegram's client secret, the one
+//! secret it holds, and passes Telegram's key list through. It performs no
+//! other token exchange, opens no notary connection, verifies no proof, holds
+//! no key of its own, keeps no ceremony state, and talks to no chain.
 //!
 //! The Distribution is a separate deployment and this one starts without it.
 //! The callback route says it has no document until a retrieval produces one,
@@ -25,8 +26,10 @@ pub mod deployment;
 pub mod error;
 pub mod metrics;
 pub mod origin;
+mod outbound;
 pub mod routes;
 pub mod state;
+pub mod telegram;
 
 use std::sync::Arc;
 
@@ -62,6 +65,7 @@ impl Bridge {
             ceremony_config: deployment.ceremony_config(),
             failure,
             metrics: metrics.clone(),
+            telegram: deployment.telegram.clone().map(telegram::Telegram::new),
         });
         let refresher = artifact::upstream::Refresher::new(
             upstream,

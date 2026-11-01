@@ -20,10 +20,7 @@ use hyper::{
     StatusCode,
     Uri,
 };
-use hyper_util::{
-    client::legacy::connect::HttpConnector,
-    rt::TokioExecutor,
-};
+use hyper_util::rt::TokioExecutor;
 use tokio::sync::watch;
 
 use super::{
@@ -38,14 +35,15 @@ use crate::{
         Admitted,
         Origin,
     },
+    outbound::{
+        connector,
+        Connector,
+        USER_AGENT,
+    },
 };
 
 /// The artifact's path under the CCDP origin.
 pub const ARTIFACT_PATH: &str = "/ccdp/callback.html";
-
-/// How long opening the transport may take: resolution, the connection, and
-/// the TLS handshake over it.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How long the request and its answer may take once the transport is open.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -74,10 +72,7 @@ impl Schedule {
 /// The client one deployment retrieves with: one pooled connection over TLS
 /// whose anchors are compiled in from `webpki-roots`. No system trust store
 /// is read.
-type Client = hyper_util::client::legacy::Client<
-    hyper_rustls::HttpsConnector<HttpConnector>,
-    Empty<Bytes>,
->;
+type Client = hyper_util::client::legacy::Client<Connector, Empty<Bytes>>;
 
 /// Why a retrieval did not produce a document. Every variant is a refusal,
 /// never a repair.
@@ -192,23 +187,11 @@ impl Upstream {
                     "CCDP_ORIGIN {origin} names a host no HTTP request can carry: {e}"
                 ),
             })?;
-        // The connector dials by URL, so `enforce_http` must be off for the
-        // https wrapper to see an `https` one.
-        let mut http = HttpConnector::new();
-        http.set_connect_timeout(Some(CONNECT_TIMEOUT));
-        http.enforce_http(false);
-        // A loopback deployment names its Distribution by `http`, which
-        // `https_or_http` retrieves without a certificate.
-        let https = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_webpki_roots()
-            .https_or_http()
-            .enable_http1()
-            .wrap_connector(http);
         Ok(Upstream {
             uri,
             origin: origin.clone(),
             client: hyper_util::client::legacy::Client::builder(TokioExecutor::new())
-                .build(https),
+                .build(connector()),
         })
     }
 
@@ -288,10 +271,7 @@ impl Upstream {
             .uri(self.uri.clone())
             .header(header::ACCEPT, "text/html")
             .header(header::ACCEPT_ENCODING, "identity")
-            .header(
-                header::USER_AGENT,
-                concat!("libid-bridge/", env!("CARGO_PKG_VERSION")),
-            );
+            .header(header::USER_AGENT, USER_AGENT);
         if let Some(etag) = etag {
             request = request.header(header::IF_NONE_MATCH, etag);
         }

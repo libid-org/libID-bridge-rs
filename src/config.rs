@@ -14,7 +14,10 @@ use clap::Parser;
 use serde::Deserialize;
 
 use crate::{
-    deployment::PlatformProfile,
+    deployment::{
+        PlatformProfile,
+        TelegramSettings,
+    },
     error::{
         Error,
         Result,
@@ -113,6 +116,11 @@ pub struct Settings {
     /// ```
     #[serde(default)]
     pub platforms: Vec<PlatformProfile>,
+
+    /// Telegram's private client, as a `[telegram]` table: set exactly where
+    /// a `[[platforms]]` table enables telegram.
+    #[serde(default)]
+    pub telegram: Option<TelegramSettings>,
 }
 
 impl Settings {

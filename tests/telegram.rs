@@ -190,6 +190,7 @@ async fn a_swap_posts_the_exact_form_and_passes_the_answer_through() {
     let (path, headers, form) = &seen[0];
     assert_eq!((seen.len(), path.as_str()), (1, "/token"));
     assert_eq!(headers["authorization"], BASIC);
+    assert_eq!(headers["accept-encoding"], "identity");
     assert_eq!(headers["content-type"], "application/x-www-form-urlencoded");
     assert_eq!(
         std::str::from_utf8(form).unwrap(),
@@ -395,6 +396,7 @@ async fn the_key_list_passes_through_and_is_cached_for_an_hour() {
     let seen = fake.seen();
     assert_eq!((seen.len(), seen[5].0.as_str()), (6, "/jwks"));
     assert!(seen[5].1.get("authorization").is_none());
+    assert_eq!(seen[5].1["accept-encoding"], "identity");
 
     fake.serve(answering(200, "{}"));
     // No I/O runs while the clock is paused: these reads are the cache.

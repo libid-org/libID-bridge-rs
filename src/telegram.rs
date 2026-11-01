@@ -184,6 +184,7 @@ impl Telegram {
         let request = hyper::Request::post(client.token_url.clone())
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(header::ACCEPT, "application/json")
+            .header(header::ACCEPT_ENCODING, "identity")
             .header(header::USER_AGENT, USER_AGENT)
             .header(header::AUTHORIZATION, client.authorization.clone())
             .body(Full::from(form))
@@ -226,6 +227,7 @@ impl Telegram {
     /// One fetch of the key list, cached as [`Telegram::keys`] says.
     async fn fetch_keys(&self) -> Result<(HeaderMap, Bytes), Failure> {
         let request = hyper::Request::get(self.client.jwks_url.clone())
+            .header(header::ACCEPT_ENCODING, "identity")
             .header(header::USER_AGENT, USER_AGENT)
             .body(Full::default())
             .expect("a URI checked at startup");

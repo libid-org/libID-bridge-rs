@@ -4,6 +4,7 @@
 //! them. Nothing here is bound; only Telegram's client secret is read.
 
 use std::{
+    io::Read as _,
     path::PathBuf,
     sync::Arc,
 };
@@ -39,6 +40,9 @@ pub const MAX_CLIENT_ID_BYTES: usize = 512;
 /// The longest `client_credential` a platform entry carries, in bytes, under
 /// the same `ProveIdentity` wire limits.
 pub const MAX_CLIENT_CREDENTIAL_BYTES: usize = 512;
+
+/// The largest Telegram `client_secret_file` read, in bytes.
+const MAX_SECRET_FILE_BYTES: u64 = 1024;
 
 /// The checked inputs of one deployment.
 pub struct Deployment {
@@ -268,9 +272,17 @@ impl TelegramSettings {
             detail: format!("telegram: {detail}"),
         };
         let path = self.client_secret_file.display();
-        let text = std::fs::read_to_string(&self.client_secret_file).map_err(|e| {
+        let unreadable = |e: std::io::Error| {
             refuse(format!("client_secret_file {path} cannot be read: {e}"))
-        })?;
+        };
+        let mut text = String::new();
+        std::fs::File::open(&self.client_secret_file)
+            .and_then(|f| f.take(MAX_SECRET_FILE_BYTES + 1).read_to_string(&mut text))
+            .map_err(unreadable)?;
+        if text.len() as u64 > MAX_SECRET_FILE_BYTES {
+            let rule = format!("is longer than {MAX_SECRET_FILE_BYTES} bytes");
+            return Err(refuse(format!("client_secret_file {path} {rule}")));
+        }
         let secret = text.strip_suffix("\r\n").or(text.strip_suffix('\n'));
         let secret = secret.unwrap_or(&text);
         // Both form-encode to themselves, so Basic carries RFC 6749's form.
@@ -281,13 +293,17 @@ impl TelegramSettings {
         }
         let endpoint = |key: &str, value: Option<&str>, default: &str| {
             let value = value.unwrap_or(default);
-            let url = url::Url::parse(value)
-                .ok()
-                .filter(|u| u.scheme() == "https" || is_plaintext_loopback(u));
+            let url = url::Url::parse(value).ok().filter(|u| {
+                (u.scheme() == "https" || is_plaintext_loopback(u))
+                    && u.username().is_empty()
+                    && u.password().is_none()
+            });
+            // The value is not quoted: it may carry a credential.
             url.and_then(|u| u.as_str().parse::<Uri>().ok())
                 .ok_or_else(|| {
                     refuse(format!(
-                        "{key} {value} is not https or http on localhost or 127.0.0.1"
+                        "{key} is not https or http on localhost or 127.0.0.1 \
+                         without userinfo"
                     ))
                 })
         };

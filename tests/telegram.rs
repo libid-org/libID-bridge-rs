@@ -428,6 +428,7 @@ fn startup_refuses_an_unusable_telegram_table_naming_the_setting() {
     let empty = common::ScratchFile::holding("\n");
     let spaced = common::ScratchFile::holding("two words\n");
     let plus = common::ScratchFile::holding("a+b\n");
+    let long = common::ScratchFile::holding(&"a".repeat(1025));
     let good = settings("https://oauth.example", &secret);
     let table = |f: &dyn Fn(&mut TelegramSettings)| {
         let mut settings = good.clone();
@@ -455,6 +456,14 @@ fn startup_refuses_an_unusable_telegram_table_naming_the_setting() {
         (table(&|t| t.token_url = http("token")), "token_url"),
         (table(&|t| t.jwks_url = http("jwks")), "jwks_url"),
         (
+            table(&|t| t.token_url = Some("https://u:hunter2@oauth.example/".into())),
+            "token_url",
+        ),
+        (
+            table(&|t| t.client_secret_file = long.path().into()),
+            "longer than 1024",
+        ),
+        (
             table(&|t| t.client_secret_file = spaced.path().into()),
             "client_secret_file",
         ),
@@ -471,7 +480,7 @@ fn startup_refuses_an_unusable_telegram_table_naming_the_setting() {
         let checked = libid_bridge_rs::deployment::Deployment::checked(&settings);
         let error = checked.err().map(|e| e.to_string()).unwrap_or_default();
         assert!(
-            error.contains(key) && !error.contains(SECRET),
+            error.contains(key) && !error.contains(SECRET) && !error.contains("hunter2"),
             "{key}: {error}"
         );
     }

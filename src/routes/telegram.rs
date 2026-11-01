@@ -40,6 +40,11 @@ use crate::{
     },
 };
 
+/// The largest swap request body read, in bytes.
+const MAX_SWAP_BYTES: usize = 2048;
+/// The longest `code` or `redirectUri`, in bytes.
+const MAX_FIELD_BYTES: usize = 512;
+
 /// A swap's answer as read for its outcome: its `error` field alone.
 #[derive(serde::Deserialize)]
 struct Answer {
@@ -55,9 +60,10 @@ struct Swap {
     redirect_uri: String,
 }
 
-/// Whether `value` is 1 to 512 bytes of printable ASCII without spaces.
+/// Whether `value` is 1 to [`MAX_FIELD_BYTES`] of printable ASCII without
+/// spaces.
 fn printable(value: &str) -> bool {
-    (1..=512).contains(&value.len()) && printable_without_whitespace(value)
+    (1..=MAX_FIELD_BYTES).contains(&value.len()) && printable_without_whitespace(value)
 }
 
 /// Whether `value` is an RFC 7636 code verifier.
@@ -73,25 +79,29 @@ async fn read_swap(
     query: Option<String>,
     headers: &HeaderMap,
     body: Body,
-) -> Result<Swap, &'static str> {
+) -> Result<Swap, String> {
     if let Some(message) = super::queried(query) {
-        return Err(message);
+        return Err(message.into());
     }
     if !is_json(headers) {
-        return Err("the request body must be Content-Type: application/json");
+        return Err("the request body must be Content-Type: application/json".into());
     }
-    let bytes = axum::body::to_bytes(body, 2048)
+    let bytes = axum::body::to_bytes(body, MAX_SWAP_BYTES)
         .await
-        .map_err(|_| "the request body could not be read within 2048 bytes")?;
+        .map_err(|_| {
+            format!("the request body could not be read within {MAX_SWAP_BYTES} bytes")
+        })?;
     let swap: Swap = serde_json::from_slice(&bytes).map_err(|_| {
         "the request body must be {\"code\", \"codeVerifier\", \"redirectUri\"}, all strings"
     })?;
+    let printable_rule =
+        format!("must be 1 to {MAX_FIELD_BYTES} bytes of printable ASCII");
     if !printable(&swap.code) {
-        Err("code must be 1 to 512 bytes of printable ASCII")
+        Err(format!("code {printable_rule}"))
     } else if !printable(&swap.redirect_uri) {
-        Err("redirectUri must be 1 to 512 bytes of printable ASCII")
+        Err(format!("redirectUri {printable_rule}"))
     } else if !is_verifier(&swap.code_verifier) {
-        Err("codeVerifier must be 43 to 128 characters of [A-Za-z0-9-._~]")
+        Err("codeVerifier must be 43 to 128 characters of [A-Za-z0-9-._~]".into())
     } else {
         Ok(swap)
     }
@@ -171,7 +181,7 @@ pub async fn token(
     };
     let swap = match read_swap(query, &headers, body).await {
         Ok(swap) => swap,
-        Err(message) => return refuse(StatusCode::BAD_REQUEST, message, origin),
+        Err(message) => return refuse(StatusCode::BAD_REQUEST, &message, origin),
     };
     let swapped = telegram.swap(&swap.code, &swap.redirect_uri, &swap.code_verifier);
     match swapped.await {

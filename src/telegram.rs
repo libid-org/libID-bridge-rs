@@ -21,6 +21,10 @@ use crate::outbound::USER_AGENT;
 
 /// How long one upstream call may take, dialing included.
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// The largest token answer passed on, in bytes.
+const MAX_TOKEN_BYTES: usize = 8 * 1024;
+/// The largest key list passed on, in bytes.
+const MAX_KEYS_BYTES: usize = 64 * 1024;
 /// How long a fetched key list is served from cache: the keeper's cadence,
 /// since a new key is unusable on chain until the keeper rotates it in.
 const KEYS_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
@@ -176,7 +180,7 @@ impl Telegram {
             .header(header::AUTHORIZATION, client.authorization.clone())
             .body(Full::from(form))
             .expect("a URI checked at startup");
-        self.call(request, 8 * 1024).await
+        self.call(request, MAX_TOKEN_BYTES).await
     }
 
     /// The key list's media type, encoding and bytes: cached while fresh, else
@@ -218,7 +222,7 @@ impl Telegram {
             .body(Full::default())
             .expect("a URI checked at startup");
         let started = tokio::time::Instant::now();
-        let (status, upstream, body) = self.call(request, 64 * 1024).await?;
+        let (status, upstream, body) = self.call(request, MAX_KEYS_BYTES).await?;
         if status != StatusCode::OK {
             return Err((FailureKind::Status, status.to_string()));
         }

@@ -43,6 +43,7 @@ use libid_bridge_rs::{
     },
     Bridge,
 };
+use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::oneshot;
 use tower::ServiceExt;
@@ -169,6 +170,47 @@ fn valid() -> String {
     swap_body("c", VERIFIER, "x")
 }
 
+/// A refusal's body.
+#[derive(Deserialize)]
+struct Refusal {
+    message: String,
+}
+
+/// The public configuration, as far as Telegram's entry.
+#[derive(Deserialize)]
+struct Record {
+    platforms: Platforms,
+}
+
+#[derive(Deserialize)]
+struct Platforms {
+    telegram: Entry,
+}
+
+/// Telegram's public entry: its client id and nothing else.
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Entry {
+    client_id: String,
+}
+
+/// One of Telegram's routes.
+#[derive(Clone, Copy)]
+enum Route {
+    Token,
+    Keys,
+}
+
+impl Route {
+    /// The route's name in `/metrics`.
+    fn name(self) -> &'static str {
+        match self {
+            Route::Token => "token",
+            Route::Keys => "keys",
+        }
+    }
+}
+
 /// What the bridge answered.
 struct Answer {
     status: StatusCode,
@@ -251,11 +293,11 @@ impl Suite {
         self.request("GET", JWKS, &[("origin", APP)], "").await
     }
 
-    /// A valid call to `route`, `token` or `keys`.
-    async fn call(&self, route: &str) -> Answer {
+    /// A valid call to `route`.
+    async fn call(&self, route: Route) -> Answer {
         match route {
-            "token" => self.swap(valid()).await,
-            _ => self.keys().await,
+            Route::Token => self.swap(valid()).await,
+            Route::Keys => self.keys().await,
         }
     }
 
@@ -289,8 +331,9 @@ impl Suite {
     }
 
     /// How many Telegram calls on `route` `/metrics` counts as `outcome`.
-    async fn count(&self, route: &str, outcome: &str) -> u64 {
+    async fn count(&self, route: Route, outcome: &str) -> u64 {
         let text = self.request("GET", "/metrics", &[], "").await.body;
+        let route = route.name();
         let series =
             format!("telegram_calls_total{{route=\"{route}\",outcome=\"{outcome}\"}} ");
         let text = String::from_utf8_lossy(&text);
@@ -375,7 +418,7 @@ async fn only_a_2xx_unencoded_json_answer_without_error_counts_as_ok() {
     for (status, media, encoding, body, outcome) in replies {
         let suite = Suite::new(Some((status, media, encoding, Bytes::from(body))));
         suite.swap(valid()).await;
-        assert_eq!(suite.count("token", outcome).await, 1, "{body}");
+        assert_eq!(suite.count(Route::Token, outcome).await, 1, "{body}");
     }
 }
 
@@ -441,32 +484,32 @@ async fn a_request_at_every_bound_is_swapped() {
 
 /// Each failing call: the route, what Telegram does (`None`: unreachable),
 /// the `502`'s words and the metric outcome.
-fn failures() -> Vec<(&'static str, Option<Reply>, &'static str, &'static str)> {
+fn failures() -> Vec<(Route, Option<Reply>, &'static str, &'static str)> {
     let moved = "answered a redirect this bridge does not follow";
     let big = "answered more than this bridge passes on";
     vec![
-        ("token", Some(answering(302, "")), moved, "redirect"),
+        (Route::Token, Some(answering(302, "")), moved, "redirect"),
         (
-            "token",
+            Route::Token,
             Some(answering(200, vec![b'a'; 8 * 1024 + 1])),
             big,
             "too-large",
         ),
-        ("token", None, "could not be reached", "unreachable"),
-        ("keys", Some(answering(302, "")), moved, "redirect"),
+        (Route::Token, None, "could not be reached", "unreachable"),
+        (Route::Keys, Some(answering(302, "")), moved, "redirect"),
         (
-            "keys",
+            Route::Keys,
             Some(answering(200, vec![b'a'; 64 * 1024 + 1])),
             big,
             "too-large",
         ),
         (
-            "keys",
+            Route::Keys,
             Some(answering(500, "")),
             "answered an error",
             "status",
         ),
-        ("keys", None, "could not be reached", "unreachable"),
+        (Route::Keys, None, "could not be reached", "unreachable"),
     ]
 }
 
@@ -483,12 +526,12 @@ async fn a_failed_call_is_a_502_naming_only_its_kind() {
         let suite = failing(reply).await;
         let answer = suite.call(route).await;
         let what = match route {
-            "token" => "Telegram's token endpoint",
-            _ => "Telegram's key list",
+            Route::Token => "Telegram's token endpoint",
+            Route::Keys => "Telegram's key list",
         };
         assert_eq!(answer.status, StatusCode::BAD_GATEWAY, "{what} {kind}");
-        let body: serde_json::Value = serde_json::from_slice(&answer.body).unwrap();
-        assert_eq!(body, json!({ "message": format!("{what} {kind}") }));
+        let refusal: Refusal = serde_json::from_slice(&answer.body).unwrap();
+        assert_eq!(refusal.message, format!("{what} {kind}"));
         // A redirect is not followed.
         if let Some(fake) = &suite.fake {
             assert!(fake.seen().len() <= 1);
@@ -501,7 +544,8 @@ async fn a_failed_call_is_counted_by_its_kind() {
     for (route, reply, _, outcome) in failures() {
         let suite = failing(reply).await;
         suite.call(route).await;
-        assert_eq!(suite.count(route, outcome).await, 1, "{route} {outcome}");
+        let name = route.name();
+        assert_eq!(suite.count(route, outcome).await, 1, "{name} {outcome}");
     }
 }
 
@@ -513,18 +557,19 @@ async fn a_call_telegram_does_not_answer_times_out() {
     tokio::time::resume();
     assert_eq!(answer.status, StatusCode::BAD_GATEWAY);
     assert!(String::from_utf8_lossy(&answer.body).contains("did not answer in time"));
-    assert_eq!(suite.count("token", "timeout").await, 1);
+    assert_eq!(suite.count(Route::Token, "timeout").await, 1);
 }
 
 #[tokio::test]
 async fn an_answer_at_its_bound_passes_through() {
-    for (route, len) in [("token", 8 * 1024), ("keys", 64 * 1024)] {
+    for (route, len) in [(Route::Token, 8 * 1024), (Route::Keys, 64 * 1024)] {
         let suite = Suite::new(answering(200, vec![b'a'; len]));
         let answer = suite.call(route).await;
         assert_eq!(
             (answer.status, answer.body.len()),
             (StatusCode::OK, len),
-            "{route}"
+            "{}",
+            route.name()
         );
     }
 }
@@ -657,7 +702,11 @@ async fn a_200_that_is_not_a_key_list_passes_through_uncached() {
             );
         }
         assert_eq!(suite.fake().seen().len(), 2, "{media}");
-        assert_eq!(suite.count("keys", "upstream-error").await, 2, "{media}");
+        assert_eq!(
+            suite.count(Route::Keys, "upstream-error").await,
+            2,
+            "{media}"
+        );
     }
 }
 
@@ -666,7 +715,7 @@ async fn a_key_list_fetched_is_counted_ok() {
     let suite = Suite::new(answering(200, "{}"));
     suite.keys().await;
     suite.keys().await;
-    assert_eq!(suite.count("keys", "ok").await, 1);
+    assert_eq!(suite.count(Route::Keys, "ok").await, 1);
 }
 
 #[test]
@@ -757,9 +806,9 @@ async fn config_publishes_only_telegrams_client_id() {
     let answer = suite
         .request("GET", "/api/v1/ceremony/config", &[("origin", APP)], "")
         .await;
-    let record: serde_json::Value = serde_json::from_slice(&answer.body).unwrap();
-    let telegram = &record["platforms"]["telegram"];
-    assert_eq!(telegram, &json!({ "clientId": "8123456789" }));
+    let record: Record = serde_json::from_slice(&answer.body).unwrap();
+    let client_id = "8123456789".to_owned();
+    assert_eq!(record.platforms.telegram, Entry { client_id });
 }
 
 #[tokio::test]
@@ -769,11 +818,12 @@ async fn without_telegram_its_routes_are_absent() {
         fake: None,
         app: build_router(bridge.state, bridge.telegram),
     };
-    for route in ["token", "keys"] {
+    for route in [Route::Token, Route::Keys] {
         assert_eq!(
             suite.call(route).await.status,
             StatusCode::NOT_FOUND,
-            "{route}"
+            "{}",
+            route.name()
         );
     }
 }

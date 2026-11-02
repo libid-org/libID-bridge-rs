@@ -271,7 +271,9 @@ fn telegram_client(profile: &PlatformProfile) -> Result<TelegramClient> {
     let file = profile
         .client_secret_file
         .as_deref()
-        .expect("a checked Telegram entry names its secret file");
+        .ok_or_else(|| Error::Config {
+            detail: format!("platforms: {id} needs a client_secret_file"),
+        })?;
     let path = file.display();
     let refuse = |rule: String| Error::Config {
         detail: format!("platforms: {id}'s client_secret_file {path} {rule}"),

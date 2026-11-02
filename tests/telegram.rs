@@ -414,47 +414,15 @@ async fn the_key_list_passes_through_and_is_cached_for_an_hour() {
     assert_eq!(&get().await.2[..], b"{}");
     assert_eq!(fake.seen().len(), 7);
 
-    // Stale, while refetches fail, for a day: each refetch times out in 10 s.
+    // Past the hour, a failed refetch is a 502: it times out in 10 s.
     fake.serve(None);
     tokio::time::pause();
     tokio::time::advance(std::time::Duration::from_secs(3600)).await;
-    let (status, _, body) = get().await;
-    assert_eq!((status, &body[..]), (StatusCode::OK, &b"{}"[..]));
-    tokio::time::advance(std::time::Duration::from_secs(86_370)).await;
-    assert_eq!(&get().await.2[..], b"{}");
-    tokio::time::advance(std::time::Duration::from_secs(10)).await;
     assert_eq!(get().await.0, StatusCode::BAD_GATEWAY);
     tokio::time::resume();
-    assert!(counted(&app, "keys", "timeout", 3).await);
+    assert!(counted(&app, "keys", "timeout", 1).await);
     assert!(counted(&app, "keys", "upstream_error", 4).await);
     assert!(counted(&app, "keys", "ok", 2).await);
-}
-
-#[tokio::test]
-async fn a_stale_key_list_outlives_a_bad_answer_without_refetching_each_time() {
-    let fake = Fake::serving(answering(200, "{}"));
-    let app = app(&fake.url);
-    let get = || send(&app, "GET", JWKS, &[("origin", APP)], Body::empty());
-    assert_eq!(&get().await.2[..], b"{}");
-
-    tokio::time::pause();
-    tokio::time::advance(std::time::Duration::from_secs(3600)).await;
-    tokio::time::resume();
-    fake.serve(Some((200, "text/html", None, Bytes::from("<p>"))));
-    let (status, _, body) = get().await;
-    assert_eq!((status, &body[..]), (StatusCode::OK, &b"{}"[..]));
-    assert_eq!(fake.seen().len(), 2);
-    assert!(counted(&app, "keys", "upstream_error", 1).await);
-
-    // A failed refetch is not retried for a minute: no request waits on one.
-    fake.serve(None);
-    tokio::time::pause();
-    assert_eq!(&get().await.2[..], b"{}");
-    tokio::time::advance(std::time::Duration::from_secs(60)).await;
-    assert_eq!(&get().await.2[..], b"{}");
-    assert_eq!(&get().await.2[..], b"{}");
-    tokio::time::resume();
-    assert!(counted(&app, "keys", "timeout", 1).await);
 }
 
 #[test]

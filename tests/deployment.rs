@@ -209,17 +209,17 @@ mod deployment {
     /// and a byte longer is refused, naming the key.
     #[test]
     fn a_google_client_id_is_bounded_by_the_proof_audience() {
-        let google = |len: usize| {
-            json!([{ "id": "google", "client_id": "a".repeat(len) }]).to_string()
-        };
-        let accepted = checked(&google(MAX_GOOGLE_CLIENT_ID_BYTES)).unwrap();
+        let google =
+            |len: usize| platforms(vec![client(PlatformId::Google, "a".repeat(len))]);
+        let accepted = google(MAX_GOOGLE_CLIENT_ID_BYTES).unwrap();
         assert_eq!(accepted[0].client_id.len(), MAX_GOOGLE_CLIENT_ID_BYTES);
 
-        let text = checked(&google(MAX_GOOGLE_CLIENT_ID_BYTES + 1))
+        let text = google(MAX_GOOGLE_CLIENT_ID_BYTES + 1)
             .unwrap_err()
             .to_string();
+        let bound = format!("longer than {MAX_GOOGLE_CLIENT_ID_BYTES} bytes");
         assert!(
-            text.contains("client_id") && text.contains("longer than 128 bytes"),
+            text.contains("client_id") && text.contains(&bound),
             "{text}"
         );
     }
@@ -228,14 +228,23 @@ mod deployment {
     /// cannot carry one; another platform's is not.
     #[test]
     fn a_google_client_id_carries_no_quote() {
-        let quoted = r#"[{"id":"google","client_id":"a\"b"}]"#;
-        let text = checked(quoted).unwrap_err().to_string();
+        let quoted = |id: PlatformId| platforms(vec![client(id, r#"a"b"#.to_owned())]);
+        let text = quoted(PlatformId::Google).unwrap_err().to_string();
         assert!(
             text.contains("client_id") && text.contains("quote"),
             "{text}"
         );
 
-        assert!(checked(r#"[{"id":"x","client_id":"a\"b"}]"#).is_ok());
+        assert!(quoted(PlatformId::X).is_ok());
+    }
+
+    /// A platform entry with `client_id` and no credential.
+    fn client(id: PlatformId, client_id: String) -> PlatformProfile {
+        PlatformProfile {
+            id,
+            client_id,
+            client_credential: None,
+        }
     }
 
     /// A refusal names the key as the file spells it, never the value.

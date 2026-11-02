@@ -57,10 +57,11 @@ impl Bridge {
         Bridge::started(deployment::Deployment::checked(settings)?)
     }
 
-    /// As [`Bridge::start`], Telegram's client calling `origin`'s `/token`
-    /// and `/jwks`.
+    /// Test-only: as [`Bridge::start`], Telegram's client calling `origin`'s
+    /// `/token` and `/jwks`.
     #[cfg(feature = "test-helpers")]
-    pub fn start_with_telegram_at(
+    #[doc(hidden)]
+    pub fn start_for_tests_with_telegram_at(
         settings: &config::Settings,
         origin: &str,
     ) -> Result<Bridge> {

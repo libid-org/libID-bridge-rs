@@ -189,7 +189,8 @@ impl Suite {
 
     fn app(url: &str) -> Router {
         let secret = common::ScratchFile::holding(&format!("{SECRET}\n"));
-        let bridge = Bridge::start_with_telegram_at(&settings(&secret), url).unwrap();
+        let bridge =
+            Bridge::start_for_tests_with_telegram_at(&settings(&secret), url).unwrap();
         build_router(bridge.state)
     }
 

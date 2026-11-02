@@ -1,10 +1,7 @@
 //! Telegram's private client and the calls made with it: the code swap and
 //! the key list, each bounded in time and size, the key list cached.
 
-use std::{
-    sync::Mutex,
-    time::Duration,
-};
+use std::time::Duration;
 
 use base64::Engine as _;
 use bytes::Bytes;
@@ -22,9 +19,12 @@ use hyper::{
     Uri,
 };
 use hyper_util::rt::TokioExecutor;
-use tokio::time::{
-    error::Elapsed,
-    Instant,
+use tokio::{
+    sync::Mutex,
+    time::{
+        error::Elapsed,
+        Instant,
+    },
 };
 
 use crate::outbound::{
@@ -233,13 +233,15 @@ impl Telegram {
 
     /// The key list: cached while fresh, else fetched, and cached only when a
     /// nonempty JSON `200`; any other `200` passes through. Each fetch's
-    /// outcome goes to `fetched`. The lock is never held across a fetch.
+    /// outcome goes to `fetched`. One fetch runs at a time, holding the cache;
+    /// a caller that waited on it gets what it cached.
     pub(crate) async fn keys(
         &self,
         fetched: impl FnOnce(&'static str),
     ) -> Result<Reply, CallError> {
-        if let Some(fresh) = self.cached_keys() {
-            return Ok(fresh);
+        let mut keys = self.keys.lock().await;
+        if let Some(fresh) = keys.as_ref().filter(|c| c.at.elapsed() < KEYS_TTL) {
+            return Ok(fresh.reply.clone());
         }
         let started = Instant::now();
         let reply = match self.fetch_keys().await {
@@ -251,22 +253,14 @@ impl Telegram {
         };
         if is_json(&reply.headers) && !reply.body.is_empty() {
             fetched("ok");
-            let cached = Cached {
+            *keys = Some(Cached {
                 at: started,
                 reply: reply.clone(),
-            };
-            *self.keys.lock().unwrap_or_else(|e| e.into_inner()) = Some(cached);
+            });
         } else {
             fetched("upstream_error");
         }
         Ok(reply)
-    }
-
-    /// The cached key list, while fresh.
-    fn cached_keys(&self) -> Option<Reply> {
-        let cached = self.keys.lock().unwrap_or_else(|e| e.into_inner());
-        let fresh = cached.as_ref().filter(|c| c.at.elapsed() < KEYS_TTL);
-        fresh.map(|c| c.reply.clone())
     }
 
     /// One fetch of the key list, a status other than `200` refused.

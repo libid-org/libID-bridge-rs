@@ -54,6 +54,8 @@ const GZIPPED: &[u8] =
 /// Status, media type, encoding and body; `None` never answers.
 type Reply = Option<(u16, &'static str, Option<&'static str>, Bytes)>;
 type Seen = Arc<Mutex<Vec<(String, HeaderMap, Bytes)>>>;
+/// Held until its sender sends or drops.
+type Held = Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>;
 
 /// Telegram on loopback: every path records the request and answers the reply,
 /// with a `Location` to itself.
@@ -61,12 +63,14 @@ struct Fake {
     url: String,
     seen: Seen,
     reply: Arc<Mutex<Reply>>,
+    held: Held,
 }
 
 impl Fake {
     fn serving(reply: Reply) -> Fake {
         let (seen, reply) = (Seen::default(), Arc::new(Mutex::new(reply)));
-        let state = (seen.clone(), reply.clone());
+        let held = Held::default();
+        let state = (seen.clone(), reply.clone(), held.clone());
         let router = Router::new().fallback(fake).with_state(state);
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -75,11 +79,23 @@ impl Fake {
             let listener = tokio::net::TcpListener::from_std(listener).unwrap();
             axum::serve(listener, router).await
         });
-        Fake { url, seen, reply }
+        Fake {
+            url,
+            seen,
+            reply,
+            held,
+        }
     }
 
     fn serve(&self, reply: Reply) {
         *self.reply.lock().unwrap() = reply;
+    }
+
+    /// Holds the next answer, the reply as it was when asked, until released.
+    fn hold(&self) -> tokio::sync::oneshot::Sender<()> {
+        let (release, held) = tokio::sync::oneshot::channel();
+        *self.held.lock().unwrap() = Some(held);
+        release
     }
 
     fn seen(&self) -> Vec<(String, HeaderMap, Bytes)> {
@@ -88,7 +104,11 @@ impl Fake {
 }
 
 async fn fake(
-    axum::extract::State((seen, reply)): axum::extract::State<(Seen, Arc<Mutex<Reply>>)>,
+    axum::extract::State((seen, reply, held)): axum::extract::State<(
+        Seen,
+        Arc<Mutex<Reply>>,
+        Held,
+    )>,
     uri: axum::http::Uri,
     headers: HeaderMap,
     body: Bytes,
@@ -97,6 +117,10 @@ async fn fake(
         .unwrap()
         .push((uri.path().to_owned(), headers, body));
     let reply = reply.lock().unwrap().clone();
+    let held = held.lock().unwrap().take();
+    if let Some(held) = held {
+        let _ = held.await;
+    }
     let Some((status, media, encoding, body)) = reply else {
         return std::future::pending().await;
     };
@@ -536,6 +560,31 @@ async fn the_key_list_is_cached_for_an_hour() {
     tokio::time::resume();
     assert_eq!(&suite.keys().await.body[..], b"{}");
     assert_eq!(suite.fake.seen().len(), 2);
+}
+
+#[tokio::test]
+async fn a_read_during_a_fetch_waits_for_it_rather_than_fetching() {
+    let suite = Suite::new(answering(200, "[1]"));
+    let release = suite.fake.hold();
+    let second = async {
+        while suite.fake.seen().is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        suite.fake.serve(answering(200, "[2]"));
+        suite.keys().await
+    };
+    let released = async {
+        // Time for a second fetch to reach Telegram and answer, were it sent.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        release.send(()).unwrap();
+    };
+    let (first, second, ()) = tokio::join!(suite.keys(), second, released);
+    assert_eq!(
+        (&first.body[..], &second.body[..]),
+        (&b"[1]"[..], &b"[1]"[..])
+    );
+    assert_eq!(&suite.keys().await.body[..], b"[1]");
+    assert_eq!(suite.fake.seen().len(), 1);
 }
 
 #[tokio::test]

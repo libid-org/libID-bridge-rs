@@ -419,6 +419,33 @@ async fn the_swap_preflight_grants_content_type() {
 }
 
 #[tokio::test]
+async fn the_swap_admits_only_post_and_its_preflight() {
+    let suite = Suite::new(answering(200, "{}"));
+    for method in ["GET", "HEAD", "PUT"] {
+        let answer = suite.request(method, TOKEN, &[("origin", APP)], "").await;
+        assert_eq!(answer.status, StatusCode::METHOD_NOT_ALLOWED, "{method}");
+        assert_eq!(answer.headers["allow"], "POST, OPTIONS", "{method}");
+    }
+    assert!(suite.fake().seen().is_empty());
+}
+
+#[tokio::test]
+async fn the_key_list_admits_only_get_and_its_preflight() {
+    let suite = Suite::new(answering(200, r#"{"keys":[{}]}"#));
+    for method in ["HEAD", "POST", "PUT"] {
+        let answer = suite.request(method, JWKS, &[("origin", APP)], "").await;
+        assert_eq!(answer.status, StatusCode::METHOD_NOT_ALLOWED, "{method}");
+        assert_eq!(answer.headers["allow"], "GET, OPTIONS", "{method}");
+    }
+    let preflight = [("origin", APP), ("access-control-request-method", "GET")];
+    let answer = suite.request("OPTIONS", JWKS, &preflight, "").await;
+    assert_eq!(answer.status, StatusCode::NO_CONTENT);
+    assert_eq!(answer.headers["access-control-allow-methods"], "GET");
+    assert_eq!(answer.headers["access-control-allow-origin"], APP);
+    assert!(suite.fake().seen().is_empty());
+}
+
+#[tokio::test]
 async fn only_a_2xx_unencoded_json_answer_without_error_counts_as_ok() {
     let replies = [
         (200, "text/plain", None, "id_token=t", "upstream-error"),

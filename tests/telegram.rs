@@ -34,6 +34,7 @@ use libid_bridge_rs::{
     config::Settings,
     deployment::{
         Deployment,
+        PlatformId,
         PlatformProfile,
     },
     routes::{
@@ -43,8 +44,10 @@ use libid_bridge_rs::{
     },
     Bridge,
 };
-use serde::Deserialize;
-use serde_json::json;
+use serde::{
+    Deserialize,
+    Serialize,
+};
 use tokio::sync::oneshot;
 use tower::ServiceExt;
 
@@ -153,17 +156,38 @@ fn answering(status: u16, body: impl Into<Bytes>) -> Reply {
 
 /// A deployment enabling Telegram, its secret in `secret`.
 fn settings(secret: &common::ScratchFile) -> Settings {
-    let platforms = json!([{
-        "id": "telegram",
-        "client_id": "8123456789",
-        "client_secret_file": secret.path(),
-    }]);
-    common::config(&["--platforms", &platforms.to_string()])
+    let mut settings = common::config(&[]);
+    settings.platforms = vec![PlatformProfile {
+        id: PlatformId::Telegram,
+        client_id: "8123456789".into(),
+        client_credential: None,
+        client_secret_file: Some(secret.path().into()),
+    }];
+    settings
 }
 
-fn swap_body(code: &str, verifier: &str, redirect_uri: &str) -> String {
-    json!({ "code": code, "codeVerifier": verifier, "redirectUri": redirect_uri })
-        .to_string()
+/// A swap request's body.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Swap<'a> {
+    code: &'a str,
+    code_verifier: &'a str,
+    redirect_uri: &'a str,
+}
+
+fn swap_body(code: &str, code_verifier: &str, redirect_uri: &str) -> String {
+    let swap = Swap {
+        code,
+        code_verifier,
+        redirect_uri,
+    };
+    serde_json::to_string(&swap).unwrap()
+}
+
+/// Telegram's error body.
+#[derive(Serialize)]
+struct UpstreamError<'a> {
+    error: &'a str,
 }
 
 fn valid() -> String {
@@ -609,7 +633,8 @@ fn logs() -> &'static Capture {
 async fn the_log_names_a_failure_and_holds_no_secret() {
     let logs = logs();
     let long = "Q".repeat(65);
-    let suite = Suite::new(answering(400, json!({ "error": long }).to_string()));
+    let error = serde_json::to_string(&UpstreamError { error: &long }).unwrap();
+    let suite = Suite::new(answering(400, error));
     suite.swap(valid()).await;
     suite.fake().serve(answering(302, ""));
     suite.swap(valid()).await;

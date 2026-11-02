@@ -165,10 +165,10 @@ struct Answer {
     body: Bytes,
 }
 
-/// A bridge enabling Telegram, its client calling `fake` or an origin nothing
-/// answers on.
+/// A bridge enabling Telegram, its client calling `fake` or, without one, an
+/// origin nothing answers on.
 struct Suite {
-    fake: Fake,
+    fake: Option<Fake>,
     app: Router,
 }
 
@@ -177,14 +177,21 @@ impl Suite {
     fn new(reply: Reply) -> Suite {
         let fake = Fake::serving(reply);
         let app = Suite::app(&fake.url);
-        Suite { fake, app }
+        Suite {
+            fake: Some(fake),
+            app,
+        }
     }
 
     /// Telegram unreachable.
     async fn unreachable() -> Suite {
-        let fake = Fake::serving(None);
         let app = Suite::app(&common::unreachable_origin().await);
-        Suite { fake, app }
+        Suite { fake: None, app }
+    }
+
+    /// The fake Telegram this suite calls.
+    fn fake(&self) -> &Fake {
+        self.fake.as_ref().expect("a suite with a fake Telegram")
     }
 
     fn app(url: &str) -> Router {
@@ -259,7 +266,7 @@ async fn a_swap_posts_the_form_with_basic_authentication() {
     suite
         .swap(swap_body("abc&client_id=1", VERIFIER, redirect))
         .await;
-    let seen = suite.fake.seen();
+    let seen = suite.fake().seen();
     let (path, headers, form) = &seen[0];
     assert_eq!((seen.len(), path.as_str()), (1, "/token"));
     assert_eq!(headers["authorization"], BASIC);
@@ -341,7 +348,7 @@ async fn an_unadmitted_origin_is_refused_without_cors_or_a_call() {
         assert_eq!(answer.status, StatusCode::FORBIDDEN, "{uri}");
         assert!(!answer.headers.contains_key("access-control-allow-origin"));
     }
-    assert!(suite.fake.seen().is_empty());
+    assert!(suite.fake().seen().is_empty());
 }
 
 #[tokio::test]
@@ -373,7 +380,7 @@ async fn a_malformed_request_is_a_400_without_a_call() {
         assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{uri} {body}");
         assert_eq!(answer.headers["access-control-allow-origin"], APP);
     }
-    assert!(suite.fake.seen().is_empty());
+    assert!(suite.fake().seen().is_empty());
 }
 
 #[tokio::test]
@@ -389,7 +396,7 @@ async fn a_request_at_every_bound_is_swapped() {
     assert_eq!(suite.swap(longest).await.status, StatusCode::OK);
     let answer = suite.request("POST", TOKEN, &mixed, valid()).await;
     assert_eq!(answer.status, StatusCode::OK);
-    assert_eq!(suite.fake.seen().len(), 3);
+    assert_eq!(suite.fake().seen().len(), 3);
 }
 
 /// Each failing call: the route, what Telegram does (`None`: unreachable),
@@ -443,7 +450,9 @@ async fn a_failed_call_is_a_502_naming_only_its_kind() {
         let body: serde_json::Value = serde_json::from_slice(&answer.body).unwrap();
         assert_eq!(body, json!({ "message": format!("{what} {kind}") }));
         // A redirect is not followed.
-        assert!(suite.fake.seen().len() <= 1);
+        if let Some(fake) = &suite.fake {
+            assert!(fake.seen().len() <= 1);
+        }
     }
 }
 
@@ -517,7 +526,7 @@ async fn the_log_names_a_failure_and_holds_no_secret() {
     let long = "Q".repeat(65);
     let suite = Suite::new(answering(400, json!({ "error": long }).to_string()));
     suite.swap(valid()).await;
-    suite.fake.serve(answering(302, ""));
+    suite.fake().serve(answering(302, ""));
     suite.swap(valid()).await;
 
     let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
@@ -542,7 +551,7 @@ async fn the_key_list_passes_through_without_credentials() {
     assert_eq!(answer.headers["content-type"], media);
     assert_eq!(answer.headers["content-encoding"], "gzip");
     assert_eq!(answer.headers["access-control-allow-origin"], APP);
-    let seen = suite.fake.seen();
+    let seen = suite.fake().seen();
     assert_eq!((seen.len(), seen[0].0.as_str()), (1, "/jwks"));
     assert!(seen[0].1.get("authorization").is_none());
     assert_eq!(seen[0].1["accept-encoding"], "identity");
@@ -552,7 +561,7 @@ async fn the_key_list_passes_through_without_credentials() {
 async fn the_key_list_is_cached_for_an_hour() {
     let suite = Suite::new(answering(200, r#"{"keys":[]}"#));
     suite.keys().await;
-    suite.fake.serve(answering(200, "{}"));
+    suite.fake().serve(answering(200, "{}"));
     // No I/O runs while the clock is paused: these reads are the cache.
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(3599)).await;
@@ -560,18 +569,18 @@ async fn the_key_list_is_cached_for_an_hour() {
     tokio::time::advance(Duration::from_secs(1)).await;
     tokio::time::resume();
     assert_eq!(&suite.keys().await.body[..], b"{}");
-    assert_eq!(suite.fake.seen().len(), 2);
+    assert_eq!(suite.fake().seen().len(), 2);
 }
 
 #[tokio::test]
 async fn a_read_during_a_fetch_waits_for_it_rather_than_fetching() {
     let suite = Suite::new(answering(200, "[1]"));
-    let release = suite.fake.hold();
+    let release = suite.fake().hold();
     let second = async {
-        while suite.fake.seen().is_empty() {
+        while suite.fake().seen().is_empty() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        suite.fake.serve(answering(200, "[2]"));
+        suite.fake().serve(answering(200, "[2]"));
         suite.keys().await
     };
     let released = async {
@@ -585,14 +594,14 @@ async fn a_read_during_a_fetch_waits_for_it_rather_than_fetching() {
         (&b"[1]"[..], &b"[1]"[..])
     );
     assert_eq!(&suite.keys().await.body[..], b"[1]");
-    assert_eq!(suite.fake.seen().len(), 1);
+    assert_eq!(suite.fake().seen().len(), 1);
 }
 
 #[tokio::test]
 async fn past_the_hour_a_failed_refetch_is_a_502() {
     let suite = Suite::new(answering(200, "{}"));
     suite.keys().await;
-    suite.fake.serve(answering(500, ""));
+    suite.fake().serve(answering(500, ""));
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(3600)).await;
     tokio::time::resume();
@@ -610,7 +619,7 @@ async fn a_200_that_is_not_a_key_list_passes_through_uncached() {
                 (StatusCode::OK, body.as_bytes())
             );
         }
-        assert_eq!(suite.fake.seen().len(), 2, "{media}");
+        assert_eq!(suite.fake().seen().len(), 2, "{media}");
         assert_eq!(suite.count("keys", "upstream-error").await, 2, "{media}");
     }
 }
@@ -720,7 +729,7 @@ async fn config_publishes_only_telegrams_client_id() {
 async fn without_telegram_its_routes_are_absent() {
     let bridge = common::bridge(&[]);
     let suite = Suite {
-        fake: Fake::serving(None),
+        fake: None,
         app: build_router(bridge.state, bridge.telegram),
     };
     for route in ["token", "keys"] {

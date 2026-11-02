@@ -625,6 +625,16 @@ async fn a_read_during_a_fetch_waits_for_it_rather_than_fetching() {
 }
 
 #[tokio::test]
+async fn reads_queued_behind_a_failed_fetch_share_its_502() {
+    let suite = Suite::new(answering(500, ""));
+    let (first, rest) = suite.queued_behind_a_fetch(2, answering(500, "")).await;
+    for answer in std::iter::once(&first).chain(&rest) {
+        assert_eq!(answer.status, StatusCode::BAD_GATEWAY);
+    }
+    assert_eq!(suite.fake().seen().len(), 1);
+}
+
+#[tokio::test]
 async fn past_the_hour_a_failed_refetch_is_a_502() {
     let suite = Suite::new(answering(200, "{}"));
     suite.keys().await;

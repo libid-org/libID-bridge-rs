@@ -21,10 +21,7 @@ use hyper::{
 use hyper_util::rt::TokioExecutor;
 use tokio::{
     sync::Mutex,
-    time::{
-        error::Elapsed,
-        Instant,
-    },
+    time::Instant,
 };
 
 use crate::outbound::{
@@ -52,7 +49,7 @@ const JWKS_URL: &str = "https://oauth.telegram.org/.well-known/jwks.json";
 type Client = hyper_util::client::legacy::Client<Connector, Full<Bytes>>;
 
 /// Why a call to Telegram gave nothing to pass on.
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub(crate) enum CallError {
     /// Telegram could not be reached, or did not finish answering.
     #[error("{0}")]
@@ -67,8 +64,8 @@ pub(crate) enum CallError {
     #[error("the body is over the {0}-byte bound")]
     TooLarge(usize),
     /// No answer within [`TIMEOUT`].
-    #[error("no answer within {limit} s: {0}", limit = TIMEOUT.as_secs())]
-    Timeout(#[from] Elapsed),
+    #[error("no answer within {} s", TIMEOUT.as_secs())]
+    Timeout,
 }
 
 impl CallError {
@@ -79,7 +76,7 @@ impl CallError {
             CallError::Redirect(_) => "redirect",
             CallError::Status(_) => "status",
             CallError::TooLarge(_) => "too-large",
-            CallError::Timeout(_) => "timeout",
+            CallError::Timeout => "timeout",
         }
     }
 
@@ -90,7 +87,7 @@ impl CallError {
             CallError::Redirect(_) => "answered a redirect this bridge does not follow",
             CallError::Status(_) => "answered an error",
             CallError::TooLarge(_) => "answered more than this bridge passes on",
-            CallError::Timeout(_) => "did not answer in time",
+            CallError::Timeout => "did not answer in time",
         }
     }
 }
@@ -104,10 +101,11 @@ pub(crate) struct Reply {
     pub(crate) body: Bytes,
 }
 
-/// A key list held, and when its fetch started.
-struct Cached {
-    at: Instant,
-    reply: Reply,
+/// The last key-list fetch: when it started and ended, and its outcome.
+struct Fetched {
+    started: Instant,
+    ended: Instant,
+    outcome: Result<Reply, CallError>,
 }
 
 /// Telegram's client, checked at startup. `Debug` shows no secret.
@@ -156,7 +154,7 @@ pub struct Telegram {
     /// The client every call is made as.
     client: TelegramClient,
     http: Client,
-    keys: Mutex<Option<Cached>>,
+    keys: Mutex<Option<Fetched>>,
 }
 
 impl Telegram {
@@ -202,7 +200,9 @@ impl Telegram {
                 body: body.to_bytes(),
             })
         };
-        tokio::time::timeout(TIMEOUT, call).await?
+        tokio::time::timeout(TIMEOUT, call)
+            .await
+            .map_err(|_| CallError::Timeout)?
     }
 
     /// Telegram's answer to swapping `code`, sent with the client secret.
@@ -234,28 +234,46 @@ impl Telegram {
     /// The key list: cached while fresh, else fetched, and cached only when a
     /// nonempty JSON `200`; any other `200` passes through. Each fetch's
     /// outcome goes to `fetched`. One fetch runs at a time, holding the cache;
-    /// a caller that waited on it gets what it cached.
+    /// a caller that waited on it gets what it cached, or the failure it ended
+    /// in.
     pub(crate) async fn keys(
         &self,
         fetched: impl FnOnce(&'static str),
     ) -> Result<Reply, CallError> {
+        let arrived = Instant::now();
         let mut keys = self.keys.lock().await;
-        if let Some(fresh) = keys.as_ref().filter(|c| c.at.elapsed() < KEYS_TTL) {
-            return Ok(fresh.reply.clone());
+        match keys.as_ref() {
+            Some(Fetched {
+                started,
+                outcome: Ok(reply),
+                ..
+            }) if started.elapsed() < KEYS_TTL => return Ok(reply.clone()),
+            Some(Fetched {
+                ended,
+                outcome: Err(e),
+                ..
+            }) if arrived < *ended => return Err(e.clone()),
+            _ => {}
         }
         let started = Instant::now();
         let reply = match self.fetch_keys().await {
             Ok(reply) => reply,
             Err(e) => {
                 fetched(e.kind());
+                *keys = Some(Fetched {
+                    started,
+                    ended: Instant::now(),
+                    outcome: Err(e.clone()),
+                });
                 return Err(e);
             }
         };
         if is_json(&reply.headers) && !reply.body.is_empty() {
             fetched("ok");
-            *keys = Some(Cached {
-                at: started,
-                reply: reply.clone(),
+            *keys = Some(Fetched {
+                started,
+                ended: Instant::now(),
+                outcome: Ok(reply.clone()),
             });
         } else {
             fetched("upstream-error");

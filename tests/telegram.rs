@@ -5,11 +5,17 @@
 mod common;
 
 use std::{
+    future::{
+        poll_fn,
+        Future as _,
+    },
+    pin::pin,
     sync::{
         Arc,
         Mutex,
         OnceLock,
     },
+    task::Poll,
     time::Duration,
 };
 
@@ -23,6 +29,7 @@ use axum::{
     Router,
 };
 use bytes::Bytes;
+use futures_util::future::join_all;
 use libid_bridge_rs::{
     config::Settings,
     deployment::{
@@ -37,6 +44,7 @@ use libid_bridge_rs::{
     Bridge,
 };
 use serde_json::json;
+use tokio::sync::oneshot;
 use tower::ServiceExt;
 
 const APP: &str = "https://app.example";
@@ -54,8 +62,8 @@ const GZIPPED: &[u8] =
 /// Status, media type, encoding and body; `None` never answers.
 type Reply = Option<(u16, &'static str, Option<&'static str>, Bytes)>;
 type Seen = Arc<Mutex<Vec<(String, HeaderMap, Bytes)>>>;
-/// Held until its sender sends or drops.
-type Held = Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>;
+/// The next request: told when it arrives, then held until released.
+type Held = Arc<Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>>;
 
 /// Telegram on loopback: every path records the request and answers the reply,
 /// with a `Location` to itself.
@@ -91,11 +99,13 @@ impl Fake {
         *self.reply.lock().unwrap() = reply;
     }
 
-    /// Holds the next answer, the reply as it was when asked, until released.
-    fn hold(&self) -> tokio::sync::oneshot::Sender<()> {
-        let (release, held) = tokio::sync::oneshot::channel();
-        *self.held.lock().unwrap() = Some(held);
-        release
+    /// Holds the next answer, the reply as it was when asked, until released;
+    /// the receiver fires when that request arrives.
+    fn hold(&self) -> (oneshot::Sender<()>, oneshot::Receiver<()>) {
+        let (release, held) = oneshot::channel();
+        let (arrived, arrival) = oneshot::channel();
+        *self.held.lock().unwrap() = Some((arrived, held));
+        (release, arrival)
     }
 
     fn seen(&self) -> Vec<(String, HeaderMap, Bytes)> {
@@ -118,7 +128,8 @@ async fn fake(
         .push((uri.path().to_owned(), headers, body));
     let reply = reply.lock().unwrap().clone();
     let held = held.lock().unwrap().take();
-    if let Some(held) = held {
+    if let Some((arrived, held)) = held {
+        let _ = arrived.send(());
         let _ = held.await;
     }
     let Some((status, media, encoding, body)) = reply else {
@@ -245,6 +256,35 @@ impl Suite {
         match route {
             "token" => self.swap(valid()).await,
             _ => self.keys().await,
+        }
+    }
+
+    /// A key-list read held at Telegram, then `queued` reads started behind
+    /// it with Telegram answering `next`, then the first released: the first
+    /// answer and the queued ones. Panics if a queued read reaches Telegram.
+    async fn queued_behind_a_fetch(
+        &self,
+        queued: usize,
+        next: Reply,
+    ) -> (Answer, Vec<Answer>) {
+        let (release, arrival) = self.fake().hold();
+        let first = Suite {
+            fake: None,
+            app: self.app.clone(),
+        };
+        let first = tokio::spawn(async move { first.keys().await });
+        arrival.await.unwrap();
+        let (_held, refetch) = self.fake().hold();
+        self.fake().serve(next);
+        let mut rest = pin!(join_all((0..queued).map(|_| self.keys())));
+        // One poll takes each read as far as the fetch in flight.
+        let pending = poll_fn(|cx| Poll::Ready(rest.as_mut().poll(cx).is_pending()));
+        assert!(pending.await);
+        release.send(()).unwrap();
+        let first = first.await.unwrap();
+        tokio::select! {
+            rest = rest => (first, rest),
+            _ = refetch => panic!("a queued read fetched the key list again"),
         }
     }
 
@@ -575,22 +615,9 @@ async fn the_key_list_is_cached_for_an_hour() {
 #[tokio::test]
 async fn a_read_during_a_fetch_waits_for_it_rather_than_fetching() {
     let suite = Suite::new(answering(200, "[1]"));
-    let release = suite.fake().hold();
-    let second = async {
-        while suite.fake().seen().is_empty() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        suite.fake().serve(answering(200, "[2]"));
-        suite.keys().await
-    };
-    let released = async {
-        // Time for a second fetch to reach Telegram and answer, were it sent.
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        release.send(()).unwrap();
-    };
-    let (first, second, ()) = tokio::join!(suite.keys(), second, released);
+    let (first, rest) = suite.queued_behind_a_fetch(1, answering(200, "[2]")).await;
     assert_eq!(
-        (&first.body[..], &second.body[..]),
+        (&first.body[..], &rest[0].body[..]),
         (&b"[1]"[..], &b"[1]"[..])
     );
     assert_eq!(&suite.keys().await.body[..], b"[1]");

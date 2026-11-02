@@ -5,10 +5,7 @@
 
 use std::{
     io::Read as _,
-    path::{
-        Path,
-        PathBuf,
-    },
+    path::PathBuf,
     sync::Arc,
 };
 
@@ -81,10 +78,10 @@ impl Deployment {
             set.into()
         };
         let platforms = platforms(settings.platforms.clone())?;
-        // Telegram's is the one entry naming a secret file.
         let telegram = platforms
             .iter()
-            .find_map(|p| Some(telegram_client(p, p.client_secret_file.as_deref()?)))
+            .find(|p| p.id == PlatformId::Telegram)
+            .map(telegram_client)
             .transpose()?;
         Ok(Deployment {
             ccdp_origin,
@@ -267,9 +264,14 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>>
 }
 
 /// Telegram's client: `profile`'s client id, authenticating with the secret
-/// `file` holds, nonempty `[A-Za-z0-9_-]` with one trailing newline aside.
-fn telegram_client(profile: &PlatformProfile, file: &Path) -> Result<TelegramClient> {
+/// its checked `client_secret_file` holds, nonempty `[A-Za-z0-9_-]` with one
+/// trailing newline aside.
+fn telegram_client(profile: &PlatformProfile) -> Result<TelegramClient> {
     let id = profile.id;
+    let file = profile
+        .client_secret_file
+        .as_deref()
+        .expect("a checked Telegram entry names its secret file");
     let path = file.display();
     let refuse = |rule: String| Error::Config {
         detail: format!("platforms: {id}'s client_secret_file {path} {rule}"),

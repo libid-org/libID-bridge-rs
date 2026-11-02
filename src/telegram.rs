@@ -44,6 +44,11 @@ const MAX_KEYS_BYTES: usize = 64 * 1024;
 /// since a new key is unusable on chain until the keeper rotates it in.
 const KEYS_TTL: Duration = Duration::from_secs(3600);
 
+/// Telegram's token endpoint.
+const TOKEN_URL: &str = "https://oauth.telegram.org/token";
+/// Telegram's key list.
+const JWKS_URL: &str = "https://oauth.telegram.org/.well-known/jwks.json";
+
 type Client = hyper_util::client::legacy::Client<Connector, Full<Bytes>>;
 
 /// Why a call to Telegram gave nothing to pass on.
@@ -109,24 +114,19 @@ struct Cached {
 #[derive(Clone, Debug)]
 pub struct TelegramClient {
     /// The public client id.
-    pub client_id: String,
+    client_id: String,
     /// `Basic base64(client_id:secret)`, marked sensitive.
     authorization: HeaderValue,
     /// The token endpoint.
-    pub token_url: Uri,
+    token_url: Uri,
     /// The key list.
-    pub jwks_url: Uri,
+    jwks_url: Uri,
 }
 
 impl TelegramClient {
     /// The client `client_id` authenticating with `secret`; both form-encode
     /// to themselves.
-    pub(crate) fn new(
-        client_id: &str,
-        secret: &str,
-        token_url: Uri,
-        jwks_url: Uri,
-    ) -> TelegramClient {
+    pub(crate) fn new(client_id: &str, secret: &str) -> TelegramClient {
         let basic = base64::engine::general_purpose::STANDARD
             .encode(format!("{client_id}:{secret}"));
         let mut authorization = HeaderValue::from_str(&format!("Basic {basic}"))
@@ -135,8 +135,18 @@ impl TelegramClient {
         TelegramClient {
             client_id: client_id.to_owned(),
             authorization,
-            token_url,
-            jwks_url,
+            token_url: Uri::from_static(TOKEN_URL),
+            jwks_url: Uri::from_static(JWKS_URL),
+        }
+    }
+
+    /// This client calling `origin`'s `/token` and `/jwks` instead.
+    #[cfg(feature = "test-helpers")]
+    pub(crate) fn at(self, origin: &str) -> TelegramClient {
+        TelegramClient {
+            token_url: format!("{origin}/token").parse().expect("a test origin"),
+            jwks_url: format!("{origin}/jwks").parse().expect("a test origin"),
+            ..self
         }
     }
 }
@@ -217,7 +227,7 @@ impl Telegram {
             .header(header::USER_AGENT, USER_AGENT)
             .header(header::AUTHORIZATION, client.authorization.clone())
             .body(Full::from(form))
-            .expect("a URI checked at startup");
+            .expect("a URI and constant headers");
         self.call(request, MAX_TOKEN_BYTES).await
     }
 
@@ -265,7 +275,7 @@ impl Telegram {
             .header(header::ACCEPT_ENCODING, "identity")
             .header(header::USER_AGENT, USER_AGENT)
             .body(Full::default())
-            .expect("a URI checked at startup");
+            .expect("a URI and constant headers");
         let reply = self.call(request, MAX_KEYS_BYTES).await?;
         match reply.status {
             StatusCode::OK => Ok(reply),

@@ -10,7 +10,6 @@ use std::{
 };
 
 use bytes::Bytes;
-use hyper::Uri;
 use serde::Deserialize;
 use serde_json::{
     json,
@@ -25,7 +24,6 @@ use crate::{
         Result,
     },
     origin::{
-        is_plaintext_loopback,
         Admitted,
         Origin,
     },
@@ -259,14 +257,10 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>>
 pub struct TelegramSettings {
     /// Nonempty `[A-Za-z0-9_-]`, one trailing newline aside.
     pub client_secret_file: PathBuf,
-    /// HTTPS, or HTTP on loopback; Telegram's when unset.
-    pub token_url: Option<String>,
-    /// As `token_url`.
-    pub jwks_url: Option<String>,
 }
 
 impl TelegramSettings {
-    /// Telegram's client `client_id`, its secret read and its URLs checked.
+    /// Telegram's client `client_id`, its secret read.
     fn checked(&self, client_id: &str) -> Result<TelegramClient> {
         let refuse = |detail: String| Error::Config {
             detail: format!("telegram: {detail}"),
@@ -291,36 +285,7 @@ impl TelegramSettings {
             let rule = "must hold nonempty [A-Za-z0-9_-]";
             return Err(refuse(format!("client_secret_file {path} {rule}")));
         }
-        let endpoint = |key: &str, value: Option<&str>, default: &str| {
-            let value = value.unwrap_or(default);
-            let url = url::Url::parse(value).ok().filter(|u| {
-                (u.scheme() == "https" || is_plaintext_loopback(u))
-                    && u.username().is_empty()
-                    && u.password().is_none()
-            });
-            // The value is not quoted: it may carry a credential.
-            url.and_then(|u| u.as_str().parse::<Uri>().ok())
-                .ok_or_else(|| {
-                    refuse(format!(
-                        "{key} is not https or http on localhost or 127.0.0.1 \
-                         without userinfo"
-                    ))
-                })
-        };
-        Ok(TelegramClient::new(
-            client_id,
-            secret,
-            endpoint(
-                "token_url",
-                self.token_url.as_deref(),
-                "https://oauth.telegram.org/token",
-            )?,
-            endpoint(
-                "jwks_url",
-                self.jwks_url.as_deref(),
-                "https://oauth.telegram.org/.well-known/jwks.json",
-            )?,
-        ))
+        Ok(TelegramClient::new(client_id, secret))
     }
 }
 

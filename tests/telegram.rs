@@ -106,25 +106,20 @@ fn answering(status: u16, body: impl Into<Bytes>) -> Reply {
     Some((status, JSON, None, body.into()))
 }
 
-/// A deployment enabling Telegram at `url`, its secret in `secret`.
-fn settings(
-    url: &str,
-    secret: &common::ScratchFile,
-) -> libid_bridge_rs::config::Settings {
+/// A deployment enabling Telegram, its secret in `secret`.
+fn settings(secret: &common::ScratchFile) -> libid_bridge_rs::config::Settings {
     let platforms = r#"[{"id":"telegram","client_id":"8123456789"}]"#;
     let mut settings = common::config(&["--platforms", platforms]);
     settings.telegram = Some(TelegramSettings {
         client_secret_file: secret.path().to_owned(),
-        token_url: Some(format!("{url}/token")),
-        jwks_url: Some(format!("{url}/jwks")),
     });
     settings
 }
 
 fn app(url: &str) -> Router {
     let secret = common::ScratchFile::holding(&format!("{SECRET}\n"));
-    let bridge = libid_bridge_rs::Bridge::start(&settings(url, &secret)).unwrap();
-    build_router(bridge.state)
+    let bridge = libid_bridge_rs::Bridge::start_with_telegram_at(&settings(&secret), url);
+    build_router(bridge.unwrap().state)
 }
 
 async fn send(
@@ -432,7 +427,7 @@ fn startup_refuses_an_unusable_telegram_table_naming_the_setting() {
     let spaced = common::ScratchFile::holding("two words\n");
     let plus = common::ScratchFile::holding("a+b\n");
     let long = common::ScratchFile::holding(&"a".repeat(1025));
-    let good = settings("https://oauth.example", &secret);
+    let good = settings(&secret);
     let table = |f: &dyn Fn(&mut TelegramSettings)| {
         let mut settings = good.clone();
         settings.telegram.as_mut().map(f);
@@ -446,7 +441,6 @@ fn startup_refuses_an_unusable_telegram_table_naming_the_setting() {
     lettered_untabled.platforms[0].client_id = "8123x".into();
     let mut platformless = common::config(&[]);
     platformless.telegram = good.telegram.clone();
-    let http = |key: &str| Some(format!("http://oauth.example/{key}"));
     let cases = [
         (
             table(&|t| t.client_secret_file = "/nonexistent".into()),
@@ -455,12 +449,6 @@ fn startup_refuses_an_unusable_telegram_table_naming_the_setting() {
         (
             table(&|t| t.client_secret_file = empty.path().into()),
             "client_secret_file",
-        ),
-        (table(&|t| t.token_url = http("token")), "token_url"),
-        (table(&|t| t.jwks_url = http("jwks")), "jwks_url"),
-        (
-            table(&|t| t.token_url = Some("https://u:hunter2@oauth.example/".into())),
-            "token_url",
         ),
         (
             table(&|t| t.client_secret_file = long.path().into()),
@@ -483,12 +471,12 @@ fn startup_refuses_an_unusable_telegram_table_naming_the_setting() {
         let checked = libid_bridge_rs::deployment::Deployment::checked(&settings);
         let error = checked.err().map(|e| e.to_string()).unwrap_or_default();
         assert!(
-            error.contains(key) && !error.contains(SECRET) && !error.contains("hunter2"),
+            error.contains(key) && !error.contains(SECRET),
             "{key}: {error}"
         );
     }
 
-    // Read from a file, as the binary reads one, naming no endpoint.
+    // Read from a file, as the binary reads one.
     let file = common::ScratchFile::holding(&format!(
         "allowed_app_origins = [{APP:?}]\nccdp_origin = {:?}\n\
          [[platforms]]\nid = \"telegram\"\nclient_id = \"8123456789\"\n\
@@ -499,11 +487,6 @@ fn startup_refuses_an_unusable_telegram_table_naming_the_setting() {
     let defaults = libid_bridge_rs::config::Settings::read(file.path()).unwrap();
     let deployment = libid_bridge_rs::deployment::Deployment::checked(&defaults);
     let client = deployment.unwrap().telegram.unwrap();
-    assert_eq!(client.token_url, "https://oauth.telegram.org/token");
-    assert_eq!(
-        client.jwks_url,
-        "https://oauth.telegram.org/.well-known/jwks.json"
-    );
     let debug = format!("{client:?}");
     assert!(
         !debug.contains(SECRET) && !debug.contains(&BASIC[6..]),

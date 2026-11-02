@@ -84,8 +84,7 @@ client_credential = "0123456789abcdef0123456789abcdef01234567"
 # published like any other; the secret is not, and is never written in this
 # file: client_secret_file names a file holding it (one trailing newline is
 # ignored; a relative path resolves against the process working directory),
-# read once at startup. token_url and jwks_url default to
-# Telegram's endpoints. A [telegram] table is required exactly when a telegram
+# read once at startup. A [telegram] table is required exactly when a telegram
 # platform is enabled.
 #
 # [[platforms]]
@@ -94,5 +93,3 @@ client_credential = "0123456789abcdef0123456789abcdef01234567"
 #
 # [telegram]
 # client_secret_file = "/run/secrets/telegram-client-secret"
-# token_url = "https://oauth.telegram.org/token"
-# jwks_url = "https://oauth.telegram.org/.well-known/jwks.json"

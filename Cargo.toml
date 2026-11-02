@@ -51,7 +51,12 @@ url = "2"
 base64 = "0.22"
 strum = { version = "0.28", features = ["derive"] }
 
+[features]
+# Lets the test suite point Telegram's client at a fake.
+test-helpers = []
+
 [dev-dependencies]
+libid-bridge-rs = { path = ".", features = ["test-helpers"] }
 tower = { version = "0.5", features = ["util"] }
 # The fixture Distribution hashes the code it serves, the way a Distribution's
 # build does, and answers one body in chunks.

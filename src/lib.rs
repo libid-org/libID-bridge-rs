@@ -54,7 +54,23 @@ impl Bridge {
     /// refresher, so a Distribution that is unreachable delays the callback
     /// document and stops nothing.
     pub fn start(settings: &config::Settings) -> Result<Bridge> {
-        let deployment = deployment::Deployment::checked(settings)?;
+        Bridge::started(deployment::Deployment::checked(settings)?)
+    }
+
+    /// As [`Bridge::start`], Telegram's client calling `origin`'s `/token`
+    /// and `/jwks`.
+    #[cfg(feature = "test-helpers")]
+    pub fn start_with_telegram_at(
+        settings: &config::Settings,
+        origin: &str,
+    ) -> Result<Bridge> {
+        let mut deployment = deployment::Deployment::checked(settings)?;
+        deployment.telegram = deployment.telegram.map(|client| client.at(origin));
+        Bridge::started(deployment)
+    }
+
+    /// What the routes read for `deployment`, and its refresher.
+    fn started(deployment: deployment::Deployment) -> Result<Bridge> {
         let upstream = artifact::upstream::Upstream::new(&deployment.ccdp_origin)?;
         let (sender, callback) = tokio::sync::watch::channel(None);
         let (failed, failure) = tokio::sync::watch::channel(None);

@@ -323,6 +323,6 @@ fn label_fault(label: &str, last: bool) -> Option<&'static str> {
 
 /// Whether `url` is plaintext `http` on exactly `localhost` or `127.0.0.1`:
 /// the one case a canonical origin is not HTTPS.
-pub(crate) fn is_plaintext_loopback(url: &Url) -> bool {
+fn is_plaintext_loopback(url: &Url) -> bool {
     url.scheme() == "http" && matches!(url.host_str(), Some("localhost" | "127.0.0.1"))
 }

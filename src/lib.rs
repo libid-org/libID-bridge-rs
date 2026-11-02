@@ -81,7 +81,10 @@ impl Bridge {
             ceremony_config: deployment.ceremony_config(),
             failure,
             metrics: metrics.clone(),
-            telegram: deployment.telegram.clone().map(telegram::Telegram::new),
+            telegram: deployment
+                .telegram
+                .clone()
+                .map(|client| Arc::new(telegram::Telegram::new(client))),
         });
         let refresher = artifact::upstream::Refresher::new(
             upstream,

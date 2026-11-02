@@ -88,6 +88,7 @@ mod deployment {
                 id: PlatformId::Github,
                 client_id: "Iv1.0".into(),
                 client_credential: Some("c0ffee".into()),
+                client_secret_file: None,
             }]
         );
     }
@@ -629,12 +630,13 @@ mod config {
                 id: PlatformId::Github,
                 client_id: "Iv1.0123456789abcdef".into(),
                 client_credential: Some("c0ffee_from_the_file".into()),
+                client_secret_file: None,
             }]
         );
     }
 
-    /// A platform table carries `id`, `client_id` and `client_credential`
-    /// and nothing else. A version list, the redirect URI an application
+    /// A platform table carries `id`, `client_id`, `client_credential` and
+    /// `client_secret_file`, and nothing else. A version list, the redirect URI an application
     /// derives, GitHub's own name for the credential: each is refused at
     /// startup by name.
     #[test]
@@ -702,6 +704,7 @@ mod config {
                 id: PlatformId::X,
                 client_id: "WHRlc3RjbGllbnQ6MTpjaQ".into(),
                 client_credential: None,
+                client_secret_file: None,
             }]
         );
     }

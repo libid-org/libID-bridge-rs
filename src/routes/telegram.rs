@@ -21,6 +21,7 @@ use crate::{
         is_json,
         CallError,
         Reply,
+        Telegram,
     },
 };
 use axum::{
@@ -37,6 +38,13 @@ use axum::{
     },
     response::Response,
 };
+
+/// What Telegram's routes read: the deployment's state, and Telegram.
+#[derive(Clone)]
+pub struct TelegramState {
+    pub(super) app: Arc<AppState>,
+    pub(super) telegram: Arc<Telegram>,
+}
 
 /// The largest swap request body read, in bytes.
 const MAX_SWAP_BYTES: usize = 2048;
@@ -173,43 +181,46 @@ fn swap_outcome(reply: &Reply) -> &'static str {
 
 /// `OPTIONS` on the swap: granting `POST` with `Content-Type`.
 pub async fn preflight(
-    State(state): State<Arc<AppState>>,
+    State(state): State<TelegramState>,
     headers: HeaderMap,
 ) -> Response {
-    grant(&state, &headers, "POST, OPTIONS", Some("content-type"))
+    grant(&state.app, &headers, "POST, OPTIONS", Some("content-type"))
 }
 
 /// `OPTIONS` on the key list: granting `GET`.
 pub async fn keys_preflight(
-    State(state): State<Arc<AppState>>,
+    State(state): State<TelegramState>,
     headers: HeaderMap,
 ) -> Response {
-    grant(&state, &headers, "GET", None)
+    grant(&state.app, &headers, "GET", None)
 }
 
 /// `POST /api/v1/ceremony/telegram/token`.
 pub async fn token(
-    State(state): State<Arc<AppState>>,
+    State(state): State<TelegramState>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    let telegram = state.telegram.as_ref().expect("routed only with Telegram");
-    let Some(origin) = admission(&state, &headers).map(Admission::allow_origin) else {
+    let Some(origin) = admission(&state.app, &headers).map(Admission::allow_origin)
+    else {
         return refuse(StatusCode::FORBIDDEN, UNADMITTED, None);
     };
     let swap = match read_swap(query, &headers, body).await {
         Ok(swap) => swap,
         Err(message) => return refuse(StatusCode::BAD_REQUEST, &message, origin),
     };
-    let swapped = telegram.swap(&swap.code, &swap.redirect_uri, &swap.code_verifier);
+    let swapped =
+        state
+            .telegram
+            .swap(&swap.code, &swap.redirect_uri, &swap.code_verifier);
     match swapped.await {
         Ok(reply) => {
-            state.metrics.telegram("token", swap_outcome(&reply));
+            state.app.metrics.telegram("token", swap_outcome(&reply));
             answer(reply, origin)
         }
         Err(e) => {
-            state.metrics.telegram("token", e.kind());
+            state.app.metrics.telegram("token", e.kind());
             bad_gateway("Telegram's token endpoint", e, origin)
         }
     }
@@ -217,20 +228,20 @@ pub async fn token(
 
 /// `GET /api/v1/ceremony/telegram/jwks`.
 pub async fn keys(
-    State(state): State<Arc<AppState>>,
+    State(state): State<TelegramState>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    let telegram = state.telegram.as_ref().expect("routed only with Telegram");
-    let Some(origin) = admission(&state, &headers).map(Admission::allow_origin) else {
+    let Some(origin) = admission(&state.app, &headers).map(Admission::allow_origin)
+    else {
         return refuse(StatusCode::FORBIDDEN, UNADMITTED, None);
     };
     if let Some(message) = super::malformed(query, &body) {
         return refuse(StatusCode::BAD_REQUEST, message, origin);
     }
-    let fetched = |outcome| state.metrics.telegram("keys", outcome);
-    match telegram.keys(fetched).await {
+    let fetched = |outcome| state.app.metrics.telegram("keys", outcome);
+    match state.telegram.keys(fetched).await {
         Ok(reply) => answer(reply, origin),
         Err(e) => bad_gateway("Telegram's key list", e, origin),
     }

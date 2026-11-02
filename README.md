@@ -226,8 +226,9 @@ client_credential = "…"
 An unknown key is refused at startup, `host` and `port` among them: where the
 process listens is set with `HOST`/`PORT` or `--host`/`--port`. The platforms
 are set only in the file, one `[[platforms]]` table per enabled platform: its
-`id` (`github`, `google`, `telegram` or `x`), its public `client_id` and, for `github`,
-the App's client secret as `client_credential`, which the bridge publishes.
+`id` (`github`, `google`, `telegram` or `x`), its public `client_id`, for `github`
+the App's client secret as `client_credential`, which the bridge publishes,
+and for `telegram` the `client_secret_file` holding its private client secret.
 That is the platform's one OAuth registration, and every version of its
 ceremony the Distribution bundles runs it; the versions themselves are not
 written here. There is no notary setting and no environment variable for the
@@ -239,8 +240,7 @@ credential.
 | — | `PORT`, `--port` | `8722` | Bind port. Not a file key, for the same reason. |
 | `allowed_app_origins` | — | *(required)* | The application allowlist. A member is an exact origin, an origin pattern or `*`, as described below. A repeated spelling is refused; a pattern and an origin it covers are two members. The **effective** admission set is this list plus the resolved `CCDP_ORIGIN`, added exactly once and by its literal spelling. It is the one admission rule: the configuration route admits exactly one `Origin` that a member admits, and echoes that origin itself; the callback document is told the same set. A same-origin read carries no `Origin` and is admitted on `Sec-Fetch-Site: same-origin` alone. |
 | `ccdp_origin` | — | `https://lib.id` | The CCDP Distribution this bridge selects: one origin serving `/ccdp/callback.html`, `/ccdp/versions.json` and everything the browser runs after the callback, HTTPS, or HTTP on `localhost` or `127.0.0.1`. Written already canonical, as an exact origin is: any other spelling is refused, naming the canonical one. Published in the configuration and inserted into the callback document. Omitting it selects the canonical libID Distribution. |
-| `platforms` | — | *(required)* | The enabled platforms, as `[[platforms]]` tables: `id`, `client_id` and, for `github`, its `client_credential`. |
-| `telegram` | — | *(none)* | Required exactly when `telegram` is enabled: `client_secret_file` (a file holding the private client secret, `[A-Za-z0-9_-]` with one trailing newline ignored, at most 1024 bytes, relative to the working directory; the platform's `client_id` must be digits). There is no redirect URI setting: the browser sends it with each swap. |
+| `platforms` | — | *(required)* | The enabled platforms, as `[[platforms]]` tables: `id`, `client_id`, for `github` its `client_credential`, and for `telegram` its `client_secret_file` (a file holding the private client secret, `[A-Za-z0-9_-]` with one trailing newline ignored, at most 1024 bytes, relative to the working directory; Telegram's `client_id` must be digits). There is no redirect URI setting: the browser sends it with each swap. |
 | — | `LIBID_CONFIG`, `--config` | *(none)* | Path to the configuration file. |
 
 ### Allowlist members

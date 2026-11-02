@@ -84,12 +84,10 @@ client_credential = "0123456789abcdef0123456789abcdef01234567"
 # published like any other; the secret is not, and is never written in this
 # file: client_secret_file names a file holding it (one trailing newline is
 # ignored; a relative path resolves against the process working directory),
-# read once at startup. A [telegram] table is required exactly when a telegram
-# platform is enabled.
+# read once at startup. The telegram table requires it, and any other table
+# naming one is refused.
 #
 # [[platforms]]
 # id = "telegram"
 # client_id = "8123456789"
-#
-# [telegram]
 # client_secret_file = "/run/secrets/telegram-client-secret"

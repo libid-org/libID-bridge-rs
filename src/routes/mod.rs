@@ -265,10 +265,10 @@ async fn unrouted() -> Response {
 /// `route`, answering every method it does not name with a `405` whose
 /// `Allow` is `allow`. axum's `get` answers `HEAD` by running the `GET`
 /// handler, so `HEAD` is refused explicitly.
-fn refusing_other_methods(
-    route: MethodRouter<Arc<AppState>>,
+fn refusing_other_methods<S: Clone + Send + Sync + 'static>(
+    route: MethodRouter<S>,
     allow: &'static str,
-) -> MethodRouter<Arc<AppState>> {
+) -> MethodRouter<S> {
     let refuse = move || async move {
         (StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, allow)]).into_response()
     };
@@ -305,22 +305,28 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             CALLBACK_PATH,
             refusing_other_methods(get(callback::callback), "GET"),
         );
-    let router = match state.telegram {
-        Some(_) => router
-            .route(
-                TELEGRAM_TOKEN_PATH,
-                refusing_other_methods(
-                    post(telegram::token).options(telegram::preflight),
-                    "POST, OPTIONS",
-                ),
-            )
-            .route(
-                TELEGRAM_JWKS_PATH,
-                refusing_other_methods(
-                    get(telegram::keys).options(telegram::keys_preflight),
-                    "GET, OPTIONS",
-                ),
-            ),
+    let router = match state.telegram.clone() {
+        Some(telegram) => router.merge(
+            Router::new()
+                .route(
+                    TELEGRAM_TOKEN_PATH,
+                    refusing_other_methods(
+                        post(telegram::token).options(telegram::preflight),
+                        "POST, OPTIONS",
+                    ),
+                )
+                .route(
+                    TELEGRAM_JWKS_PATH,
+                    refusing_other_methods(
+                        get(telegram::keys).options(telegram::keys_preflight),
+                        "GET, OPTIONS",
+                    ),
+                )
+                .with_state(telegram::TelegramState {
+                    app: state.clone(),
+                    telegram,
+                }),
+        ),
         None => router,
     };
     router

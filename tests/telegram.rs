@@ -20,7 +20,7 @@ use axum::{
 };
 use bytes::Bytes;
 use libid_bridge_rs::{
-    deployment::TelegramSettings,
+    deployment::PlatformProfile,
     routes::{
         build_router,
         TELEGRAM_JWKS_PATH as JWKS,
@@ -108,12 +108,12 @@ fn answering(status: u16, body: impl Into<Bytes>) -> Reply {
 
 /// A deployment enabling Telegram, its secret in `secret`.
 fn settings(secret: &common::ScratchFile) -> libid_bridge_rs::config::Settings {
-    let platforms = r#"[{"id":"telegram","client_id":"8123456789"}]"#;
-    let mut settings = common::config(&["--platforms", platforms]);
-    settings.telegram = Some(TelegramSettings {
-        client_secret_file: secret.path().to_owned(),
-    });
-    settings
+    let platforms = json!([{
+        "id": "telegram",
+        "client_id": "8123456789",
+        "client_secret_file": secret.path(),
+    }]);
+    common::config(&["--platforms", &platforms.to_string()])
 }
 
 fn app(url: &str) -> Router {
@@ -428,44 +428,44 @@ fn startup_refuses_an_unusable_telegram_table_naming_the_setting() {
     let plus = common::ScratchFile::holding("a+b\n");
     let long = common::ScratchFile::holding(&"a".repeat(1025));
     let good = settings(&secret);
-    let table = |f: &dyn Fn(&mut TelegramSettings)| {
+    let table = |f: &dyn Fn(&mut PlatformProfile)| {
         let mut settings = good.clone();
-        settings.telegram.as_mut().map(f);
+        f(&mut settings.platforms[0]);
         settings
     };
     let mut lettered = good.clone();
     lettered.platforms[0].client_id = "8123x".into();
     let mut untabled = good.clone();
-    untabled.telegram = None;
+    untabled.platforms[0].client_secret_file = None;
     let mut lettered_untabled = untabled.clone();
     lettered_untabled.platforms[0].client_id = "8123x".into();
     let mut platformless = common::config(&[]);
-    platformless.telegram = good.telegram.clone();
+    platformless.platforms[0].client_secret_file = Some(secret.path().into());
     let cases = [
         (
-            table(&|t| t.client_secret_file = "/nonexistent".into()),
+            table(&|t| t.client_secret_file = Some("/nonexistent".into())),
             "client_secret_file",
         ),
         (
-            table(&|t| t.client_secret_file = empty.path().into()),
+            table(&|t| t.client_secret_file = Some(empty.path().into())),
             "client_secret_file",
         ),
         (
-            table(&|t| t.client_secret_file = long.path().into()),
+            table(&|t| t.client_secret_file = Some(long.path().into())),
             "longer than 1024",
         ),
         (
-            table(&|t| t.client_secret_file = spaced.path().into()),
+            table(&|t| t.client_secret_file = Some(spaced.path().into())),
             "client_secret_file",
         ),
         (
-            table(&|t| t.client_secret_file = plus.path().into()),
+            table(&|t| t.client_secret_file = Some(plus.path().into())),
             "client_secret_file",
         ),
         (lettered, "client_id"),
         (lettered_untabled, "client_id"),
-        (untabled, "add a [telegram] table"),
-        (platformless, "enable telegram in [[platforms]]"),
+        (untabled, "telegram carries no client_secret_file"),
+        (platformless, "github carries a client_secret_file"),
     ];
     for (settings, key) in cases {
         let checked = libid_bridge_rs::deployment::Deployment::checked(&settings);
@@ -480,7 +480,7 @@ fn startup_refuses_an_unusable_telegram_table_naming_the_setting() {
     let file = common::ScratchFile::holding(&format!(
         "allowed_app_origins = [{APP:?}]\nccdp_origin = {:?}\n\
          [[platforms]]\nid = \"telegram\"\nclient_id = \"8123456789\"\n\
-         [telegram]\nclient_secret_file = {:?}\n",
+         client_secret_file = {:?}\n",
         common::Distribution::shared().origin(),
         secret.path(),
     ));

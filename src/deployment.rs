@@ -114,20 +114,19 @@ impl PlatformId {
         matches!(self, PlatformId::Github)
     }
 
-    /// Whether this platform's client id is the audience its proof binds. The
-    /// circuit reads the audience between quotes, so it carries no `"`, and
-    /// holds it to [`MAX_GOOGLE_CLIENT_ID_BYTES`]. Google's is.
-    pub fn binds_client_id_as_audience(self) -> bool {
-        matches!(self, PlatformId::Google)
+    /// The longest audience this platform's proof binds, in bytes, where its
+    /// client id is that audience. The circuit reads the audience between
+    /// quotes, so such a client id also carries no `"`.
+    pub fn audience_bytes(self) -> Option<usize> {
+        match self {
+            PlatformId::Google => Some(MAX_GOOGLE_CLIENT_ID_BYTES),
+            PlatformId::X | PlatformId::Github => None,
+        }
     }
 
     /// The longest `client_id` this platform's entry carries, in bytes.
     pub fn max_client_id_bytes(self) -> usize {
-        if self.binds_client_id_as_audience() {
-            MAX_GOOGLE_CLIENT_ID_BYTES
-        } else {
-            MAX_CLIENT_ID_BYTES
-        }
+        self.audience_bytes().unwrap_or(MAX_CLIENT_ID_BYTES)
     }
 }
 
@@ -188,7 +187,7 @@ impl PlatformProfile {
                 "{id}'s client_id is longer than {max_client_id} bytes"
             )));
         }
-        if id.binds_client_id_as_audience() && self.client_id.contains('"') {
+        if id.audience_bytes().is_some() && self.client_id.contains('"') {
             return Err(refuse(format!(
                 "{id}'s client_id carries a quote, which its proof's audience cannot"
             )));

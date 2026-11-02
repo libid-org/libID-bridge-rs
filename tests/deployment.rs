@@ -205,6 +205,25 @@ mod deployment {
         }
     }
 
+    /// A Google client id as long as the Google circuit's audience is accepted,
+    /// and a byte longer is refused, naming the key.
+    #[test]
+    fn a_google_client_id_is_bounded_by_the_proof_audience() {
+        let google = |len: usize| {
+            json!([{ "id": "google", "client_id": "a".repeat(len) }]).to_string()
+        };
+        let accepted = checked(&google(MAX_GOOGLE_CLIENT_ID_BYTES)).unwrap();
+        assert_eq!(accepted[0].client_id.len(), MAX_GOOGLE_CLIENT_ID_BYTES);
+
+        let text = checked(&google(MAX_GOOGLE_CLIENT_ID_BYTES + 1))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            text.contains("client_id") && text.contains("longer than 128 bytes"),
+            "{text}"
+        );
+    }
+
     /// A refusal names the key as the file spells it, never the value.
     #[test]
     fn a_refused_key_is_named_and_not_quoted() {

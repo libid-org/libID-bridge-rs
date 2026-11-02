@@ -37,8 +37,8 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_TOKEN_BYTES: usize = 8 * 1024;
 /// The largest key list passed on, in bytes.
 const MAX_KEYS_BYTES: usize = 64 * 1024;
-/// How long a fetched key list is served from cache: the keeper's cadence,
-/// since a new key is unusable on chain until the keeper rotates it in.
+/// How long a fetched key list is served from cache: REQ-PLAT-69 lists a
+/// published key within one hour.
 const KEYS_TTL: Duration = Duration::from_secs(3600);
 
 /// Telegram's token endpoint.

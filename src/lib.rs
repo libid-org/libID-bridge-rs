@@ -36,11 +36,13 @@ use std::sync::Arc;
 use error::Result;
 use state::AppState;
 
-/// A deployment that has started: the state its routes read, and the
-/// refresher that keeps the callback document current.
+/// A deployment that has started: the state its routes read, Telegram where
+/// it is enabled, and the refresher that keeps the callback document current.
 pub struct Bridge {
     /// What the routes read.
     pub state: Arc<AppState>,
+    /// Telegram's code swap and key list, exactly where Telegram is enabled.
+    pub telegram: Option<Arc<telegram::Telegram>>,
     /// What keeps the callback document current.
     pub refresher: artifact::upstream::Refresher,
 }
@@ -82,11 +84,10 @@ impl Bridge {
             ceremony_config: deployment.ceremony_config(),
             failure,
             metrics: metrics.clone(),
-            telegram: deployment
-                .telegram
-                .clone()
-                .map(|client| Arc::new(telegram::Telegram::new(client))),
         });
+        let telegram = deployment
+            .telegram
+            .map(|client| Arc::new(telegram::Telegram::new(client)));
         let refresher = artifact::upstream::Refresher::new(
             upstream,
             deployment.allowed_origins,
@@ -94,7 +95,11 @@ impl Bridge {
             failed,
             metrics,
         );
-        Ok(Bridge { state, refresher })
+        Ok(Bridge {
+            state,
+            telegram,
+            refresher,
+        })
     }
 }
 
@@ -106,7 +111,7 @@ pub async fn serve(
     listener: tokio::net::TcpListener,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    let app = routes::build_router(bridge.state);
+    let app = routes::build_router(bridge.state, bridge.telegram);
     let refreshing =
         tokio::spawn(bridge.refresher.run(artifact::upstream::Schedule::DEPLOYED));
     let served = axum::serve(listener, app)

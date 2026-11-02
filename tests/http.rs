@@ -49,7 +49,7 @@ async fn test_state() -> Arc<AppState> {
 }
 
 fn app(state: Arc<AppState>) -> axum::Router {
-    routes::build_router(state)
+    routes::build_router(state, None)
 }
 
 #[tokio::test]

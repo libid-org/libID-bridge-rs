@@ -191,7 +191,7 @@ impl Suite {
         let secret = common::ScratchFile::holding(&format!("{SECRET}\n"));
         let bridge =
             Bridge::start_for_tests_with_telegram_at(&settings(&secret), url).unwrap();
-        build_router(bridge.state)
+        build_router(bridge.state, bridge.telegram)
     }
 
     async fn request(
@@ -718,9 +718,10 @@ async fn config_publishes_only_telegrams_client_id() {
 
 #[tokio::test]
 async fn without_telegram_its_routes_are_absent() {
+    let bridge = common::bridge(&[]);
     let suite = Suite {
         fake: Fake::serving(None),
-        app: build_router(common::bridge(&[]).state),
+        app: build_router(bridge.state, bridge.telegram),
     };
     for route in ["token", "keys"] {
         assert_eq!(

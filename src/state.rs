@@ -32,7 +32,4 @@ pub struct AppState {
     pub failure: watch::Receiver<Option<String>>,
     /// What this deployment counts.
     pub metrics: Arc<crate::metrics::Metrics>,
-    /// Telegram's code swap and key list, exactly where Telegram is enabled:
-    /// what its routes are built with.
-    pub telegram: Option<Arc<crate::telegram::Telegram>>,
 }

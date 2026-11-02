@@ -289,8 +289,11 @@ pub const TELEGRAM_TOKEN_PATH: &str = "/api/v1/ceremony/telegram/token";
 pub const TELEGRAM_JWKS_PATH: &str = "/api/v1/ceremony/telegram/jwks";
 
 /// The route table: the same for every deployment, Telegram's routes only
-/// where Telegram is enabled.
-pub fn build_router(state: Arc<AppState>) -> Router {
+/// where `telegram` is given.
+pub fn build_router(
+    state: Arc<AppState>,
+    telegram: Option<Arc<crate::telegram::Telegram>>,
+) -> Router {
     let router = Router::new()
         .route(HEALTH_PATH, get(health))
         .route(METRICS_PATH, get(metrics))
@@ -305,8 +308,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             CALLBACK_PATH,
             refusing_other_methods(get(callback::callback), "GET"),
         );
-    let router = match state.telegram.clone() {
-        Some(telegram) => router.merge(
+    let router = match telegram {
+        Some(upstream) => router.merge(
             Router::new()
                 .route(
                     TELEGRAM_TOKEN_PATH,
@@ -324,7 +327,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 )
                 .with_state(telegram::TelegramState {
                     app: state.clone(),
-                    telegram,
+                    telegram: upstream,
                 }),
         ),
         None => router,

@@ -81,7 +81,7 @@ impl Deployment {
         let telegram = platforms
             .iter()
             .find(|p| p.id == PlatformId::Telegram)
-            .map(telegram_client)
+            .map(TelegramClient::try_from)
             .transpose()?;
         Ok(Deployment {
             ccdp_origin,
@@ -172,9 +172,9 @@ impl PlatformProfile {
     /// This table checked: a client id of nonempty printable ASCII without
     /// whitespace within [`MAX_CLIENT_ID_BYTES`], and a credential of the same
     /// within [`MAX_CLIENT_CREDENTIAL_BYTES`] exactly where the platform's
-    /// ceremony sends one; Telegram's client id is digits, and a secret file
-    /// is named exactly where the bridge swaps the code. A refusal names the
-    /// key as the file spells it, never the value.
+    /// ceremony sends one; Telegram's client id is digits, and no secret file
+    /// is named where the bridge swaps no code. A refusal names the key as the
+    /// file spells it, never the value.
     pub fn checked(self) -> Result<PlatformProfile> {
         let id = self.id;
         let refuse = |detail: String| Error::Config {
@@ -200,20 +200,10 @@ impl PlatformProfile {
         {
             return Err(refuse(format!("{id}'s client_id must be digits")));
         }
-        match (id.swaps_with_a_secret(), self.client_secret_file.is_some()) {
-            (false, true) => {
-                return Err(refuse(format!(
-                    "{id} carries a client_secret_file, and the bridge swaps no code \
-                     for it"
-                )))
-            }
-            (true, false) => {
-                return Err(refuse(format!(
-                    "{id} carries no client_secret_file, and the bridge swaps its code \
-                     with one"
-                )))
-            }
-            _ => {}
+        if !id.swaps_with_a_secret() && self.client_secret_file.is_some() {
+            return Err(refuse(format!(
+                "{id} carries a client_secret_file, and the bridge swaps no code for it"
+            )));
         }
         // A credential belongs to exactly the ceremonies that send one.
         match (id.sends_a_credential(), self.client_credential.as_deref()) {
@@ -263,38 +253,44 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>>
     profiles.into_iter().map(PlatformProfile::checked).collect()
 }
 
-/// Telegram's client: `profile`'s client id, authenticating with the secret
-/// its checked `client_secret_file` holds, nonempty `[A-Za-z0-9_-]` with one
-/// trailing newline aside.
-fn telegram_client(profile: &PlatformProfile) -> Result<TelegramClient> {
-    let id = profile.id;
-    let file = profile
-        .client_secret_file
-        .as_deref()
-        .ok_or_else(|| Error::Config {
-            detail: format!("platforms: {id} needs a client_secret_file"),
-        })?;
-    let path = file.display();
-    let refuse = |rule: String| Error::Config {
-        detail: format!("platforms: {id}'s client_secret_file {path} {rule}"),
-    };
-    let mut text = String::new();
-    std::fs::File::open(file)
-        .and_then(|f| f.take(MAX_SECRET_FILE_BYTES + 1).read_to_string(&mut text))
-        .map_err(|e| refuse(format!("cannot be read: {e}")))?;
-    if text.len() as u64 > MAX_SECRET_FILE_BYTES {
-        return Err(refuse(format!(
-            "is longer than {MAX_SECRET_FILE_BYTES} bytes"
-        )));
+impl TryFrom<&PlatformProfile> for TelegramClient {
+    type Error = Error;
+
+    /// `profile`'s client id, authenticating with the secret its
+    /// `client_secret_file` holds, nonempty `[A-Za-z0-9_-]` with one trailing
+    /// newline aside; refused without that file.
+    fn try_from(profile: &PlatformProfile) -> Result<TelegramClient> {
+        let id = profile.id;
+        let Some(file) = profile.client_secret_file.as_deref() else {
+            return Err(Error::Config {
+                detail: format!(
+                    "platforms: {id} carries no client_secret_file, and the bridge \
+                     swaps its code with one"
+                ),
+            });
+        };
+        let path = file.display();
+        let refuse = |rule: String| Error::Config {
+            detail: format!("platforms: {id}'s client_secret_file {path} {rule}"),
+        };
+        let mut text = String::new();
+        std::fs::File::open(file)
+            .and_then(|f| f.take(MAX_SECRET_FILE_BYTES + 1).read_to_string(&mut text))
+            .map_err(|e| refuse(format!("cannot be read: {e}")))?;
+        if text.len() as u64 > MAX_SECRET_FILE_BYTES {
+            return Err(refuse(format!(
+                "is longer than {MAX_SECRET_FILE_BYTES} bytes"
+            )));
+        }
+        let secret = text.strip_suffix("\r\n").or(text.strip_suffix('\n'));
+        let secret = secret.unwrap_or(&text);
+        // Both form-encode to themselves, so Basic carries RFC 6749's form.
+        let plain = |b: u8| b.is_ascii_alphanumeric() || b"-_".contains(&b);
+        if secret.is_empty() || !secret.bytes().all(plain) {
+            return Err(refuse("must hold nonempty [A-Za-z0-9_-]".into()));
+        }
+        Ok(TelegramClient::new(&profile.client_id, secret))
     }
-    let secret = text.strip_suffix("\r\n").or(text.strip_suffix('\n'));
-    let secret = secret.unwrap_or(&text);
-    // Both form-encode to themselves, so Basic carries RFC 6749's form.
-    let plain = |b: u8| b.is_ascii_alphanumeric() || b"-_".contains(&b);
-    if secret.is_empty() || !secret.bytes().all(plain) {
-        return Err(refuse("must hold nonempty [A-Za-z0-9_-]".into()));
-    }
-    Ok(TelegramClient::new(&profile.client_id, secret))
 }
 
 /// Whether every byte of `value` is printable ASCII carrying no whitespace.

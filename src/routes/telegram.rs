@@ -42,8 +42,8 @@ use axum::{
 /// What Telegram's routes read: the deployment's state, and Telegram.
 #[derive(Clone)]
 pub struct TelegramState {
-    pub(super) app: Arc<AppState>,
-    pub(super) telegram: Arc<Telegram>,
+    pub(crate) app: Arc<AppState>,
+    pub(crate) telegram: Arc<Telegram>,
 }
 
 /// The largest swap request body read, in bytes.
@@ -139,21 +139,40 @@ async fn read_swap(
     }
 }
 
-/// `reply`, under the admitted-origin CORS.
-fn answer(reply: Reply, origin: Option<HeaderValue>) -> Response {
-    let Reply {
-        status,
-        mut headers,
-        body,
-    } = reply;
-    headers.insert(header::VARY, HeaderValue::from_static(VARY_ON));
-    if let Some(origin) = origin {
-        headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+impl Reply {
+    /// This reply, under the admitted-origin CORS.
+    fn answer(self, origin: Option<HeaderValue>) -> Response {
+        let Reply {
+            status,
+            mut headers,
+            body,
+        } = self;
+        headers.insert(header::VARY, HeaderValue::from_static(VARY_ON));
+        if let Some(origin) = origin {
+            headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+        }
+        let mut response = Response::new(Body::from(body));
+        *response.status_mut() = status;
+        *response.headers_mut() = headers;
+        response
     }
-    let mut response = Response::new(Body::from(body));
-    *response.status_mut() = status;
-    *response.headers_mut() = headers;
-    response
+
+    /// `ok` for a `2xx` unencoded JSON swap answer without `error`, else
+    /// `upstream-error`; a refusal's `error` is logged when it is a short code.
+    fn swap_outcome(&self) -> &'static str {
+        let headers = &self.headers;
+        let readable =
+            is_json(headers) && !headers.contains_key(header::CONTENT_ENCODING);
+        let read = readable.then(|| serde_json::from_slice::<Answer>(&self.body).ok());
+        match read.flatten() {
+            Some(Answer { error: Some(error) }) => {
+                tracing::warn!(error = error.logged(), "Telegram refused the swap");
+                "upstream-error"
+            }
+            Some(Answer { error: None }) if self.status.is_success() => "ok",
+            _ => "upstream-error",
+        }
+    }
 }
 
 /// A `502` naming only the kind of failure; the error goes to the log.
@@ -161,22 +180,6 @@ fn bad_gateway(what: &str, error: CallError, origin: Option<HeaderValue>) -> Res
     tracing::warn!(kind = error.kind(), %error, "{what} gave no answer to pass on");
     let message = format!("{what} {}", error.message());
     refuse(StatusCode::BAD_GATEWAY, &message, origin)
-}
-
-/// `ok` for a `2xx` unencoded JSON answer without `error`, else
-/// `upstream-error`; a refusal's `error` is logged when it is a short code.
-fn swap_outcome(reply: &Reply) -> &'static str {
-    let headers = &reply.headers;
-    let readable = is_json(headers) && !headers.contains_key(header::CONTENT_ENCODING);
-    let read = readable.then(|| serde_json::from_slice::<Answer>(&reply.body).ok());
-    match read.flatten() {
-        Some(Answer { error: Some(error) }) => {
-            tracing::warn!(error = error.logged(), "Telegram refused the swap");
-            "upstream-error"
-        }
-        Some(Answer { error: None }) if reply.status.is_success() => "ok",
-        _ => "upstream-error",
-    }
 }
 
 /// `OPTIONS` on the swap: granting `POST` with `Content-Type`.
@@ -216,8 +219,8 @@ pub async fn token(
             .swap(&swap.code, &swap.redirect_uri, &swap.code_verifier);
     match swapped.await {
         Ok(reply) => {
-            state.app.metrics.telegram("token", swap_outcome(&reply));
-            answer(reply, origin)
+            state.app.metrics.telegram("token", reply.swap_outcome());
+            reply.answer(origin)
         }
         Err(e) => {
             state.app.metrics.telegram("token", e.kind());
@@ -242,7 +245,7 @@ pub async fn keys(
     }
     let fetched = |outcome| state.app.metrics.telegram("keys", outcome);
     match state.telegram.keys(fetched).await {
-        Ok(reply) => answer(reply, origin),
+        Ok(reply) => reply.answer(origin),
         Err(e) => bad_gateway("Telegram's key list", e, origin),
     }
 }

@@ -641,28 +641,40 @@ fn startup_refuses_an_unusable_telegram_entry_naming_the_key() {
     };
     let mut github = common::config(&[]);
     github.platforms[0].client_secret_file = Some(secret.path().into());
+    let secret_file = "telegram's client_secret_file";
+    let charset = "must hold nonempty [A-Za-z0-9_-]";
     let cases = [
         (
             entry(&|p| p.client_secret_file = Some("/nonexistent".into())),
-            "client_secret_file",
+            secret_file,
+            "/nonexistent cannot be read",
         ),
-        (file(&empty), "client_secret_file"),
-        (file(&long), "longer than 1024"),
-        (file(&spaced), "client_secret_file"),
-        (file(&plus), "client_secret_file"),
-        (entry(&|p| p.client_id = "8123x".into()), "client_id"),
+        (file(&empty), secret_file, charset),
+        (file(&long), secret_file, "is longer than 1024 bytes"),
+        (file(&spaced), secret_file, charset),
+        (file(&plus), secret_file, charset),
+        (
+            entry(&|p| p.client_id = "8123x".into()),
+            "telegram's client_id",
+            "must be digits",
+        ),
         (
             entry(&|p| p.client_secret_file = None),
             "telegram carries no client_secret_file",
+            "the bridge swaps its code with one",
         ),
-        (github, "github carries a client_secret_file"),
+        (
+            github,
+            "github carries a client_secret_file",
+            "the bridge swaps no code",
+        ),
     ];
-    for (settings, key) in cases {
+    for (settings, key, rule) in cases {
         let error = Deployment::checked(&settings).err().map(|e| e.to_string());
         let error = error.unwrap_or_default();
         assert!(
-            error.contains(key) && !error.contains(SECRET),
-            "{key}: {error}"
+            error.contains(key) && error.contains(rule) && !error.contains(SECRET),
+            "{key} {rule}: {error}"
         );
     }
 }

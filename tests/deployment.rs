@@ -224,6 +224,20 @@ mod deployment {
         );
     }
 
+    /// A Google client id carrying `"` is refused, as its proof's audience
+    /// cannot carry one; another platform's is not.
+    #[test]
+    fn a_google_client_id_carries_no_quote() {
+        let quoted = r#"[{"id":"google","client_id":"a\"b"}]"#;
+        let text = checked(quoted).unwrap_err().to_string();
+        assert!(
+            text.contains("client_id") && text.contains("quote"),
+            "{text}"
+        );
+
+        assert!(checked(r#"[{"id":"x","client_id":"a\"b"}]"#).is_ok());
+    }
+
     /// A refusal names the key as the file spells it, never the value.
     #[test]
     fn a_refused_key_is_named_and_not_quoted() {

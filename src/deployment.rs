@@ -114,11 +114,19 @@ impl PlatformId {
         matches!(self, PlatformId::Github)
     }
 
+    /// Whether this platform's client id is the audience its proof binds. The
+    /// circuit reads the audience between quotes, so it carries no `"`, and
+    /// holds it to [`MAX_GOOGLE_CLIENT_ID_BYTES`]. Google's is.
+    pub fn binds_client_id_as_audience(self) -> bool {
+        matches!(self, PlatformId::Google)
+    }
+
     /// The longest `client_id` this platform's entry carries, in bytes.
     pub fn max_client_id_bytes(self) -> usize {
-        match self {
-            PlatformId::Google => MAX_GOOGLE_CLIENT_ID_BYTES,
-            PlatformId::X | PlatformId::Github => MAX_CLIENT_ID_BYTES,
+        if self.binds_client_id_as_audience() {
+            MAX_GOOGLE_CLIENT_ID_BYTES
+        } else {
+            MAX_CLIENT_ID_BYTES
         }
     }
 }
@@ -178,6 +186,11 @@ impl PlatformProfile {
         if self.client_id.len() > max_client_id {
             return Err(refuse(format!(
                 "{id}'s client_id is longer than {max_client_id} bytes"
+            )));
+        }
+        if id.binds_client_id_as_audience() && self.client_id.contains('"') {
+            return Err(refuse(format!(
+                "{id}'s client_id carries a quote, which its proof's audience cannot"
             )));
         }
         // A credential belongs to exactly the ceremonies that send one.

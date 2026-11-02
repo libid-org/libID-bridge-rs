@@ -258,7 +258,7 @@ impl Telegram {
                 reply: reply.clone(),
             });
         } else {
-            fetched("upstream_error");
+            fetched("upstream-error");
         }
         Ok(reply)
     }

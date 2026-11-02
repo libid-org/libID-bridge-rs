@@ -164,7 +164,7 @@ fn bad_gateway(what: &str, error: CallError, origin: Option<HeaderValue>) -> Res
 }
 
 /// `ok` for a `2xx` unencoded JSON answer without `error`, else
-/// `upstream_error`; a refusal's `error` is logged when it is a short code.
+/// `upstream-error`; a refusal's `error` is logged when it is a short code.
 fn swap_outcome(reply: &Reply) -> &'static str {
     let headers = &reply.headers;
     let readable = is_json(headers) && !headers.contains_key(header::CONTENT_ENCODING);
@@ -172,10 +172,10 @@ fn swap_outcome(reply: &Reply) -> &'static str {
     match read.flatten() {
         Some(Answer { error: Some(error) }) => {
             tracing::warn!(error = error.logged(), "Telegram refused the swap");
-            "upstream_error"
+            "upstream-error"
         }
         Some(Answer { error: None }) if reply.status.is_success() => "ok",
-        _ => "upstream_error",
+        _ => "upstream-error",
     }
 }
 

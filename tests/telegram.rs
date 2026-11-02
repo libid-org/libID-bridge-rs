@@ -307,21 +307,21 @@ async fn the_swap_preflight_grants_content_type() {
 #[tokio::test]
 async fn only_a_2xx_unencoded_json_answer_without_error_counts_as_ok() {
     let replies = [
-        (200, "text/plain", None, "id_token=t", "upstream_error"),
+        (200, "text/plain", None, "id_token=t", "upstream-error"),
         (
             200,
             JSON,
             None,
             r#"{"error":"invalid_grant"}"#,
-            "upstream_error",
+            "upstream-error",
         ),
-        (401, JSON, None, r#"{"id_token":"t"}"#, "upstream_error"),
+        (401, JSON, None, r#"{"id_token":"t"}"#, "upstream-error"),
         (
             200,
             JSON,
             Some("gzip"),
             r#"{"id_token":"t"}"#,
-            "upstream_error",
+            "upstream-error",
         ),
         (200, JSON, None, r#"{"id_token":"t"}"#, "ok"),
     ];
@@ -611,7 +611,7 @@ async fn a_200_that_is_not_a_key_list_passes_through_uncached() {
             );
         }
         assert_eq!(suite.fake.seen().len(), 2, "{media}");
-        assert_eq!(suite.count("keys", "upstream_error").await, 2, "{media}");
+        assert_eq!(suite.count("keys", "upstream-error").await, 2, "{media}");
     }
 }
 

@@ -45,7 +45,7 @@ pub struct Callback {
 pub struct Telegram {
     /// `token` or `keys`.
     route: &'static str,
-    /// `ok`; `upstream_error`, a swap answered other than a `2xx` JSON body
+    /// `ok`; `upstream-error`, a swap answered other than a `2xx` JSON body
     /// without `error`; or a failed call's `status`, `redirect`, `too-large`,
     /// `unreachable` or `timeout`.
     outcome: &'static str,

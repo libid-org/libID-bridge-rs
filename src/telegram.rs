@@ -1,13 +1,18 @@
 //! Telegram's private client and the calls made with it: the code swap and
 //! the key list, each bounded in time and size, the key list cached.
 
-use std::sync::Mutex;
+use std::{
+    sync::Mutex,
+    time::Duration,
+};
 
 use base64::Engine as _;
 use bytes::Bytes;
 use http_body_util::{
     BodyExt,
     Full,
+    LengthLimitError,
+    Limited,
 };
 use hyper::{
     header,
@@ -16,56 +21,88 @@ use hyper::{
     StatusCode,
     Uri,
 };
+use hyper_util::rt::TokioExecutor;
+use tokio::time::{
+    error::Elapsed,
+    Instant,
+};
 
-use crate::outbound::USER_AGENT;
+use crate::outbound::{
+    connector,
+    reason,
+    Connector,
+    USER_AGENT,
+};
 
 /// How long one upstream call may take, dialing included.
-const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const TIMEOUT: Duration = Duration::from_secs(10);
 /// The largest token answer passed on, in bytes.
 const MAX_TOKEN_BYTES: usize = 8 * 1024;
 /// The largest key list passed on, in bytes.
 const MAX_KEYS_BYTES: usize = 64 * 1024;
 /// How long a fetched key list is served from cache: the keeper's cadence,
 /// since a new key is unusable on chain until the keeper rotates it in.
-const KEYS_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+const KEYS_TTL: Duration = Duration::from_secs(3600);
 
-type Client = hyper_util::client::legacy::Client<crate::outbound::Connector, Full<Bytes>>;
+type Client = hyper_util::client::legacy::Client<Connector, Full<Bytes>>;
 
-/// Why an upstream call gave nothing to pass on, and the detail the log gets.
-pub(crate) type Failure = (FailureKind, String);
-
-/// The kinds of upstream failure.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum FailureKind {
-    Status,
-    Redirect,
-    TooLarge,
-    Unreachable,
-    Timeout,
+/// Why a call to Telegram gave nothing to pass on.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum CallError {
+    /// Telegram could not be reached, or did not finish answering.
+    #[error("{0}")]
+    Unreachable(String),
+    /// Telegram answered with a redirect, which is refused.
+    #[error("answered {0}, a redirect this bridge does not follow")]
+    Redirect(StatusCode),
+    /// The key list answered other than `200`.
+    #[error("answered {0}")]
+    Status(StatusCode),
+    /// The body ran past its bound before it ended.
+    #[error("the body is over the {0}-byte bound")]
+    TooLarge(usize),
+    /// No answer within [`TIMEOUT`].
+    #[error("no answer within {limit} s: {0}", limit = TIMEOUT.as_secs())]
+    Timeout(#[from] Elapsed),
 }
 
-impl FailureKind {
-    /// Its metric outcome.
-    pub(crate) fn label(self) -> &'static str {
+impl CallError {
+    /// The short name this failure is counted and logged under.
+    pub(crate) fn kind(&self) -> &'static str {
         match self {
-            FailureKind::Status => "status",
-            FailureKind::Redirect => "redirect",
-            FailureKind::TooLarge => "too_large",
-            FailureKind::Unreachable => "unreachable",
-            FailureKind::Timeout => "timeout",
+            CallError::Unreachable(_) => "unreachable",
+            CallError::Redirect(_) => "redirect",
+            CallError::Status(_) => "status",
+            CallError::TooLarge(_) => "too-large",
+            CallError::Timeout(_) => "timeout",
         }
     }
 
     /// What the caller is told.
-    pub(crate) fn message(self) -> &'static str {
+    pub(crate) fn message(&self) -> &'static str {
         match self {
-            FailureKind::Status => "answered an error",
-            FailureKind::Redirect => "answered a redirect this bridge does not follow",
-            FailureKind::TooLarge => "answered more than this bridge passes on",
-            FailureKind::Unreachable => "could not be reached",
-            FailureKind::Timeout => "did not answer in time",
+            CallError::Unreachable(_) => "could not be reached",
+            CallError::Redirect(_) => "answered a redirect this bridge does not follow",
+            CallError::Status(_) => "answered an error",
+            CallError::TooLarge(_) => "answered more than this bridge passes on",
+            CallError::Timeout(_) => "did not answer in time",
         }
     }
+}
+
+/// An answer passed on: Telegram's status, its media type and encoding, and
+/// its body.
+#[derive(Clone)]
+pub(crate) struct Reply {
+    pub(crate) status: StatusCode,
+    pub(crate) headers: HeaderMap,
+    pub(crate) body: Bytes,
+}
+
+/// A key list held, and when its fetch started.
+struct Cached {
+    at: Instant,
+    reply: Reply,
 }
 
 /// Telegram's client, checked at startup. `Debug` shows no secret.
@@ -107,9 +144,9 @@ impl TelegramClient {
 /// Telegram's client, the connections to it, and the cached key list.
 pub struct Telegram {
     /// The client every call is made as.
-    pub(crate) client: TelegramClient,
+    client: TelegramClient,
     http: Client,
-    keys: Mutex<Option<(tokio::time::Instant, HeaderMap, Bytes)>>,
+    keys: Mutex<Option<Cached>>,
 }
 
 impl Telegram {
@@ -117,51 +154,45 @@ impl Telegram {
     pub fn new(client: TelegramClient) -> Telegram {
         Telegram {
             client,
-            http: hyper_util::client::legacy::Client::builder(
-                hyper_util::rt::TokioExecutor::new(),
-            )
-            .build(crate::outbound::connector()),
+            http: hyper_util::client::legacy::Client::builder(TokioExecutor::new())
+                .build(connector()),
             keys: Mutex::default(),
         }
     }
 
     /// One request within [`TIMEOUT`]: a redirect refused, the body bounded,
-    /// the answer's media type and encoding kept, a failure's detail naming
-    /// the URL.
+    /// the answer's media type and encoding kept.
     async fn call(
         &self,
         request: hyper::Request<Full<Bytes>>,
         limit: usize,
-    ) -> Result<(StatusCode, HeaderMap, Bytes), Failure> {
-        let url = request.uri().clone();
+    ) -> Result<Reply, CallError> {
         let call = async {
             let response = self
                 .http
                 .request(request)
                 .await
-                .map_err(|e| (FailureKind::Unreachable, format!("{e:?}")))?;
+                .map_err(|e| CallError::Unreachable(reason(&e)))?;
             if response.status().is_redirection() {
-                let detail = response.status().to_string();
-                return Err((FailureKind::Redirect, detail));
+                return Err(CallError::Redirect(response.status()));
             }
             let (parts, body) = response.into_parts();
-            let body = http_body_util::Limited::new(body, limit)
-                .collect()
-                .await
-                .map_err(|e| match e.is::<http_body_util::LengthLimitError>() {
-                    true => (FailureKind::TooLarge, e.to_string()),
-                    false => (FailureKind::Unreachable, e.to_string()),
-                })?;
-            let passed = copied(
-                &parts.headers,
-                &[header::CONTENT_TYPE, header::CONTENT_ENCODING],
-            );
-            Ok((parts.status, passed, body.to_bytes()))
+            let body = Limited::new(body, limit).collect().await.map_err(|e| {
+                match e.is::<LengthLimitError>() {
+                    true => CallError::TooLarge(limit),
+                    false => CallError::Unreachable(reason(&*e)),
+                }
+            })?;
+            Ok(Reply {
+                status: parts.status,
+                headers: copied(
+                    &parts.headers,
+                    &[header::CONTENT_TYPE, header::CONTENT_ENCODING],
+                ),
+                body: body.to_bytes(),
+            })
         };
-        let answer = tokio::time::timeout(TIMEOUT, call)
-            .await
-            .unwrap_or_else(|_| Err((FailureKind::Timeout, String::new())));
-        answer.map_err(|(kind, detail)| (kind, format!("{url}: {detail}")))
+        tokio::time::timeout(TIMEOUT, call).await?
     }
 
     /// Telegram's answer to swapping `code`, sent with the client secret.
@@ -170,7 +201,7 @@ impl Telegram {
         code: &str,
         redirect_uri: &str,
         code_verifier: &str,
-    ) -> Result<(StatusCode, HeaderMap, Bytes), Failure> {
+    ) -> Result<Reply, CallError> {
         let client = &self.client;
         let form = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("grant_type", "authorization_code")
@@ -190,49 +221,56 @@ impl Telegram {
         self.call(request, MAX_TOKEN_BYTES).await
     }
 
-    /// The key list's media type, encoding and bytes: cached while fresh, else
-    /// fetched, and cached only when a nonempty JSON `200`; any other `200`
-    /// passes through. Each fetch's outcome goes to `fetched`. The lock is
-    /// never held across a fetch.
+    /// The key list: cached while fresh, else fetched, and cached only when a
+    /// nonempty JSON `200`; any other `200` passes through. Each fetch's
+    /// outcome goes to `fetched`. The lock is never held across a fetch.
     pub(crate) async fn keys(
         &self,
         fetched: impl FnOnce(&'static str),
-    ) -> Result<(HeaderMap, Bytes), Failure> {
-        let cached = self.keys.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some((at, headers, body)) = cached {
-            if at.elapsed() < KEYS_TTL {
-                return Ok((headers, body));
-            }
+    ) -> Result<Reply, CallError> {
+        if let Some(fresh) = self.cached_keys() {
+            return Ok(fresh);
         }
-        let fetch = self.fetch_keys().await;
-        fetched(match &fetch {
-            Ok((.., true)) => "ok",
-            Ok((.., false)) => "upstream_error",
-            Err((kind, _)) => kind.label(),
-        });
-        fetch.map(|(headers, body, _)| (headers, body))
+        let started = Instant::now();
+        let reply = match self.fetch_keys().await {
+            Ok(reply) => reply,
+            Err(e) => {
+                fetched(e.kind());
+                return Err(e);
+            }
+        };
+        if is_json(&reply.headers) && !reply.body.is_empty() {
+            fetched("ok");
+            let cached = Cached {
+                at: started,
+                reply: reply.clone(),
+            };
+            *self.keys.lock().unwrap_or_else(|e| e.into_inner()) = Some(cached);
+        } else {
+            fetched("upstream_error");
+        }
+        Ok(reply)
     }
 
-    /// One fetch of the key list, cached as [`Telegram::keys`] says, and
-    /// whether it was cacheable.
-    async fn fetch_keys(&self) -> Result<(HeaderMap, Bytes, bool), Failure> {
+    /// The cached key list, while fresh.
+    fn cached_keys(&self) -> Option<Reply> {
+        let cached = self.keys.lock().unwrap_or_else(|e| e.into_inner());
+        let fresh = cached.as_ref().filter(|c| c.at.elapsed() < KEYS_TTL);
+        fresh.map(|c| c.reply.clone())
+    }
+
+    /// One fetch of the key list, a status other than `200` refused.
+    async fn fetch_keys(&self) -> Result<Reply, CallError> {
         let request = hyper::Request::get(self.client.jwks_url.clone())
             .header(header::ACCEPT_ENCODING, "identity")
             .header(header::USER_AGENT, USER_AGENT)
             .body(Full::default())
             .expect("a URI checked at startup");
-        let started = tokio::time::Instant::now();
-        let (status, headers, body) = self.call(request, MAX_KEYS_BYTES).await?;
-        if status != StatusCode::OK {
-            let detail = format!("{}: {status}", self.client.jwks_url);
-            return Err((FailureKind::Status, detail));
+        let reply = self.call(request, MAX_KEYS_BYTES).await?;
+        match reply.status {
+            StatusCode::OK => Ok(reply),
+            status => Err(CallError::Status(status)),
         }
-        let cacheable = is_json(&headers) && !body.is_empty();
-        if cacheable {
-            let fetched = (started, headers.clone(), body.clone());
-            *self.keys.lock().unwrap_or_else(|e| e.into_inner()) = Some(fetched);
-        }
-        Ok((headers, body, cacheable))
     }
 }
 

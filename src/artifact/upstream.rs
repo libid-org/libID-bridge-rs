@@ -37,6 +37,7 @@ use crate::{
     },
     outbound::{
         connector,
+        reason,
         Connector,
         USER_AGENT,
     },
@@ -113,21 +114,9 @@ impl FetchError {
         FetchError::Unreachable(why.to_string())
     }
 
-    /// The same, from an error whose own message names only its layer: the
-    /// chain is walked so the reason reaching an operator is the one the
-    /// socket gave.
+    /// The same, from an error whose own message names only its layer.
     fn from_source(error: impl std::error::Error) -> FetchError {
-        let mut why = error.to_string();
-        let mut source = error.source();
-        while let Some(next) = source {
-            let text = next.to_string();
-            if !why.contains(&text) {
-                why.push_str(": ");
-                why.push_str(&text);
-            }
-            source = next.source();
-        }
-        FetchError::Unreachable(why)
+        FetchError::Unreachable(reason(&error))
     }
 
     /// The short name this failure is counted under.

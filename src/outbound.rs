@@ -28,3 +28,19 @@ pub(crate) fn connector() -> Connector {
         .enable_http1()
         .wrap_connector(http)
 }
+
+/// `error` and each cause under it that it does not already quote, so the
+/// reason reaching an operator is the one the socket gave.
+pub(crate) fn reason(error: &dyn std::error::Error) -> String {
+    let mut why = error.to_string();
+    let mut source = error.source();
+    while let Some(next) = source {
+        let text = next.to_string();
+        if !why.contains(&text) {
+            why.push_str(": ");
+            why.push_str(&text);
+        }
+        source = next.source();
+    }
+    why
+}

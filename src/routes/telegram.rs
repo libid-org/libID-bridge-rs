@@ -6,6 +6,23 @@
 
 use std::sync::Arc;
 
+use super::{
+    admission,
+    grant,
+    refuse,
+    Admission,
+    UNADMITTED,
+    VARY_ON,
+};
+use crate::{
+    deployment::printable_without_whitespace,
+    state::AppState,
+    telegram::{
+        is_json,
+        CallError,
+        Reply,
+    },
+};
 use axum::{
     body::Body,
     extract::{
@@ -20,24 +37,6 @@ use axum::{
     },
     response::Response,
 };
-use bytes::Bytes;
-
-use super::{
-    admission,
-    grant,
-    refuse,
-    Admission,
-    UNADMITTED,
-    VARY_ON,
-};
-use crate::{
-    deployment::printable_without_whitespace,
-    state::AppState,
-    telegram::{
-        is_json,
-        Failure,
-    },
-};
 
 /// The largest swap request body read, in bytes.
 const MAX_SWAP_BYTES: usize = 2048;
@@ -50,7 +49,30 @@ const MAX_LOGGED_ERROR: usize = 64;
 /// A swap's answer as read for its outcome: its `error` field alone.
 #[derive(serde::Deserialize)]
 struct Answer {
-    error: Option<serde_json::Value>,
+    error: Option<ErrorField>,
+}
+
+/// A swap answer's `error`: a string, or any other JSON.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum ErrorField {
+    Code(String),
+    Other(serde::de::IgnoredAny),
+}
+
+impl ErrorField {
+    /// What the log gets: a short code, else `unreadable`.
+    fn logged(&self) -> &str {
+        match self {
+            ErrorField::Code(code)
+                if code.len() <= MAX_LOGGED_ERROR
+                    && printable_without_whitespace(code) =>
+            {
+                code
+            }
+            _ => "unreadable",
+        }
+    }
 }
 
 /// The swap request body.
@@ -97,7 +119,7 @@ async fn read_swap(
         "the request body must be {\"code\", \"codeVerifier\", \"redirectUri\"}, all strings"
     })?;
     let printable_rule =
-        format!("must be 1 to {MAX_FIELD_BYTES} bytes of printable ASCII");
+        format!("must be 1 to {MAX_FIELD_BYTES} bytes of printable ASCII without spaces");
     if !printable(&swap.code) {
         Err(format!("code {printable_rule}"))
     } else if !printable(&swap.redirect_uri) {
@@ -109,13 +131,13 @@ async fn read_swap(
     }
 }
 
-/// `status`, `headers` and `body`, under the admitted-origin CORS.
-fn answer(
-    status: StatusCode,
-    mut headers: HeaderMap,
-    origin: Option<HeaderValue>,
-    body: Bytes,
-) -> Response {
+/// `reply`, under the admitted-origin CORS.
+fn answer(reply: Reply, origin: Option<HeaderValue>) -> Response {
+    let Reply {
+        status,
+        mut headers,
+        body,
+    } = reply;
     headers.insert(header::VARY, HeaderValue::from_static(VARY_ON));
     if let Some(origin) = origin {
         headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
@@ -126,31 +148,25 @@ fn answer(
     response
 }
 
-/// A `502` naming only the kind of failure; the detail goes to the log.
-fn bad_gateway(what: &str, failure: Failure, origin: Option<HeaderValue>) -> Response {
-    let (kind, detail) = failure;
-    tracing::warn!(detail, "{what} gave no answer to pass on");
-    let message = format!("{what} {}", kind.message());
+/// A `502` naming only the kind of failure; the error goes to the log.
+fn bad_gateway(what: &str, error: CallError, origin: Option<HeaderValue>) -> Response {
+    tracing::warn!(kind = error.kind(), %error, "{what} gave no answer to pass on");
+    let message = format!("{what} {}", error.message());
     refuse(StatusCode::BAD_GATEWAY, &message, origin)
 }
 
 /// `ok` for a `2xx` unencoded JSON answer without `error`, else
 /// `upstream_error`; a refusal's `error` is logged when it is a short code.
-fn swap_outcome(status: StatusCode, headers: &HeaderMap, body: &Bytes) -> &'static str {
+fn swap_outcome(reply: &Reply) -> &'static str {
+    let headers = &reply.headers;
     let readable = is_json(headers) && !headers.contains_key(header::CONTENT_ENCODING);
-    let read = readable.then(|| serde_json::from_slice::<Answer>(body).ok());
+    let read = readable.then(|| serde_json::from_slice::<Answer>(&reply.body).ok());
     match read.flatten() {
-        Some(Answer { error: Some(code) }) => {
-            let code = code.as_str().filter(|c| {
-                c.len() <= MAX_LOGGED_ERROR && printable_without_whitespace(c)
-            });
-            tracing::warn!(
-                error = code.unwrap_or("unreadable"),
-                "Telegram refused the swap"
-            );
+        Some(Answer { error: Some(error) }) => {
+            tracing::warn!(error = error.logged(), "Telegram refused the swap");
             "upstream_error"
         }
-        Some(Answer { error: None }) if status.is_success() => "ok",
+        Some(Answer { error: None }) if reply.status.is_success() => "ok",
         _ => "upstream_error",
     }
 }
@@ -188,14 +204,12 @@ pub async fn token(
     };
     let swapped = telegram.swap(&swap.code, &swap.redirect_uri, &swap.code_verifier);
     match swapped.await {
-        Ok((status, headers, body)) => {
-            state
-                .metrics
-                .telegram("token", swap_outcome(status, &headers, &body));
-            answer(status, headers, origin, body)
+        Ok(reply) => {
+            state.metrics.telegram("token", swap_outcome(&reply));
+            answer(reply, origin)
         }
         Err(e) => {
-            state.metrics.telegram("token", e.0.label());
+            state.metrics.telegram("token", e.kind());
             bad_gateway("Telegram's token endpoint", e, origin)
         }
     }
@@ -217,7 +231,7 @@ pub async fn keys(
     }
     let fetched = |outcome| state.metrics.telegram("keys", outcome);
     match telegram.keys(fetched).await {
-        Ok((headers, body)) => answer(StatusCode::OK, headers, origin, body),
+        Ok(reply) => answer(reply, origin),
         Err(e) => bad_gateway("Telegram's key list", e, origin),
     }
 }

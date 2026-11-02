@@ -347,10 +347,10 @@ async fn an_upstream_failure_is_a_502_naming_only_its_kind() {
 
     let failed = [
         ("token", "redirect"),
-        ("token", "too_large"),
+        ("token", "too-large"),
         ("token", "timeout"),
         ("keys", "redirect"),
-        ("keys", "too_large"),
+        ("keys", "too-large"),
         ("keys", "status"),
     ];
     for (route, outcome) in failed {

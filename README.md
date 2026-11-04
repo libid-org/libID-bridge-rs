@@ -101,8 +101,8 @@ entry is the one OAuth client every version of its ceremony runs: `clientId`
 and, on exactly the platforms whose ceremony sends one — GitHub —
 `clientCredential`. Both are nonempty printable ASCII without whitespace and
 at most 512 bytes, as CCDP's `ProveIdentity` carries them, and a Google
-`clientId` at most 128 bytes without `"`, as its proof's audience carries it,
-checked at startup.
+`clientId` at most 128 bytes without `"` and a Telegram `clientId` at most 20
+digits, as their proofs' audience carries them, checked at startup.
 The record carries no redirect URI, no allowlist, no notary setting and no
 user token.
 

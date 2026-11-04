@@ -40,6 +40,10 @@ pub const MAX_CLIENT_ID_BYTES: usize = 512;
 /// configuration whose Google client id is longer.
 pub const MAX_GOOGLE_CLIENT_ID_BYTES: usize = 128;
 
+/// The longest Telegram `client_id`, in bytes. It is the token's audience,
+/// which the Telegram circuit holds to 20 bytes.
+pub const MAX_TELEGRAM_CLIENT_ID_BYTES: usize = 20;
+
 /// The longest `client_credential` a platform entry carries, in bytes, under
 /// the same `ProveIdentity` wire limits.
 pub const MAX_CLIENT_CREDENTIAL_BYTES: usize = 512;
@@ -144,7 +148,8 @@ impl PlatformId {
     pub fn audience_bytes(self) -> Option<usize> {
         match self {
             PlatformId::Google => Some(MAX_GOOGLE_CLIENT_ID_BYTES),
-            PlatformId::X | PlatformId::Github | PlatformId::Telegram => None,
+            PlatformId::Telegram => Some(MAX_TELEGRAM_CLIENT_ID_BYTES),
+            PlatformId::X | PlatformId::Github => None,
         }
     }
 

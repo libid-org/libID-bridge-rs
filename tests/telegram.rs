@@ -36,6 +36,7 @@ use libid_bridge_rs::{
         Deployment,
         PlatformId,
         PlatformProfile,
+        MAX_TELEGRAM_CLIENT_ID_BYTES,
     },
     routes::{
         build_router,
@@ -770,6 +771,16 @@ async fn a_key_list_fetched_is_counted_ok() {
     assert_eq!(suite.count(Route::Keys, "ok").await, 1);
 }
 
+/// A client id as long as the circuit's audience starts; a byte longer is
+/// refused with the other unusable entries below.
+#[test]
+fn startup_accepts_a_client_id_as_long_as_the_audience() {
+    let secret = common::ScratchFile::holding(SECRET);
+    let mut settings = settings(&secret);
+    settings.platforms[0].client_id = "1".repeat(MAX_TELEGRAM_CLIENT_ID_BYTES);
+    assert!(Deployment::checked(&settings).is_ok());
+}
+
 #[test]
 fn startup_refuses_an_unusable_telegram_entry_naming_the_key() {
     let secret = common::ScratchFile::holding(&format!("{SECRET}\r\n"));
@@ -805,6 +816,11 @@ fn startup_refuses_an_unusable_telegram_entry_naming_the_key() {
             entry(&|p| p.client_id = "8123x".into()),
             "telegram's client_id",
             "must be digits",
+        ),
+        (
+            entry(&|p| p.client_id = "1".repeat(MAX_TELEGRAM_CLIENT_ID_BYTES + 1)),
+            "telegram's client_id",
+            "is longer than 20 bytes",
         ),
         (
             entry(&|p| p.client_secret_file = None),

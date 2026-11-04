@@ -103,7 +103,8 @@ pub struct Settings {
 
     /// The enabled platforms, as `[[platforms]]` tables: each names a
     /// platform, the public client id of the one OAuth registration its
-    /// ceremony runs and, for `github`, the public client credential.
+    /// ceremony runs, for `github` the public client credential and, for
+    /// `telegram`, the file holding the private client secret.
     ///
     /// ```toml
     /// [[platforms]]

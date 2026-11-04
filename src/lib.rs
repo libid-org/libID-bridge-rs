@@ -8,10 +8,11 @@
 //!
 //! The callback document is the CCDP Distribution's artifact with this
 //! deployment's data inserted into its one slot; everything the browser runs
-//! after the callback is served by that Distribution. This service performs
-//! no token exchange, opens no notary connection, verifies no proof, holds no
-//! secret and no key of its own, keeps no ceremony state, and talks to no
-//! chain.
+//! after the callback is served by that Distribution. Where Telegram is
+//! enabled, it swaps the browser's code with Telegram's client secret, the one
+//! secret it holds, and passes Telegram's key list through. It performs no
+//! other token exchange, opens no notary connection, verifies no proof, holds
+//! no key of its own, keeps no ceremony state, and talks to no chain.
 //!
 //! The Distribution is a separate deployment and this one starts without it.
 //! The callback route says it has no document until a retrieval produces one,
@@ -25,19 +26,23 @@ pub mod deployment;
 pub mod error;
 pub mod metrics;
 pub mod origin;
+mod outbound;
 pub mod routes;
 pub mod state;
+pub mod telegram;
 
 use std::sync::Arc;
 
 use error::Result;
 use state::AppState;
 
-/// A deployment that has started: the state its routes read, and the
-/// refresher that keeps the callback document current.
+/// A deployment that has started: the state its routes read, Telegram where
+/// it is enabled, and the refresher that keeps the callback document current.
 pub struct Bridge {
     /// What the routes read.
     pub state: Arc<AppState>,
+    /// Telegram's code swap and key list, exactly where Telegram is enabled.
+    pub telegram: Option<Arc<telegram::Telegram>>,
     /// What keeps the callback document current.
     pub refresher: artifact::upstream::Refresher,
 }
@@ -51,7 +56,24 @@ impl Bridge {
     /// refresher, so a Distribution that is unreachable delays the callback
     /// document and stops nothing.
     pub fn start(settings: &config::Settings) -> Result<Bridge> {
-        let deployment = deployment::Deployment::checked(settings)?;
+        Bridge::started(deployment::Deployment::checked(settings)?)
+    }
+
+    /// Test-only: as [`Bridge::start`], Telegram's client calling `origin`'s
+    /// `/token` and `/jwks`.
+    #[cfg(feature = "test-helpers")]
+    #[doc(hidden)]
+    pub fn start_for_tests_with_telegram_at(
+        settings: &config::Settings,
+        origin: &str,
+    ) -> Result<Bridge> {
+        let mut deployment = deployment::Deployment::checked(settings)?;
+        deployment.telegram = deployment.telegram.map(|client| client.at(origin));
+        Bridge::started(deployment)
+    }
+
+    /// What the routes read for `deployment`, and its refresher.
+    fn started(deployment: deployment::Deployment) -> Result<Bridge> {
         let upstream = artifact::upstream::Upstream::new(&deployment.ccdp_origin)?;
         let (sender, callback) = tokio::sync::watch::channel(None);
         let (failed, failure) = tokio::sync::watch::channel(None);
@@ -63,6 +85,9 @@ impl Bridge {
             failure,
             metrics: metrics.clone(),
         });
+        let telegram = deployment
+            .telegram
+            .map(|client| Arc::new(telegram::Telegram::new(client)));
         let refresher = artifact::upstream::Refresher::new(
             upstream,
             deployment.allowed_origins,
@@ -70,7 +95,11 @@ impl Bridge {
             failed,
             metrics,
         );
-        Ok(Bridge { state, refresher })
+        Ok(Bridge {
+            state,
+            telegram,
+            refresher,
+        })
     }
 }
 
@@ -82,7 +111,7 @@ pub async fn serve(
     listener: tokio::net::TcpListener,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    let app = routes::build_router(bridge.state);
+    let app = routes::build_router(bridge.state, bridge.telegram);
     let refreshing =
         tokio::spawn(bridge.refresher.run(artifact::upstream::Schedule::DEPLOYED));
     let served = axum::serve(listener, app)

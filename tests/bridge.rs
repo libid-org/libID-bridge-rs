@@ -322,7 +322,7 @@ mod root {
     #[tokio::test]
     async fn building_the_router_for_a_configured_deployment_does_not_panic() {
         let state = started(&[]).await;
-        let _: axum::Router = routes::build_router(state);
+        let _: axum::Router = routes::build_router(state, None);
     }
 
     /// The bound listener answers until told to stop, and `serve` returns.

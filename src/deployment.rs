@@ -35,6 +35,11 @@ use crate::{
 /// a longer one, so every ceremony would fail on it.
 pub const MAX_CLIENT_ID_BYTES: usize = 512;
 
+/// The longest Google `client_id`, in bytes. It is the token's audience, which
+/// the Google circuit holds to 128 bytes, and the Application refuses a
+/// configuration whose Google client id is longer.
+pub const MAX_GOOGLE_CLIENT_ID_BYTES: usize = 128;
+
 /// The longest `client_credential` a platform entry carries, in bytes, under
 /// the same `ProveIdentity` wire limits.
 pub const MAX_CLIENT_CREDENTIAL_BYTES: usize = 512;
@@ -132,6 +137,21 @@ impl PlatformId {
     pub fn swaps_with_a_secret(self) -> bool {
         matches!(self, PlatformId::Telegram)
     }
+
+    /// The longest audience this platform's proof binds, in bytes, where its
+    /// client id is that audience. The circuit reads the audience between
+    /// quotes, so such a client id also carries no `"`.
+    pub fn audience_bytes(self) -> Option<usize> {
+        match self {
+            PlatformId::Google => Some(MAX_GOOGLE_CLIENT_ID_BYTES),
+            PlatformId::X | PlatformId::Github | PlatformId::Telegram => None,
+        }
+    }
+
+    /// The longest `client_id` this platform's entry carries, in bytes.
+    pub fn max_client_id_bytes(self) -> usize {
+        self.audience_bytes().unwrap_or(MAX_CLIENT_ID_BYTES)
+    }
 }
 
 /// One enabled platform, as one `[[platforms]]` table: the platform and the
@@ -155,7 +175,7 @@ pub struct PlatformProfile {
     /// Which platform: the key its entry is published under.
     pub id: PlatformId,
     /// The public OAuth client identifier: nonempty printable ASCII without
-    /// whitespace, at most [`MAX_CLIENT_ID_BYTES`].
+    /// whitespace, at most [`PlatformId::max_client_id_bytes`].
     pub client_id: String,
     /// The OAuth App's client secret, on exactly the platforms whose ceremony
     /// sends one: public application configuration, nonempty printable ASCII
@@ -170,11 +190,11 @@ pub struct PlatformProfile {
 
 impl PlatformProfile {
     /// This table checked: a client id of nonempty printable ASCII without
-    /// whitespace within [`MAX_CLIENT_ID_BYTES`], and a credential of the same
-    /// within [`MAX_CLIENT_CREDENTIAL_BYTES`] exactly where the platform's
-    /// ceremony sends one; Telegram's client id is digits, and no secret file
-    /// is named where the bridge swaps no code. A refusal names the key as the
-    /// file spells it, never the value.
+    /// whitespace within [`PlatformId::max_client_id_bytes`], and a credential
+    /// of the same within [`MAX_CLIENT_CREDENTIAL_BYTES`] exactly where the
+    /// platform's ceremony sends one; Telegram's client id is digits, and no
+    /// secret file is named where the bridge swaps no code. A refusal names the
+    /// key as the file spells it, never the value.
     pub fn checked(self) -> Result<PlatformProfile> {
         let id = self.id;
         let refuse = |detail: String| Error::Config {
@@ -190,9 +210,15 @@ impl PlatformProfile {
                 "{id}'s client_id is not printable ASCII without whitespace"
             )));
         }
-        if self.client_id.len() > MAX_CLIENT_ID_BYTES {
+        let max_client_id = id.max_client_id_bytes();
+        if self.client_id.len() > max_client_id {
             return Err(refuse(format!(
-                "{id}'s client_id is longer than {MAX_CLIENT_ID_BYTES} bytes"
+                "{id}'s client_id is longer than {max_client_id} bytes"
+            )));
+        }
+        if id.audience_bytes().is_some() && self.client_id.contains('"') {
+            return Err(refuse(format!(
+                "{id}'s client_id carries a quote, which its proof's audience cannot"
             )));
         }
         if id == PlatformId::Telegram

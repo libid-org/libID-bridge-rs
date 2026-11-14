@@ -1,9 +1,13 @@
 //! What a deployment is, checked once at startup: the Distribution it
 //! selects, the origins it admits, the platforms it enables with the OAuth
 //! client each runs, and the public ceremony configuration composed from
-//! them. Nothing here is retrieved or bound.
+//! them. Nothing here is bound; only Telegram's client secret is read.
 
-use std::sync::Arc;
+use std::{
+    io::Read as _,
+    path::PathBuf,
+    sync::Arc,
+};
 
 use bytes::Bytes;
 use serde::Deserialize;
@@ -23,6 +27,7 @@ use crate::{
         Admitted,
         Origin,
     },
+    telegram::TelegramClient,
 };
 
 /// The longest `client_id` a platform entry carries, in bytes. The Application
@@ -35,9 +40,16 @@ pub const MAX_CLIENT_ID_BYTES: usize = 512;
 /// configuration whose Google client id is longer.
 pub const MAX_GOOGLE_CLIENT_ID_BYTES: usize = 128;
 
+/// The longest Telegram `client_id`, in bytes. It is the token's audience,
+/// which the Telegram circuit holds to 20 bytes.
+pub const MAX_TELEGRAM_CLIENT_ID_BYTES: usize = 20;
+
 /// The longest `client_credential` a platform entry carries, in bytes, under
 /// the same `ProveIdentity` wire limits.
 pub const MAX_CLIENT_CREDENTIAL_BYTES: usize = 512;
+
+/// The largest Telegram `client_secret_file` read, in bytes.
+const MAX_SECRET_FILE_BYTES: u64 = 1024;
 
 /// The checked inputs of one deployment.
 pub struct Deployment {
@@ -49,6 +61,8 @@ pub struct Deployment {
     pub allowed_origins: Arc<[Admitted]>,
     /// The enabled platforms, each with the client its ceremony runs.
     pub platforms: Vec<PlatformProfile>,
+    /// Telegram's private client, exactly where Telegram is enabled.
+    pub telegram: Option<TelegramClient>,
 }
 
 impl Deployment {
@@ -73,10 +87,16 @@ impl Deployment {
             set.into()
         };
         let platforms = platforms(settings.platforms.clone())?;
+        let telegram = platforms
+            .iter()
+            .find(|p| p.id == PlatformId::Telegram)
+            .map(TelegramClient::try_from)
+            .transpose()?;
         Ok(Deployment {
             ccdp_origin,
             allowed_origins,
             platforms,
+            telegram,
         })
     }
 
@@ -104,6 +124,8 @@ pub enum PlatformId {
     X,
     /// Keyed `github`.
     Github,
+    /// Keyed `telegram`.
+    Telegram,
 }
 
 impl PlatformId {
@@ -114,12 +136,19 @@ impl PlatformId {
         matches!(self, PlatformId::Github)
     }
 
+    /// Whether the bridge swaps this platform's code with a private client
+    /// secret. Telegram's, and no other.
+    pub fn swaps_with_a_secret(self) -> bool {
+        matches!(self, PlatformId::Telegram)
+    }
+
     /// The longest audience this platform's proof binds, in bytes, where its
     /// client id is that audience. The circuit reads the audience between
     /// quotes, so such a client id also carries no `"`.
     pub fn audience_bytes(self) -> Option<usize> {
         match self {
             PlatformId::Google => Some(MAX_GOOGLE_CLIENT_ID_BYTES),
+            PlatformId::Telegram => Some(MAX_TELEGRAM_CLIENT_ID_BYTES),
             PlatformId::X | PlatformId::Github => None,
         }
     }
@@ -158,14 +187,19 @@ pub struct PlatformProfile {
     /// without whitespace, at most [`MAX_CLIENT_CREDENTIAL_BYTES`].
     #[serde(default)]
     pub client_credential: Option<String>,
+    /// The file holding the private client secret, on exactly the platforms
+    /// whose code the bridge swaps: never published.
+    #[serde(default)]
+    pub client_secret_file: Option<PathBuf>,
 }
 
 impl PlatformProfile {
     /// This table checked: a client id of nonempty printable ASCII without
     /// whitespace within [`PlatformId::max_client_id_bytes`], and a credential
     /// of the same within [`MAX_CLIENT_CREDENTIAL_BYTES`] exactly where the
-    /// platform's ceremony sends one. A refusal names the key as the file
-    /// spells it, never the value.
+    /// platform's ceremony sends one; Telegram's client id is digits, and no
+    /// secret file is named where the bridge swaps no code. A refusal names the
+    /// key as the file spells it, never the value.
     pub fn checked(self) -> Result<PlatformProfile> {
         let id = self.id;
         let refuse = |detail: String| Error::Config {
@@ -190,6 +224,16 @@ impl PlatformProfile {
         if id.audience_bytes().is_some() && self.client_id.contains('"') {
             return Err(refuse(format!(
                 "{id}'s client_id carries a quote, which its proof's audience cannot"
+            )));
+        }
+        if id == PlatformId::Telegram
+            && !self.client_id.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err(refuse(format!("{id}'s client_id must be digits")));
+        }
+        if !id.swaps_with_a_secret() && self.client_secret_file.is_some() {
+            return Err(refuse(format!(
+                "{id} carries a client_secret_file, and the bridge swaps no code for it"
             )));
         }
         // A credential belongs to exactly the ceremonies that send one.
@@ -240,10 +284,48 @@ pub fn platforms(profiles: Vec<PlatformProfile>) -> Result<Vec<PlatformProfile>>
     profiles.into_iter().map(PlatformProfile::checked).collect()
 }
 
-/// Whether every byte of `value` is printable ASCII carrying no whitespace,
-/// which is what a public client identifier and a public client credential
-/// are made of.
-fn printable_without_whitespace(value: &str) -> bool {
+impl TryFrom<&PlatformProfile> for TelegramClient {
+    type Error = Error;
+
+    /// `profile`'s client id, authenticating with the secret its
+    /// `client_secret_file` holds, nonempty `[A-Za-z0-9_-]` with one trailing
+    /// newline aside; refused without that file.
+    fn try_from(profile: &PlatformProfile) -> Result<TelegramClient> {
+        let id = profile.id;
+        let Some(file) = profile.client_secret_file.as_deref() else {
+            return Err(Error::Config {
+                detail: format!(
+                    "platforms: {id} carries no client_secret_file, and the bridge \
+                     swaps its code with one"
+                ),
+            });
+        };
+        let path = file.display();
+        let refuse = |rule: String| Error::Config {
+            detail: format!("platforms: {id}'s client_secret_file {path} {rule}"),
+        };
+        let mut text = String::new();
+        std::fs::File::open(file)
+            .and_then(|f| f.take(MAX_SECRET_FILE_BYTES + 1).read_to_string(&mut text))
+            .map_err(|e| refuse(format!("cannot be read: {e}")))?;
+        if text.len() as u64 > MAX_SECRET_FILE_BYTES {
+            return Err(refuse(format!(
+                "is longer than {MAX_SECRET_FILE_BYTES} bytes"
+            )));
+        }
+        let secret = text.strip_suffix("\r\n").or(text.strip_suffix('\n'));
+        let secret = secret.unwrap_or(&text);
+        // Both form-encode to themselves, so Basic carries RFC 6749's form.
+        let plain = |b: u8| b.is_ascii_alphanumeric() || b"-_".contains(&b);
+        if secret.is_empty() || !secret.bytes().all(plain) {
+            return Err(refuse("must hold nonempty [A-Za-z0-9_-]".into()));
+        }
+        Ok(TelegramClient::new(&profile.client_id, secret))
+    }
+}
+
+/// Whether every byte of `value` is printable ASCII carrying no whitespace.
+pub(crate) fn printable_without_whitespace(value: &str) -> bool {
     value.bytes().all(|b| (0x21..=0x7E).contains(&b))
 }
 

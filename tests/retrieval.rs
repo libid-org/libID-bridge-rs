@@ -236,7 +236,9 @@ mod upstream {
     #[tokio::test]
     async fn the_loop_survives_a_failed_refresh_and_replaces_on_a_later_one() {
         let (distribution, bridge, before) = deployed().await;
-        let libid_bridge_rs::Bridge { state, refresher } = bridge;
+        let libid_bridge_rs::Bridge {
+            state, refresher, ..
+        } = bridge;
 
         // Answered in order, then the standing replacement.
         distribution.answers_next(Reply {

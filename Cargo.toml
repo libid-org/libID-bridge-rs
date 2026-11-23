@@ -28,11 +28,11 @@ hyper-rustls = { version = "0.27.10", default-features = false, features = [
     "tls12",
 ] }
 # What this deployment counts, in the Prometheus text exposition format.
-prometheus-client = "0.25"
+prometheus-client = "0.26"
 
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1.2"
 serde_json = "1.0"
 thiserror = "2"
 tokio = { version = "1", features = [
@@ -48,7 +48,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 # Telegram's code swap authenticates with HTTP Basic.
-base64 = "0.22"
+base64 = "0.23"
 strum = { version = "0.28", features = ["derive"] }
 
 [features]
@@ -60,8 +60,8 @@ libid-bridge-rs = { path = ".", features = ["test-helpers"] }
 tower = { version = "0.5", features = ["util"] }
 # The fixture Distribution hashes the code it serves, the way a Distribution's
 # build does, and answers one body in chunks.
-base64 = "0.22"
-sha2 = "0.10"
+base64 = "0.23"
+sha2 = "0.11"
 futures-util = "0.3"
 # The fixture builds a configuration the way the binary parses one.
 clap = { version = "4", features = ["derive", "env"] }
@@ -72,5 +72,5 @@ hyper = { version = "1", features = ["client", "http1"] }
 bytes = "1"
 
 # A self-signed certificate for a fixture Distribution that speaks TLS.
-rcgen = "0.13"
+rcgen = "0.14"
 tokio-rustls = { version = "0.26.5", default-features = false, features = ["ring", "tls12", "logging"] }
